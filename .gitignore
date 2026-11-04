@@ -13,3 +13,13 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+
+
+.env
+.env.*
+!.env.example
+local.properties
+*.keystore
+*.jks
+secrets/
