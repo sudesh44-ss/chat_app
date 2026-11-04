@@ -1,25 +1,56 @@
+# ==========================================
+# NEXA Project — Production .gitignore
+# ==========================================
+
+# 1. Android & Gradle Build Artifacts
+.gradle/
+build/
+app/build/
 *.iml
-.gradle
-/local.properties
-/.idea/caches
-/.idea/libraries
-/.idea/modules.xml
-/.idea/workspace.xml
-/.idea/navEditor.xml
-/.idea/assetWizardSettings.xml
-.DS_Store
-/build
-/captures
-.externalNativeBuild
-.cxx
+.idea/
+captures/
+.externalNativeBuild/
+.cxx/
 local.properties
 
+# 2. Go Backend Compiled Binaries & Caches
+backend/server.exe
+backend/server_linux
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+backend/data/
+data/
 
+# 3. APK & AAB Packages
+*.apk
+*.aab
+*.ap_
 
+# 4. Keystores, Certificates & Secrets
+*.keystore
+*.jks
+release.keystore
+secrets/
 .env
 .env.*
 !.env.example
-local.properties
-*.keystore
-*.jks
-secrets/
+
+# 5. OS & IDE Metadata
+.DS_Store
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# 6. Local Test Logs & Diagnostic Dumps
+*.log
+nexa-google-login-log.txt
+NEXA_ACTIVITY_STATE.txt
+NEXA_LAUNCH_1_LOG.txt
+NEXA_PACKAGE_INFO.txt
+NEXA_STARTUP_CRASH_FULL.txt
+*.tmp
+screen*.png
+uidump.xml
