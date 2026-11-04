@@ -1,0 +1,83 @@
+package com.nexa.app.core.theme
+
+import android.app.Activity
+import android.os.Build
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+
+private val DarkColorScheme = darkColorScheme(
+    primary = NexaCyan80,
+    secondary = NexaCyanGrey80,
+    tertiary = NexaAccent80,
+    background = NexaDarkBackground,
+    surface = NexaDarkSurface,
+    surfaceVariant = NexaDarkSurfaceVariant,
+    onPrimary = NexaDarkBackground,
+    onSecondary = NexaDarkBackground,
+    onTertiary = NexaDarkBackground,
+    onBackground = NexaLightBackground,
+    onSurface = NexaLightBackground,
+    outline = NexaDarkCardBorder
+)
+
+private val LightColorScheme = lightColorScheme(
+    primary = NexaCyan40,
+    secondary = NexaCyanGrey40,
+    tertiary = NexaAccent40,
+    background = NexaLightBackground,
+    surface = NexaLightSurface,
+    surfaceVariant = NexaLightSurfaceVariant,
+    onPrimary = NexaLightSurface,
+    onSecondary = NexaLightSurface,
+    onTertiary = NexaLightSurface,
+    onBackground = NexaDarkBackground,
+    onSurface = NexaDarkBackground,
+    outline = NexaLightCardBorder
+)
+
+@Composable
+fun NexaTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    dynamicColor: Boolean = false, // Preserve brand identity by default
+    content: @Composable () -> Unit
+) {
+    val colorScheme = when {
+        dynamicColor && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+            val context = LocalContext.current
+            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+        }
+        darkTheme -> DarkColorScheme
+        else -> LightColorScheme
+    }
+
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as? Activity)?.window
+            if (window != null) {
+                @Suppress("DEPRECATION")
+                if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+                    window.statusBarColor = colorScheme.background.toArgb()
+                }
+                WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
+            }
+
+        }
+    }
+
+    MaterialTheme(
+        colorScheme = colorScheme,
+        typography = Typography,
+        content = content
+    )
+}

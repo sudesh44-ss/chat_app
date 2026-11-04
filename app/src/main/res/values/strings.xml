@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">nexa_chat</string>
+    <string name="google_web_client_id" translatable="false">356056510017-grmokt7u1sch6hdk9dbah85k2jqe32v2.apps.googleusercontent.com</string>
+</resources>

@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  # Ephemeral In-Memory Redis (Disk persistence disabled: Zero disk storage cost)
+  redis:
+    image: redis:7-alpine
+    container_name: nexa-redis-ephemeral
+    restart: unless-stopped
+    command: >
+      redis-server 
+      --save "" 
+      --appendonly no 
+      --maxmemory 256mb 
+      --maxmemory-policy volatile-ttl
+    ports:
+      - "6379:6379"
+
+  # Lightweight Go WebSocket Relay Service
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexa-relay-server
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - PORT=8080
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - redis
+
+  # Standalone On-Demand Swarm Seeding Coordinator
+  swarm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexa-swarm-coordinator
+    command: ["./nexa-swarm"]
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - PORT=8081
+
+  # Standalone Ephemeral Blind Ciphertext Relay
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexa-blind-relay
+    command: ["./nexa-blind-relay"]
+    restart: unless-stopped
+    ports:
+      - "8082:8082"
+    environment:
+      - PORT=8082
+
+  # Standalone WebRTC P2P Signaling Hub
+  signaling:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexa-signaling-hub
+    command: ["./nexa-signaling"]
+    restart: unless-stopped
+    ports:
+      - "8083:8083"
+    environment:
+      - PORT=8083
+
+  # Zero-Knowledge Cryptographic Handshake & Ephemeral Dispatch Server
+  handshake:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexa-handshake-dispatch
+    command: ["./nexa-handshake"]
+    restart: unless-stopped
+    ports:
+      - "8084:8084"
+    environment:
+      - PORT=8084
+
+  # Day-0 Instant Cryptographic QR Contact Sync Relay
+  qr-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexa-qr-sync-relay
+    command: ["./nexa-qr-sync"]
+    restart: unless-stopped
+    ports:
+      - "8085:8085"
+    environment:
+      - PORT=8085
+
+  # Client-Side Security Signature & Differential OTA Rules Distribution Service
+  security-rules:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nexa-security-rules
+    command: ["./nexa-security-rules"]
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      - PORT=8086

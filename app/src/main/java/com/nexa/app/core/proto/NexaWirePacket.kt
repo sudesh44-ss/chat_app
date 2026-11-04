@@ -1,0 +1,554 @@
+package com.nexa.app.core.proto
+
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
+
+enum class PacketType(val value: Int) {
+    PACKET_UNKNOWN(0),
+    PACKET_MESSAGE(1),
+    PACKET_ACK(2),
+    PACKET_PING(3),
+    PACKET_AUTH_CHALLENGE(4),
+    PACKET_AUTH_RESPONSE(5),
+    PACKET_AUTH_SUCCESS(6),
+    PACKET_AUTH_FAILURE(7),
+    PACKET_TYPING(10),
+    PACKET_DEVICE_SYNC(11);
+
+    companion object {
+        fun fromValue(v: Int): PacketType = entries.find { it.value == v } ?: PACKET_UNKNOWN
+    }
+}
+
+enum class AckStatus(val value: Int) {
+    ACK_UNKNOWN(0),
+    ACK_SERVER_RECEIVED(1),
+    ACK_DEVICE_DELIVERED(2),
+    ACK_DEVICE_READ(3);
+
+    companion object {
+        fun fromValue(v: Int): AckStatus = entries.find { it.value == v } ?: ACK_UNKNOWN
+    }
+}
+
+data class EncryptedMessagePayload(
+    val conversationSeq: Long = 0L,
+    val ciphertext: ByteArray = ByteArray(0),
+    val nonce: ByteArray = ByteArray(0),
+    val authTag: ByteArray = ByteArray(0)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as EncryptedMessagePayload
+        if (conversationSeq != other.conversationSeq) return false
+        if (!ciphertext.contentEquals(other.ciphertext)) return false
+        if (!nonce.contentEquals(other.nonce)) return false
+        if (!authTag.contentEquals(other.authTag)) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = conversationSeq.hashCode()
+        result = 31 * result + ciphertext.contentHashCode()
+        result = 31 * result + nonce.contentHashCode()
+        result = 31 * result + authTag.contentHashCode()
+        return result
+    }
+}
+
+data class DeliveryAckPayload(
+    val originalPacketId: String = "",
+    val status: AckStatus = AckStatus.ACK_UNKNOWN
+)
+
+data class AuthChallengePayload(
+    val challengeNonce: ByteArray = ByteArray(0),
+    val timestamp: Long = 0L,
+    val expiresAt: Long = 0L
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as AuthChallengePayload
+        if (!challengeNonce.contentEquals(other.challengeNonce)) return false
+        if (timestamp != other.timestamp) return false
+        if (expiresAt != other.expiresAt) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = challengeNonce.contentHashCode()
+        result = 31 * result + timestamp.hashCode()
+        result = 31 * result + expiresAt.hashCode()
+        return result
+    }
+}
+
+data class AuthResponsePayload(
+    val signature: ByteArray = ByteArray(0),
+    val publicKey: ByteArray = ByteArray(0),
+    val timestamp: Long = 0L
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as AuthResponsePayload
+        if (!signature.contentEquals(other.signature)) return false
+        if (!publicKey.contentEquals(other.publicKey)) return false
+        if (timestamp != other.timestamp) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = signature.contentHashCode()
+        result = 31 * result + publicKey.contentHashCode()
+        result = 31 * result + timestamp.hashCode()
+        return result
+    }
+}
+
+data class TypingPayload(
+    val conversationId: String = "",
+    val isTyping: Boolean = false
+)
+
+data class DeviceSyncPayload(
+    val syncId: String = "",
+    val sourceDeviceId: String = "",
+    val sequenceNumber: Long = 0L,
+    val encryptedPayload: ByteArray = ByteArray(0)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as DeviceSyncPayload
+        if (syncId != other.syncId) return false
+        if (sourceDeviceId != other.sourceDeviceId) return false
+        if (sequenceNumber != other.sequenceNumber) return false
+        if (!encryptedPayload.contentEquals(other.encryptedPayload)) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = syncId.hashCode()
+        result = 31 * result + sourceDeviceId.hashCode()
+        result = 31 * result + sequenceNumber.hashCode()
+        result = 31 * result + encryptedPayload.contentHashCode()
+        return result
+    }
+}
+
+data class NexaWirePacket(
+    val packetId: String = "",
+    val type: PacketType = PacketType.PACKET_UNKNOWN,
+    val senderNxId: String = "",
+    val recipientNxId: String = "",
+    val timestamp: Long = 0L,
+    val message: EncryptedMessagePayload? = null,
+    val ack: DeliveryAckPayload? = null,
+    val authChallenge: AuthChallengePayload? = null,
+    val authResponse: AuthResponsePayload? = null,
+    val typing: TypingPayload? = null,
+    val deviceSync: DeviceSyncPayload? = null
+) {
+    /**
+     * Serializes this packet into standard binary Protobuf wire format.
+     */
+    fun encode(): ByteArray {
+        val out = ByteArrayOutputStream()
+
+        // Field 1: packet_id (string, wire type 2)
+        if (packetId.isNotEmpty()) {
+            writeTag(out, 1, 2)
+            writeLengthDelimited(out, packetId.toByteArray(Charsets.UTF_8))
+        }
+
+        // Field 2: type (enum, wire type 0)
+        if (type != PacketType.PACKET_UNKNOWN) {
+            writeTag(out, 2, 0)
+            writeVarint(out, type.value.toLong())
+        }
+
+        // Field 3: sender_nx_id (string, wire type 2)
+        if (senderNxId.isNotEmpty()) {
+            writeTag(out, 3, 2)
+            writeLengthDelimited(out, senderNxId.toByteArray(Charsets.UTF_8))
+        }
+
+        // Field 4: recipient_nx_id (string, wire type 2)
+        if (recipientNxId.isNotEmpty()) {
+            writeTag(out, 4, 2)
+            writeLengthDelimited(out, recipientNxId.toByteArray(Charsets.UTF_8))
+        }
+
+        // Field 5: timestamp (int64, wire type 0)
+        if (timestamp != 0L) {
+            writeTag(out, 5, 0)
+            writeVarint(out, timestamp)
+        }
+
+        // Field 6: message (EncryptedMessagePayload, wire type 2)
+        message?.let { msg ->
+            val msgOut = ByteArrayOutputStream()
+            if (msg.conversationSeq != 0L) {
+                writeTag(msgOut, 1, 0)
+                writeVarint(msgOut, msg.conversationSeq)
+            }
+            if (msg.ciphertext.isNotEmpty()) {
+                writeTag(msgOut, 2, 2)
+                writeLengthDelimited(msgOut, msg.ciphertext)
+            }
+            if (msg.nonce.isNotEmpty()) {
+                writeTag(msgOut, 3, 2)
+                writeLengthDelimited(msgOut, msg.nonce)
+            }
+            if (msg.authTag.isNotEmpty()) {
+                writeTag(msgOut, 4, 2)
+                writeLengthDelimited(msgOut, msg.authTag)
+            }
+
+            writeTag(out, 6, 2)
+            writeLengthDelimited(out, msgOut.toByteArray())
+        }
+
+        // Field 7: ack (DeliveryAckPayload, wire type 2)
+        ack?.let { a ->
+            val ackOut = ByteArrayOutputStream()
+            if (a.originalPacketId.isNotEmpty()) {
+                writeTag(ackOut, 1, 2)
+                writeLengthDelimited(ackOut, a.originalPacketId.toByteArray(Charsets.UTF_8))
+            }
+            if (a.status != AckStatus.ACK_UNKNOWN) {
+                writeTag(ackOut, 2, 0)
+                writeVarint(ackOut, a.status.value.toLong())
+            }
+
+            writeTag(out, 7, 2)
+            writeLengthDelimited(out, ackOut.toByteArray())
+        }
+
+        // Field 8: auth_challenge (AuthChallengePayload, wire type 2)
+        authChallenge?.let { ac ->
+            val acOut = ByteArrayOutputStream()
+            if (ac.challengeNonce.isNotEmpty()) {
+                writeTag(acOut, 1, 2)
+                writeLengthDelimited(acOut, ac.challengeNonce)
+            }
+            if (ac.timestamp != 0L) {
+                writeTag(acOut, 2, 0)
+                writeVarint(acOut, ac.timestamp)
+            }
+            if (ac.expiresAt != 0L) {
+                writeTag(acOut, 3, 0)
+                writeVarint(acOut, ac.expiresAt)
+            }
+
+            writeTag(out, 8, 2)
+            writeLengthDelimited(out, acOut.toByteArray())
+        }
+
+        // Field 9: auth_response (AuthResponsePayload, wire type 2)
+        authResponse?.let { ar ->
+            val arOut = ByteArrayOutputStream()
+            if (ar.signature.isNotEmpty()) {
+                writeTag(arOut, 1, 2)
+                writeLengthDelimited(arOut, ar.signature)
+            }
+            if (ar.publicKey.isNotEmpty()) {
+                writeTag(arOut, 2, 2)
+                writeLengthDelimited(arOut, ar.publicKey)
+            }
+            if (ar.timestamp != 0L) {
+                writeTag(arOut, 3, 0)
+                writeVarint(arOut, ar.timestamp)
+            }
+
+            writeTag(out, 9, 2)
+            writeLengthDelimited(out, arOut.toByteArray())
+        }
+
+        // Field 10: typing (TypingPayload, wire type 2)
+        typing?.let { t ->
+            val tOut = ByteArrayOutputStream()
+            if (t.conversationId.isNotEmpty()) {
+                writeTag(tOut, 1, 2)
+                writeLengthDelimited(tOut, t.conversationId.toByteArray(Charsets.UTF_8))
+            }
+            writeTag(tOut, 2, 0)
+            writeVarint(tOut, if (t.isTyping) 1L else 0L)
+
+            writeTag(out, 10, 2)
+            writeLengthDelimited(out, tOut.toByteArray())
+        }
+
+        // Field 11: device_sync (DeviceSyncPayload, wire type 2)
+        deviceSync?.let { ds ->
+            val dsOut = ByteArrayOutputStream()
+            if (ds.syncId.isNotEmpty()) {
+                writeTag(dsOut, 1, 2)
+                writeLengthDelimited(dsOut, ds.syncId.toByteArray(Charsets.UTF_8))
+            }
+            if (ds.sourceDeviceId.isNotEmpty()) {
+                writeTag(dsOut, 2, 2)
+                writeLengthDelimited(dsOut, ds.sourceDeviceId.toByteArray(Charsets.UTF_8))
+            }
+            if (ds.sequenceNumber != 0L) {
+                writeTag(dsOut, 3, 0)
+                writeVarint(dsOut, ds.sequenceNumber)
+            }
+            if (ds.encryptedPayload.isNotEmpty()) {
+                writeTag(dsOut, 4, 2)
+                writeLengthDelimited(dsOut, ds.encryptedPayload)
+            }
+
+            writeTag(out, 11, 2)
+            writeLengthDelimited(out, dsOut.toByteArray())
+        }
+
+        return out.toByteArray()
+    }
+
+    companion object {
+        /**
+         * Deserializes a binary Protobuf wire packet into NexaWirePacket.
+         */
+        fun decode(bytes: ByteArray): NexaWirePacket {
+            val input = ByteArrayInputStream(bytes)
+            var packetId = ""
+            var type = PacketType.PACKET_UNKNOWN
+            var senderNxId = ""
+            var recipientNxId = ""
+            var timestamp = 0L
+            var message: EncryptedMessagePayload? = null
+            var ack: DeliveryAckPayload? = null
+            var authChallenge: AuthChallengePayload? = null
+            var authResponse: AuthResponsePayload? = null
+            var typing: TypingPayload? = null
+            var deviceSync: DeviceSyncPayload? = null
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> packetId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    2 -> type = PacketType.fromValue(readVarint(input).toInt())
+                    3 -> senderNxId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    4 -> recipientNxId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    5 -> timestamp = readVarint(input)
+                    6 -> message = decodeMessagePayload(readLengthDelimited(input))
+                    7 -> ack = decodeAckPayload(readLengthDelimited(input))
+                    8 -> authChallenge = decodeAuthChallengePayload(readLengthDelimited(input))
+                    9 -> authResponse = decodeAuthResponsePayload(readLengthDelimited(input))
+                    10 -> typing = decodeTypingPayload(readLengthDelimited(input))
+                    11 -> deviceSync = decodeDeviceSyncPayload(readLengthDelimited(input))
+                    else -> skipField(input, wireType)
+                }
+            }
+
+            return NexaWirePacket(
+                packetId = packetId,
+                type = type,
+                senderNxId = senderNxId,
+                recipientNxId = recipientNxId,
+                timestamp = timestamp,
+                message = message,
+                ack = ack,
+                authChallenge = authChallenge,
+                authResponse = authResponse,
+                typing = typing,
+                deviceSync = deviceSync
+            )
+        }
+
+        private fun decodeMessagePayload(bytes: ByteArray): EncryptedMessagePayload {
+            val input = ByteArrayInputStream(bytes)
+            var seq = 0L
+            var ct = ByteArray(0)
+            var nonce = ByteArray(0)
+            var authTag = ByteArray(0)
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> seq = readVarint(input)
+                    2 -> ct = readLengthDelimited(input)
+                    3 -> nonce = readLengthDelimited(input)
+                    4 -> authTag = readLengthDelimited(input)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return EncryptedMessagePayload(seq, ct, nonce, authTag)
+        }
+
+        private fun decodeAckPayload(bytes: ByteArray): DeliveryAckPayload {
+            val input = ByteArrayInputStream(bytes)
+            var origId = ""
+            var status = AckStatus.ACK_UNKNOWN
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> origId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    2 -> status = AckStatus.fromValue(readVarint(input).toInt())
+                    else -> skipField(input, wireType)
+                }
+            }
+            return DeliveryAckPayload(origId, status)
+        }
+
+        private fun decodeAuthChallengePayload(bytes: ByteArray): AuthChallengePayload {
+            val input = ByteArrayInputStream(bytes)
+            var nonce = ByteArray(0)
+            var ts = 0L
+            var exp = 0L
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> nonce = readLengthDelimited(input)
+                    2 -> ts = readVarint(input)
+                    3 -> exp = readVarint(input)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return AuthChallengePayload(nonce, ts, exp)
+        }
+
+        private fun decodeAuthResponsePayload(bytes: ByteArray): AuthResponsePayload {
+            val input = ByteArrayInputStream(bytes)
+            var sig = ByteArray(0)
+            var pub = ByteArray(0)
+            var ts = 0L
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> sig = readLengthDelimited(input)
+                    2 -> pub = readLengthDelimited(input)
+                    3 -> ts = readVarint(input)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return AuthResponsePayload(sig, pub, ts)
+        }
+
+        private fun decodeTypingPayload(bytes: ByteArray): TypingPayload {
+            val input = ByteArrayInputStream(bytes)
+            var conversationId = ""
+            var isTyping = false
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> conversationId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    2 -> isTyping = readVarint(input) != 0L
+                    else -> skipField(input, wireType)
+                }
+            }
+            return TypingPayload(conversationId, isTyping)
+        }
+
+        private fun decodeDeviceSyncPayload(bytes: ByteArray): DeviceSyncPayload {
+            val input = ByteArrayInputStream(bytes)
+            var syncId = ""
+            var sourceDeviceId = ""
+            var seq = 0L
+            var encrypted = ByteArray(0)
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> syncId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    2 -> sourceDeviceId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    3 -> seq = readVarint(input)
+                    4 -> encrypted = readLengthDelimited(input)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return DeviceSyncPayload(syncId, sourceDeviceId, seq, encrypted)
+        }
+
+        private fun writeTag(out: OutputStream, fieldNum: Int, wireType: Int) {
+            val tag = ((fieldNum shl 3) or (wireType and 0x07)).toLong()
+            writeVarint(out, tag)
+        }
+
+        private fun writeVarint(out: OutputStream, value: Long) {
+            var v = value
+            while (true) {
+                if ((v and 0x7FL.inv()) == 0L) {
+                    out.write(v.toInt())
+                    return
+                } else {
+                    out.write(((v.toInt() and 0x7F) or 0x80))
+                    v = v ushr 7
+                }
+            }
+        }
+
+        private fun readVarint(input: InputStream): Long {
+            var result = 0L
+            var shift = 0
+            while (shift < 64) {
+                val b = input.read()
+                if (b == -1) break
+                result = result or ((b and 0x7F).toLong() shl shift)
+                if ((b and 0x80) == 0) return result
+                shift += 7
+            }
+            return result
+        }
+
+        private fun writeLengthDelimited(out: OutputStream, data: ByteArray) {
+            writeVarint(out, data.size.toLong())
+            out.write(data)
+        }
+
+        private fun readLengthDelimited(input: InputStream): ByteArray {
+            val length = readVarint(input).toInt()
+            val buf = ByteArray(length)
+            var read = 0
+            while (read < length) {
+                val count = input.read(buf, read, length - read)
+                if (count == -1) break
+                read += count
+            }
+            return buf
+        }
+
+        private fun skipField(input: InputStream, wireType: Int) {
+            when (wireType) {
+                0 -> readVarint(input)
+                1 -> input.skip(8)
+                2 -> {
+                    val len = readVarint(input)
+                    input.skip(len)
+                }
+                5 -> input.skip(4)
+            }
+        }
+    }
+}

@@ -1,0 +1,79 @@
+syntax = "proto3";
+
+package nexa.wire;
+option go_package = "nexa/wire";
+option java_package = "com.nexa.app.core.proto";
+option java_multiple_files = true;
+
+enum PacketType {
+  PACKET_UNKNOWN = 0;
+  PACKET_MESSAGE = 1;
+  PACKET_ACK = 2;
+  PACKET_PING = 3;
+  PACKET_AUTH_CHALLENGE = 4;
+  PACKET_AUTH_RESPONSE = 5;
+  PACKET_AUTH_SUCCESS = 6;
+  PACKET_AUTH_FAILURE = 7;
+  PACKET_TYPING = 10;
+  PACKET_DEVICE_SYNC = 11;
+}
+
+enum AckStatus {
+  ACK_UNKNOWN = 0;
+  ACK_SERVER_RECEIVED = 1;
+  ACK_DEVICE_DELIVERED = 2;
+  ACK_DEVICE_READ = 3;
+}
+
+message NexaWirePacket {
+  string packet_id = 1;
+  PacketType type = 2;
+  string sender_nx_id = 3;
+  string recipient_nx_id = 4;
+  int64 timestamp = 5;
+  
+  oneof payload {
+    EncryptedMessagePayload message = 6;
+    DeliveryAckPayload ack = 7;
+    AuthChallengePayload auth_challenge = 8;
+    AuthResponsePayload auth_response = 9;
+    TypingPayload typing = 10;
+    DeviceSyncPayload device_sync = 11;
+  }
+}
+
+message EncryptedMessagePayload {
+  int64 conversation_seq = 1;
+  bytes ciphertext = 2;
+  bytes nonce = 3;       // 32-byte Ephemeral Public Key in Double Ratchet
+  bytes auth_tag = 4;    // 16-byte Poly1305 MAC tag
+}
+
+message DeliveryAckPayload {
+  string original_packet_id = 1;
+  AckStatus status = 2;
+}
+
+message AuthChallengePayload {
+  bytes challenge_nonce = 1; // 32-byte secure random nonce
+  int64 timestamp = 2;
+  int64 expires_at = 3;      // Expiration timestamp (timestamp + 60_000 ms)
+}
+
+message AuthResponsePayload {
+  bytes signature = 1;       // 64-byte Ed25519 signature
+  bytes public_key = 2;      // 32-byte Ed25519 public key
+  int64 timestamp = 3;
+}
+
+message TypingPayload {
+  string conversation_id = 1;
+  bool is_typing = 2;
+}
+
+message DeviceSyncPayload {
+  string sync_id = 1;
+  string source_device_id = 2;
+  int64 sequence_number = 3;
+  bytes encrypted_payload = 4;
+}
