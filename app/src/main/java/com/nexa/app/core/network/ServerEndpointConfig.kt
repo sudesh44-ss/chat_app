@@ -3,6 +3,8 @@ package com.nexa.app.core.network
 import android.os.Build
 
 object ServerEndpointConfig {
+    const val RENDER_HOST = "nexa-relay.onrender.com"
+
     val isEmulator: Boolean by lazy {
         Build.FINGERPRINT.startsWith("generic")
                 || Build.FINGERPRINT.startsWith("unknown")
@@ -14,15 +16,31 @@ object ServerEndpointConfig {
                 || Build.PRODUCT.contains("sdk")
     }
 
-    val host: String
-        get() = if (isEmulator) "10.0.2.2" else "127.0.0.1"
+    // Set to true to route all network traffic through the live Render cloud deployment
+    const val USE_PRODUCTION_CLOUD = true
 
     val httpBaseUrl: String
-        get() = "http://$host:8080"
+        get() = if (USE_PRODUCTION_CLOUD) {
+            "https://$RENDER_HOST"
+        } else {
+            val localHost = if (isEmulator) "10.0.2.2" else "127.0.0.1"
+            "http://$localHost:8080"
+        }
 
     val wsBaseUrl: String
-        get() = "ws://$host:8080"
+        get() = if (USE_PRODUCTION_CLOUD) {
+            "wss://$RENDER_HOST"
+        } else {
+            val localHost = if (isEmulator) "10.0.2.2" else "127.0.0.1"
+            "ws://$localHost:8080"
+        }
 
     val securityRulesUrl: String
-        get() = "http://$host:8086"
+        get() = if (USE_PRODUCTION_CLOUD) {
+            "https://$RENDER_HOST"
+        } else {
+            val localHost = if (isEmulator) "10.0.2.2" else "127.0.0.1"
+            "http://$localHost:8086"
+        }
 }
+

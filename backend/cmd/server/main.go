@@ -138,7 +138,23 @@ func main() {
 	dtnHandler := api.NewDtnHandler(hub)
 	http.HandleFunc("/api/v1/relay/opportunistic-dump", dtnHandler.HandleOpportunisticDump)
 
-	// 9. Register Health & Diagnostics Endpoints
+	// 9. Register Root & Health Diagnostics Endpoints
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"service":   "NEXA Blind-Postman Relay Server",
+			"status":    "UP",
+			"mode":      "Ephemeral-RAM-Only",
+			"version":   "1.0",
+			"endpoints": []string{"/health", "/ws", "/ws/signaling", "/api/v1/auth/otp/request", "/api/v1/auth/otp/verify"},
+			"timestamp": time.Now().UnixMilli(),
+		})
+	})
+
 	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
