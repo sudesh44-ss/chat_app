@@ -6,6 +6,7 @@ import com.nexa.app.core.crypto.EncryptedEnvelope
 import com.nexa.app.core.network.ConnectionState
 import com.nexa.app.core.network.NetworkMonitor
 import com.nexa.app.core.network.WebSocketManager
+import com.nexa.app.core.notification.NexaNotificationDispatcher
 import com.nexa.app.core.proto.AckStatus
 import com.nexa.app.core.proto.DeliveryAckPayload
 import com.nexa.app.core.proto.EncryptedMessagePayload
@@ -20,6 +21,7 @@ import com.nexa.app.data.local.dao.UserDao
 import com.nexa.app.data.local.entity.ChatEntity
 import com.nexa.app.data.local.entity.MessageEntity
 import com.nexa.app.data.local.entity.toDomain
+import com.nexa.app.data.local.preferences.ChatPrivacyPrefs
 import com.nexa.app.data.remote.sms.NexaDataSmsSender
 import com.nexa.app.domain.model.ChatConversation
 import com.nexa.app.domain.model.Message
@@ -55,7 +57,9 @@ class ChatRepositoryImpl(
     private val networkMonitor: NetworkMonitor,
     private val dtnRepository: DtnRepository,
     private val doubleRatchetEngine: DoubleRatchetEngine,
-    private val contactDao: ContactDao? = null
+    private val contactDao: ContactDao? = null,
+    private val chatPrivacyPrefs: ChatPrivacyPrefs? = null,
+    private val notificationDispatcher: NexaNotificationDispatcher? = null
 ) : ChatRepository {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -256,6 +260,17 @@ class ChatRepositoryImpl(
                     "[Encrypted Data SMS - Decryption Failed]"
                 }
 
+                if (decryptedBytes != null) {
+                    if (decryptedText.startsWith("{") && (decryptedText.contains("\"type\":\"PIN_MESSAGE\"") || decryptedText.contains("\"type\":\"UNPIN_MESSAGE\""))) {
+                        handlePinControlPacket(decryptedText)
+                        return@withContext
+                    }
+                    if (decryptedText.startsWith("{") && decryptedText.contains("\"type\":\"PROFILE_UPDATE\"")) {
+                        handleProfileUpdateControlPacket(decryptedText)
+                        return@withContext
+                    }
+                }
+
                 val messageStatus = if (decryptedBytes != null) MessageStatus.DELIVERED else MessageStatus.FAILED
 
                 // 2. Persist in local encrypted SQLCipher Room DB
@@ -285,6 +300,20 @@ class ChatRepositoryImpl(
                         unreadCount = unread
                     )
                 )
+
+                // 4. Dispatch privacy-preserving local notification if decrypted successfully
+                if (decryptedBytes != null) {
+                    val contact = contactDao?.getContact(senderNxId)
+                    val resolvedName = contact?.effectiveDisplayName ?: existingChat?.participantName ?: senderNxId
+                    notificationDispatcher?.postDirectMessageNotification(
+                        conversationId = conversationId,
+                        senderNxId = senderNxId,
+                        senderDisplayName = resolvedName,
+                        decryptedText = decryptedText,
+                        messageId = packet.packetId
+                    )
+                }
+
                 Log.d(TAG, "Incoming Data SMS from $senderNxId stored in local vault (status=$messageStatus)")
             }
             PacketType.PACKET_ACK -> {
@@ -298,6 +327,12 @@ class ChatRepositoryImpl(
         val myNxId = getMyNxId()
         chatDao.resetUnreadCount(conversationId)
         messageDao.markMessagesAsRead(conversationId)
+
+        // Read Receipts Gatekeeper: Silent drop if disabled by user settings (Zero Server Knowledge)
+        if (chatPrivacyPrefs?.readReceiptsEnabled == false) {
+            Log.d(TAG, "Read receipts suppressed by user privacy gatekeeper (Zero Server Knowledge)")
+            return@withContext
+        }
 
         // Dispatch read ACK to participant
         val chat = chatDao.getChatById(conversationId)
@@ -318,6 +353,25 @@ class ChatRepositoryImpl(
                 webSocketManager.sendPacket(readAck)
             }
         }
+    }
+
+    override suspend fun retryFailedMessage(
+        packetId: String,
+        transport: TransportType,
+        destinationPhone: String?
+    ): Result<Message> = withContext(Dispatchers.IO) {
+        val existing = messageDao.getMessageByPacketId(packetId)
+            ?: return@withContext Result.failure(IllegalArgumentException("Message $packetId not found in local vault"))
+
+        // Update local status back to PENDING before re-dispatching
+        messageDao.updateMessageStatus(packetId, MessageStatus.PENDING.name)
+
+        sendMessage(
+            recipientNxId = existing.recipientNxId,
+            text = existing.plainTextContent,
+            transport = transport,
+            destinationPhone = destinationPhone
+        )
     }
 
     override suspend fun createOrGetConversation(
@@ -364,6 +418,133 @@ class ChatRepositoryImpl(
 
     override fun getTypingEvents(): Flow<Pair<String, Boolean>> = _typingFlow.asSharedFlow()
 
+    override fun getPinnedMessages(conversationId: String): Flow<List<Message>> {
+        val now = System.currentTimeMillis()
+        return messageDao.getPinnedMessagesFlow(conversationId, now).map { entities ->
+            entities.map { it.toDomain() }
+        }
+    }
+
+    override suspend fun pinMessage(
+        packetId: String,
+        conversationId: String,
+        recipientNxId: String,
+        durationMillis: Long?
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val count = messageDao.getPinnedMessagesCount(conversationId, now)
+        if (count >= 4) {
+            return@withContext Result.failure(
+                IllegalStateException("Pin limit reached: You can pin up to 4 messages in this chat. Unpin an existing message to pin another one.")
+            )
+        }
+
+        val expiresAt = if (durationMillis != null) now + durationMillis else null
+        messageDao.updatePinStatus(packetId, isPinned = true, pinnedExpiresAt = expiresAt, pinnedAt = now)
+
+        val controlPayload = org.json.JSONObject().apply {
+            put("type", "PIN_MESSAGE")
+            put("targetMessageId", packetId)
+            put("expiresAt", expiresAt ?: -1L)
+            put("pinnedAt", now)
+            put("pinnedBy", getMyNxId())
+        }.toString()
+
+        sendControlPacket(recipientNxId, controlPayload)
+        Result.success(Unit)
+    }
+
+    override suspend fun unpinMessage(
+        packetId: String,
+        conversationId: String,
+        recipientNxId: String
+    ): Result<Unit> = withContext(Dispatchers.IO) {
+        messageDao.unpinMessage(packetId)
+
+        val controlPayload = org.json.JSONObject().apply {
+            put("type", "UNPIN_MESSAGE")
+            put("targetMessageId", packetId)
+            put("unpinnedBy", getMyNxId())
+        }.toString()
+
+        sendControlPacket(recipientNxId, controlPayload)
+        Result.success(Unit)
+    }
+
+    override suspend fun clearExpiredPins(conversationId: String): Unit = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        messageDao.clearExpiredPins(conversationId, now)
+        Unit
+    }
+
+    private suspend fun sendControlPacket(recipientNxId: String, payloadJson: String) {
+        try {
+            val myNxId = getMyNxId()
+            val packetId = UUID.randomUUID().toString()
+            val timestamp = System.currentTimeMillis()
+            val rawPlainBytes = payloadJson.toByteArray(StandardCharsets.UTF_8)
+            val recipientContact = contactDao?.getContact(recipientNxId)
+            val recipientPubKey = recipientContact?.publicKeyHex?.let { fromHexOrNull(it) }
+
+            val envelope = doubleRatchetEngine.ratchetEncrypt(recipientNxId, rawPlainBytes, recipientPubKey)
+            val wirePacket = NexaWirePacket(
+                packetId = packetId,
+                type = PacketType.PACKET_MESSAGE,
+                senderNxId = myNxId,
+                recipientNxId = recipientNxId,
+                timestamp = timestamp,
+                message = EncryptedMessagePayload(
+                    conversationSeq = timestamp,
+                    ciphertext = envelope.ciphertext,
+                    nonce = envelope.ephemeralPublicKey,
+                    authTag = envelope.authTag
+                )
+            )
+            webSocketManager.sendPacket(wirePacket)
+            Log.d(TAG, "Dispatched pin control packet ($packetId) to $recipientNxId")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to dispatch control packet: ${e.message}")
+        }
+    }
+
+    private suspend fun handlePinControlPacket(jsonString: String) {
+        try {
+            val json = org.json.JSONObject(jsonString)
+            when (json.optString("type")) {
+                "PIN_MESSAGE" -> {
+                    val targetMessageId = json.getString("targetMessageId")
+                    val expiresAtRaw = json.optLong("expiresAt", -1L)
+                    val expiresAt = if (expiresAtRaw > 0L) expiresAtRaw else null
+                    val pinnedAt = json.optLong("pinnedAt", System.currentTimeMillis())
+                    messageDao.updatePinStatus(targetMessageId, isPinned = true, pinnedExpiresAt = expiresAt, pinnedAt = pinnedAt)
+                    Log.d(TAG, "Processed remote PIN_MESSAGE for message $targetMessageId (ExpiresAt: $expiresAt)")
+                }
+                "UNPIN_MESSAGE" -> {
+                    val targetMessageId = json.getString("targetMessageId")
+                    messageDao.unpinMessage(targetMessageId)
+                    Log.d(TAG, "Processed remote UNPIN_MESSAGE for message $targetMessageId")
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse PIN control packet: ${e.message}")
+        }
+    }
+
+    private suspend fun handleProfileUpdateControlPacket(jsonString: String) {
+        try {
+            val json = org.json.JSONObject(jsonString)
+            val nxId = json.getString("nxId")
+            val newAvatarUrl = if (json.has("newAvatarUrl") && !json.isNull("newAvatarUrl")) {
+                json.getString("newAvatarUrl").takeIf { it.isNotBlank() }
+            } else null
+
+            contactDao?.updateAvatarUrl(nxId, newAvatarUrl)
+            Log.d(TAG, "Processed remote PROFILE_UPDATE for $nxId: $newAvatarUrl")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse remote PROFILE_UPDATE control packet: ${e.message}")
+        }
+    }
+
     private fun observeIncomingPackets() {
         scope.launch {
             webSocketManager.incomingPackets.collect { packet ->
@@ -403,6 +584,17 @@ class ChatRepositoryImpl(
             "[Encrypted Message - Verification Failed]"
         }
 
+        if (decryptedBytes != null) {
+            if (decryptedText.startsWith("{") && (decryptedText.contains("\"type\":\"PIN_MESSAGE\"") || decryptedText.contains("\"type\":\"UNPIN_MESSAGE\""))) {
+                handlePinControlPacket(decryptedText)
+                return@withContext
+            }
+            if (decryptedText.startsWith("{") && decryptedText.contains("\"type\":\"PROFILE_UPDATE\"")) {
+                handleProfileUpdateControlPacket(decryptedText)
+                return@withContext
+            }
+        }
+
         val messageStatus = if (decryptedBytes != null) MessageStatus.DELIVERED else MessageStatus.FAILED
 
         // 2. Persist in local encrypted Room DB
@@ -433,7 +625,20 @@ class ChatRepositoryImpl(
             )
         )
 
-        // 4. Send ACK_DEVICE_DELIVERED back to sender (zero-disk relay) if decryption succeeded
+        // 4. Dispatch privacy-preserving local notification if decrypted successfully
+        if (decryptedBytes != null) {
+            val contact = contactDao?.getContact(senderNxId)
+            val resolvedName = contact?.effectiveDisplayName ?: existingChat?.participantName ?: senderNxId
+            notificationDispatcher?.postDirectMessageNotification(
+                conversationId = conversationId,
+                senderNxId = senderNxId,
+                senderDisplayName = resolvedName,
+                decryptedText = decryptedText,
+                messageId = packet.packetId
+            )
+        }
+
+        // 5. Send ACK_DEVICE_DELIVERED back to sender (zero-disk relay) if decryption succeeded
         if (decryptedBytes != null) {
             val deliveryAck = NexaWirePacket(
                 packetId = UUID.randomUUID().toString(),

@@ -49,7 +49,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         MeshEnvelopeEntity::class,
         DeviceSyncEntity::class
     ],
-    version = 11,
+    version = 16,
     exportSchema = false
 )
 abstract class NexaDatabase : RoomDatabase() {
@@ -295,6 +295,43 @@ abstract class NexaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `customNickname` TEXT DEFAULT NULL")
+            }
+        }
+
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `phoneNumber` TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `isPhoneInLocalAddressBook` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `isPhoneSharedByPeer` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `connectionSource` TEXT NOT NULL DEFAULT 'ADDRESS_BOOK'")
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `avatarLocalPath` TEXT DEFAULT NULL")
+            }
+        }
+
+        val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `deviceContactName` TEXT DEFAULT NULL")
+            }
+        }
+
+        val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `isPinned` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `pinnedExpiresAt` INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `pinnedAt` INTEGER DEFAULT NULL")
+            }
+        }
+
+        val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `deviceContactPhotoUri` TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE `contacts` ADD COLUMN `nexaAvatarUrl` TEXT DEFAULT NULL")
+            }
+        }
+
         fun getInstance(context: Context, passphrase: ByteArray): NexaDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: buildDatabase(context.applicationContext, passphrase).also {
@@ -335,7 +372,12 @@ abstract class NexaDatabase : RoomDatabase() {
                     MIGRATION_7_8,
                     MIGRATION_8_9,
                     MIGRATION_9_10,
-                    MIGRATION_10_11
+                    MIGRATION_10_11,
+                    MIGRATION_11_12,
+                    MIGRATION_12_13,
+                    MIGRATION_13_14,
+                    MIGRATION_14_15,
+                    MIGRATION_15_16
                 )
                 .build()
         }

@@ -15,7 +15,10 @@ data class Message(
     val status: MessageStatus,
     val timestamp: Long,
     val isOutgoing: Boolean,
-    val transportType: TransportType = TransportType.INTERNET
+    val transportType: TransportType = TransportType.INTERNET,
+    val isPinned: Boolean = false,
+    val pinnedExpiresAt: Long? = null,
+    val pinnedAt: Long? = null
 )
 
 data class ChatConversation(

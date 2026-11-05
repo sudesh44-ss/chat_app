@@ -251,4 +251,100 @@ class GoogleDriveBackupUnitTests {
         val isSafeToUpload = remoteOlderEpoch <= localEpoch
         assertTrue("Remote epoch older than local epoch is safe to update", isSafeToUpload)
     }
+
+    @Test
+    fun testVaultStreamEncryptorRoundTrip() {
+        val tempRaw = File.createTempFile("raw_vault_test", ".txt")
+        val tempEncrypted = File.createTempFile("encrypted_vault_test", ".bin")
+        val tempDecrypted = File.createTempFile("decrypted_vault_test", ".txt")
+
+        try {
+            val originalText = "NEXA Zero-Risk Streaming Backup Content with Blake3 Media Hashes"
+            tempRaw.writeText(originalText)
+
+            val passphrase = "apple ocean forest vibrant hammer silver river dynamic eagle shield crystal whisper"
+            val salt = com.nexa.app.core.backup.crypto.VaultStreamEncryptor.generateSalt()
+            val secretKey = com.nexa.app.core.backup.crypto.VaultStreamEncryptor.deriveMasterKey(passphrase, salt)
+
+            com.nexa.app.core.backup.crypto.VaultStreamEncryptor.encryptVault(
+                rawSourceFile = tempRaw,
+                encryptedOutputFile = tempEncrypted,
+                secretKey = secretKey,
+                salt = salt
+            )
+
+            assertTrue(tempEncrypted.exists())
+            assertTrue(tempEncrypted.length() > 39) // Header is 39 bytes
+
+            val success = com.nexa.app.core.backup.crypto.VaultStreamEncryptor.decryptVault(
+                encryptedSourceFile = tempEncrypted,
+                decryptedOutputFile = tempDecrypted,
+                passphrase = passphrase
+            )
+
+            assertTrue(success)
+            assertEquals(originalText, tempDecrypted.readText())
+        } finally {
+            tempRaw.delete()
+            tempEncrypted.delete()
+            tempDecrypted.delete()
+        }
+    }
+
+    @Test
+    fun testVaultStreamEncryptorRejectsWrongPassphrase() {
+        val tempRaw = File.createTempFile("raw_vault_wrong", ".txt")
+        val tempEncrypted = File.createTempFile("encrypted_vault_wrong", ".bin")
+        val tempDecrypted = File.createTempFile("decrypted_vault_wrong", ".txt")
+
+        try {
+            tempRaw.writeText("Sensitive chat messages that must be protected")
+
+            val correctPassphrase = "apple ocean forest vibrant hammer silver river dynamic eagle shield crystal whisper"
+            val wrongPassphrase = "banana ocean forest vibrant hammer silver river dynamic eagle shield crystal whisper"
+
+            val salt = com.nexa.app.core.backup.crypto.VaultStreamEncryptor.generateSalt()
+            val secretKey = com.nexa.app.core.backup.crypto.VaultStreamEncryptor.deriveMasterKey(correctPassphrase, salt)
+
+            com.nexa.app.core.backup.crypto.VaultStreamEncryptor.encryptVault(
+                rawSourceFile = tempRaw,
+                encryptedOutputFile = tempEncrypted,
+                secretKey = secretKey,
+                salt = salt
+            )
+
+            try {
+                com.nexa.app.core.backup.crypto.VaultStreamEncryptor.decryptVault(
+                    encryptedSourceFile = tempEncrypted,
+                    decryptedOutputFile = tempDecrypted,
+                    passphrase = wrongPassphrase
+                )
+                fail("Decrypting with wrong passphrase must throw an exception")
+            } catch (expected: IllegalArgumentException) {
+                assertTrue(expected.message?.contains("GCM Auth Tag") == true || expected.message?.contains("Incorrect Passphrase") == true)
+            }
+        } finally {
+            tempRaw.delete()
+            tempEncrypted.delete()
+            tempDecrypted.delete()
+        }
+    }
+
+    @Test
+    fun testManifestSha256Verification() {
+        val tempDb = File.createTempFile("test_manifest_db", ".db")
+        try {
+            tempDb.writeText("MOCK_SQLITE_DATABASE_BYTES_FOR_CHECKSUM")
+            val computedSha256 = com.nexa.app.core.backup.VaultBundlePackager.computeSha256(tempDb)
+            assertNotNull(computedSha256)
+            assertEquals(64, computedSha256.length) // Hex string of SHA-256 is 64 characters
+
+            // Verify tampering alters the hash
+            tempDb.appendText("_TAMPERED")
+            val tamperedSha256 = com.nexa.app.core.backup.VaultBundlePackager.computeSha256(tempDb)
+            assertFalse(computedSha256.equals(tamperedSha256, ignoreCase = true))
+        } finally {
+            tempDb.delete()
+        }
+    }
 }

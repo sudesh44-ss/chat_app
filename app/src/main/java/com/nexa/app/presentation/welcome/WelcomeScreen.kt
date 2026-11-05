@@ -53,17 +53,41 @@ import com.nexa.app.core.theme.NexaBadgeMonospace
 @Composable
 fun WelcomeScreen(
     viewModel: WelcomeViewModel,
-    onNavigateToProfileSetup: (googleToken: String?) -> Unit
+    onNavigateToDashboard: () -> Unit = {},
+    onNavigateToProfileSetup: (googleToken: String?, googleUid: String?, prefillName: String?, prefillAvatar: String?, email: String?) -> Unit,
+    onNavigateToSimVerify: (phone: String, googleUid: String, inboundNumber: String?) -> Unit = { _, _, _ -> }
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
 
+    LaunchedEffect(uiState.isInstantLogin) {
+        if (uiState.isInstantLogin) {
+            onNavigateToDashboard()
+        }
+    }
+
+    LaunchedEffect(uiState.requireSimVerification) {
+        if (uiState.requireSimVerification) {
+            val phone = uiState.googleResponse?.phoneNumber ?: uiState.googleResponse?.registeredPhoneMasked ?: ""
+            val googleUid = uiState.googleResponse?.googleUid ?: ""
+            val inbound = uiState.googleResponse?.inboundReceiverNumber
+            onNavigateToSimVerify(phone, googleUid, inbound)
+        }
+    }
+
     LaunchedEffect(uiState.isSuccess, uiState.proceedToPhoneOnly) {
         if (uiState.isSuccess) {
-            onNavigateToProfileSetup(uiState.googleIdToken)
+            val resp = uiState.googleResponse
+            onNavigateToProfileSetup(
+                uiState.googleIdToken,
+                resp?.googleUid,
+                resp?.prefillName ?: uiState.suggestedName,
+                resp?.prefillAvatar,
+                resp?.email ?: uiState.userEmail
+            )
         } else if (uiState.proceedToPhoneOnly) {
-            onNavigateToProfileSetup(null)
+            onNavigateToProfileSetup(null, null, null, null, null)
         }
     }
 

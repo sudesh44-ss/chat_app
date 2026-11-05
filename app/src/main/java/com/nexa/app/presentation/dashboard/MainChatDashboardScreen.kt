@@ -26,6 +26,7 @@ import androidx.compose.material.icons.filled.CellTower
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Contacts
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.QrCodeScanner
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.AlertDialog
@@ -67,6 +68,9 @@ import com.nexa.app.core.theme.NexaWarningOrange
 import com.nexa.app.domain.model.ChatConversation
 import com.nexa.app.domain.repository.AuthRepository
 import com.nexa.app.domain.repository.ChatRepository
+import com.nexa.app.presentation.common.avatar.NexaAvatar
+import com.nexa.app.presentation.common.viewer.ProfileImageViewerDialog
+import com.nexa.app.presentation.dashboard.components.QuickActionBottomSheet
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -80,6 +84,7 @@ fun MainChatDashboardScreen(
     onOpenChat: (conversationId: String, participantNxId: String, participantName: String) -> Unit,
     onOpenQr: () -> Unit = {},
     onOpenContacts: () -> Unit = {},
+    onOpenNotificationSettings: () -> Unit = {},
     onLogout: () -> Unit
 ) {
     val coroutineScope = rememberCoroutineScope()
@@ -88,8 +93,17 @@ fun MainChatDashboardScreen(
     val connectionState by chatRepository.getConnectionState().collectAsState()
 
     var showNewChatDialog by remember { mutableStateOf(false) }
+    var showQuickActionSheet by remember { mutableStateOf(false) }
     var targetNxIdInput by remember { mutableStateOf("") }
     var targetNameInput by remember { mutableStateOf("") }
+    var activeViewerPhoto by remember { mutableStateOf<Any?>(null) }
+
+    if (activeViewerPhoto != null) {
+        ProfileImageViewerDialog(
+            imageModel = activeViewerPhoto!!,
+            onDismiss = { activeViewerPhoto = null }
+        )
+    }
 
     // Start WebSocket connection upon dashboard view
     LaunchedEffect(Unit) {
@@ -158,6 +172,25 @@ fun MainChatDashboardScreen(
         )
     }
 
+    if (showQuickActionSheet) {
+        QuickActionBottomSheet(
+            onDismiss = { showQuickActionSheet = false },
+            onNavigateNearbyMesh = onOpenQr,
+            onNavigateConnectionRequests = onOpenContacts,
+            onNavigateNewConversation = {
+                targetNxIdInput = ""
+                targetNameInput = ""
+                showNewChatDialog = true
+            },
+            onNavigateContacts = onOpenContacts,
+            onNavigateCreateGroup = {
+                targetNxIdInput = ""
+                targetNameInput = ""
+                showNewChatDialog = true
+            }
+        )
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -199,6 +232,13 @@ fun MainChatDashboardScreen(
                             tint = MaterialTheme.colorScheme.primary
                         )
                     }
+                    IconButton(onClick = onOpenNotificationSettings) {
+                        Icon(
+                            imageVector = Icons.Default.Notifications,
+                            contentDescription = "Notification Settings",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
                     IconButton(onClick = onOpenQr) {
                         Icon(
                             imageVector = Icons.Default.QrCodeScanner,
@@ -221,17 +261,13 @@ fun MainChatDashboardScreen(
         },
         floatingActionButton = {
             FloatingActionButton(
-                onClick = {
-                    targetNxIdInput = ""
-                    targetNameInput = ""
-                    showNewChatDialog = true
-                },
+                onClick = { showQuickActionSheet = true },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary
             ) {
                 Icon(
                     imageVector = Icons.Default.Add,
-                    contentDescription = "New Encrypted Chat"
+                    contentDescription = "New Message / Group"
                 )
             }
         },
@@ -473,6 +509,9 @@ fun MainChatDashboardScreen(
                         chat = chat,
                         onClick = {
                             onOpenChat(chat.conversationId, chat.participantNxId, chat.participantName)
+                        },
+                        onPhotoClick = { photoModel ->
+                            activeViewerPhoto = photoModel
                         }
                     )
                 }
@@ -484,7 +523,8 @@ fun MainChatDashboardScreen(
 @Composable
 private fun ConversationItemCard(
     chat: ChatConversation,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onPhotoClick: ((Any) -> Unit)? = null
 ) {
     Card(
         shape = RoundedCornerShape(14.dp),
@@ -501,22 +541,14 @@ private fun ConversationItemCard(
                 .fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .background(
-                        color = MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
-                        shape = CircleShape
-                    ),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.Chat,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
+            // Universal 3-Tier Priority Avatar (Clickable only when real photo exists)
+            NexaAvatar(
+                nexaAvatarUrl = null,
+                deviceContactPhotoUri = null,
+                displayName = chat.participantName,
+                size = 44.dp,
+                onPhotoClick = onPhotoClick
+            )
 
             Spacer(modifier = Modifier.width(12.dp))
 

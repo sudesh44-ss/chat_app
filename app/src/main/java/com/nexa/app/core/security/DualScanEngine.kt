@@ -27,6 +27,11 @@ class DualScanEngine(
 
     // GATE 1: SENDER PRE-DISPATCH SCAN
     suspend fun scanOutbound(uri: Uri, declaredExtension: String): ScanResult = withContext(Dispatchers.IO) {
+        val ext = declaredExtension.lowercase().removePrefix(".").trim()
+        if (NexaFileSecurityEngine.BANNED_EXTENSIONS.contains(ext)) {
+            return@withContext ScanResult.Malicious("Blocked dangerous executable file extension: .$ext")
+        }
+
         val ctx = context ?: return@withContext ScanResult.Corrupted("Inaccessible source context")
         val stream = try {
             ctx.contentResolver.openInputStream(uri)

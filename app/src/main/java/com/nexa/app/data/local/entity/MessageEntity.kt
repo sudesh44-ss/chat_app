@@ -24,7 +24,10 @@ data class MessageEntity(
     val status: String,            // PENDING, SENT, DELIVERED, READ, FAILED
     val timestamp: Long,
     val isOutgoing: Boolean,
-    val transportType: String = "INTERNET"
+    val transportType: String = "INTERNET",
+    val isPinned: Boolean = false,
+    val pinnedExpiresAt: Long? = null,
+    val pinnedAt: Long? = null
 )
 
 fun MessageEntity.toDomain(): Message {
@@ -41,7 +44,10 @@ fun MessageEntity.toDomain(): Message {
             TransportType.valueOf(transportType)
         } catch (e: Exception) {
             TransportType.INTERNET
-        }
+        },
+        isPinned = isPinned,
+        pinnedExpiresAt = pinnedExpiresAt,
+        pinnedAt = pinnedAt
     )
 }
 
@@ -55,6 +61,9 @@ fun Message.toEntity(): MessageEntity {
         status = status.name,
         timestamp = timestamp,
         isOutgoing = isOutgoing,
-        transportType = transportType.name
+        transportType = transportType.name,
+        isPinned = isPinned,
+        pinnedExpiresAt = pinnedExpiresAt,
+        pinnedAt = pinnedAt
     )
 }

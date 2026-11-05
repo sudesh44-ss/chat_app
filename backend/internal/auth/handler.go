@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -54,26 +55,35 @@ type ProfileUpdateRequest struct {
 }
 
 type AuthHandler struct {
-	store            *identity.Store
-	otpService       *OtpService
-	googleVerifier   *GoogleVerifier
-	supabaseVerifier *SupabaseVerifier
+	store             *identity.Store
+	otpService        *OtpService
+	reverseSmsService *ReverseSmsService
+	googleVerifier    *GoogleVerifier
+	supabaseVerifier  *SupabaseVerifier
 }
 
 func NewAuthHandler(store *identity.Store, otpService *OtpService, googleVerifier *GoogleVerifier) *AuthHandler {
 	return &AuthHandler{
-		store:            store,
-		otpService:       otpService,
-		googleVerifier:   googleVerifier,
-		supabaseVerifier: NewSupabaseVerifier(),
+		store:             store,
+		otpService:        otpService,
+		reverseSmsService: NewReverseSmsService(store),
+		googleVerifier:    googleVerifier,
+		supabaseVerifier:  NewSupabaseVerifier(),
 	}
 }
 
 func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/auth/otp/request", h.handleOtpRequest)
 	mux.HandleFunc("/api/v1/auth/otp/verify", h.handleOtpVerify)
+	mux.HandleFunc("/api/v1/auth/google", h.handleGoogleAuth)
 	mux.HandleFunc("/api/v1/auth/google/verify", h.handleGoogleVerify)
 	mux.HandleFunc("/api/v1/auth/supabase/verify", h.handleSupabaseVerify)
+	mux.HandleFunc("/api/v1/auth/initiate-reverse-verify", h.handleInitiateReverseVerify)
+	mux.HandleFunc("/api/v1/auth/initiate-registration", h.handleInitiateReverseVerify)
+	mux.HandleFunc("/api/v1/webhooks/sms-inbound", h.handleInboundSmsWebhook)
+	mux.HandleFunc("/api/v1/webhooks/sms-received", h.handleInboundSmsWebhook)
+	mux.HandleFunc("/api/v1/auth/verification-status", h.handleVerificationStatus)
+	mux.HandleFunc("/api/v1/users/resolve", h.handleUserResolve)
 	mux.HandleFunc("/api/v1/auth/register", h.handleRegister)
 	mux.HandleFunc("/api/v1/auth/link", h.handleAccountLink)
 	mux.HandleFunc("/api/v1/auth/logout", h.handleLogout)
@@ -103,23 +113,63 @@ func (h *AuthHandler) handleOtpRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		PhoneNumber string `json:"phone_number"`
+		PhoneNumber     string `json:"phone_number"`
+		GoogleAuthToken string `json:"google_auth_token,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Malformed request body", http.StatusBadRequest)
 		return
 	}
 
-	cooldown, err := h.otpService.RequestOtp(req.PhoneNumber, getClientIP(r))
+	// Verify and extract bound Google identity if token supplied
+	boundUser := ""
+	if req.GoogleAuthToken != "" && h.googleVerifier != nil {
+		claims, err := h.googleVerifier.VerifyIdToken(req.GoogleAuthToken)
+		if err == nil && claims != nil {
+			boundUser = claims.Subject
+		}
+	}
+
+	cooldown, err := h.otpService.RequestOtpWithUser(req.PhoneNumber, getClientIP(r), boundUser)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusTooManyRequests)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case errors.Is(err, ErrSmsProviderUnavailable):
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":   "SMS delivery service is unavailable",
+				"code":    "SMS_UNAVAILABLE",
+				"details": err.Error(),
+			})
+		case errors.Is(err, ErrRateLimitExceeded), errors.Is(err, ErrCooldownActive):
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":                   err.Error(),
+				"code":                    "RATE_LIMITED",
+				"resend_cooldown_seconds": cooldown,
+				"retry_after_seconds":     cooldown,
+			})
+		case errors.Is(err, ErrInvalidPhone):
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "INVALID_PHONE",
+			})
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":                  "SENT",
+		"success":                 true,
 		"resend_cooldown_seconds": cooldown,
+		"retry_after_seconds":     cooldown,
 		"expires_in_seconds":      300,
 	})
 }
@@ -141,7 +191,32 @@ func (h *AuthHandler) handleOtpVerify(w http.ResponseWriter, r *http.Request) {
 
 	ticketToken, err := h.otpService.VerifyOtp(req.PhoneNumber, req.OtpCode)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case errors.Is(err, ErrOtpExpired):
+			w.WriteHeader(http.StatusGone)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "OTP_EXPIRED",
+			})
+		case errors.Is(err, ErrMaxAttemptsExceeded):
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "MAX_ATTEMPTS_EXCEEDED",
+			})
+		case errors.Is(err, ErrInvalidOtp):
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "INVALID_OTP",
+			})
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 		return
 	}
 
@@ -150,9 +225,10 @@ func (h *AuthHandler) handleOtpVerify(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]interface{}{
-		"status":           "VERIFIED",
-		"auth_ticket":      ticketToken,
-		"is_existing_user": isExisting,
+		"status":            "VERIFIED",
+		"auth_ticket":       ticketToken,
+		"auth_proof_ticket": ticketToken, // Dual compatibility
+		"is_existing_user":  isExisting,
 	}
 	if isExisting {
 		resp["nx_id"] = existingAcc.NxID
@@ -345,6 +421,9 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		} else if strings.Contains(ticket.PhoneNumber, "@") {
 			account.Email = ticket.PhoneNumber
 		}
+		if ticket.BoundUser != "" {
+			account.GoogleID = ticket.BoundUser
+		}
 
 		if err := h.store.CreateAccount(account); err != nil {
 			http.Error(w, "Failed to register account: "+err.Error(), http.StatusConflict)
@@ -399,6 +478,7 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"status":               "SUCCESS",
 		"nx_id":                account.NxID,
 		"session_auth_token":   sessionToken,
+		"session_token":        sessionToken,
 		"device_id":            deviceID,
 		"registered_timestamp": now,
 	})
@@ -688,4 +768,300 @@ func (h *AuthHandler) handleUpdateFcmToken(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status": "UPDATED",
 	})
+}
+
+// handleGoogleAuth implements single-tap Google Credential Manager backend verification.
+// If the user already exists and matches the hardware device/public key, returns instant session.
+// If the user is registered but from a new device, returns REQUIRE_SIM_VERIFICATION.
+// If brand new user, returns NEW_USER with pre-filled Google profile data.
+func (h *AuthHandler) handleGoogleAuth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		IdToken      string `json:"id_token"`
+		GoogleToken  string `json:"google_token"`
+		DeviceID     string `json:"device_id"`
+		PublicKeyHex string `json:"public_key_hex"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Malformed request body", http.StatusBadRequest)
+		return
+	}
+
+	token := req.IdToken
+	if token == "" {
+		token = req.GoogleToken
+	}
+
+	claims, err := h.googleVerifier.VerifyIdToken(token)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Google token verification failed: " + err.Error(),
+		})
+		return
+	}
+
+	existingAcc, isExisting := h.store.GetAccountByGoogleID(claims.Subject)
+	if !isExisting {
+		// New User: proceed to Profile Setup Screen with Google pre-filled metadata
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":         "NEW_USER",
+			"google_uid":     claims.Subject,
+			"email":          claims.Email,
+			"prefill_name":   claims.Name,
+			"prefill_avatar": claims.Picture,
+		})
+		return
+	}
+
+	// Existing user: check if this is the same physical device/hardware key
+	isSameDevice := false
+	if req.DeviceID != "" {
+		if dev, found := h.store.GetDevice(req.DeviceID); found && !dev.IsRevoked && dev.NxID == existingAcc.NxID {
+			isSameDevice = true
+		}
+	}
+	if !isSameDevice && req.PublicKeyHex != "" {
+		if req.PublicKeyHex == existingAcc.PublicKeyHex {
+			isSameDevice = true
+		}
+	}
+
+	if isSameDevice {
+		// Scenario 1: Same device, direct instant login (₹0 cost, zero friction)
+		now := time.Now().UnixMilli()
+		tokenBytes := make([]byte, 32)
+		rand.Read(tokenBytes)
+		sessionToken := "nexa_sess_" + hex.EncodeToString(tokenBytes)
+
+		devID := req.DeviceID
+		if devID == "" {
+			devID = fmt.Sprintf("dev_%d", now)
+		}
+
+		session := &identity.Session{
+			Token:     sessionToken,
+			AccountID: existingAcc.ID,
+			NxID:      existingAcc.NxID,
+			DeviceID:  devID,
+			ExpiresAt: now + (30 * 24 * 60 * 60 * 1000), // 30 days
+			IsRevoked: false,
+			CreatedAt: now,
+		}
+		h.store.CreateSession(session)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":             "LOGIN_SUCCESS",
+			"session_auth_token": sessionToken,
+			"session_token":      sessionToken,
+			"nx_id":              existingAcc.NxID,
+			"user": map[string]interface{}{
+				"nx_id":       existingAcc.NxID,
+				"name":        existingAcc.ProfileName,
+				"phone":       existingAcc.PhoneNumber,
+				"avatar_url":  existingAcc.AvatarUrl,
+			},
+		})
+		return
+	}
+
+	// Scenario 2: New device / device switch -> Require reverse SMS verification challenge
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":                  "REQUIRE_SIM_VERIFICATION",
+		"action":                  "REQUIRE_SIM_REVERIFY",
+		"google_uid":              existingAcc.GoogleID,
+		"registered_phone_masked": maskPhone(existingAcc.PhoneNumber),
+		"phone_number":            existingAcc.PhoneNumber,
+		"inbound_receiver_number": h.reverseSmsService.inboundReceiverNum,
+	})
+}
+
+func (h *AuthHandler) handleInitiateReverseVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req InitiateReverseVerifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Malformed request body", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := h.reverseSmsService.InitiateVerification(&req, getClientIP(r))
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case errors.Is(err, ErrInvalidDomesticPhone):
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "INVALID_DOMESTIC_PHONE",
+			})
+		case errors.Is(err, ErrReverseRateLimited):
+			w.WriteHeader(http.StatusTooManyRequests)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "RATE_LIMITED",
+			})
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *AuthHandler) handleInboundSmsWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	sender := ""
+	body := ""
+
+	// Support JSON payload
+	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
+		var req struct {
+			SenderNumber string `json:"sender_number"`
+			Sender       string `json:"sender"`
+			From         string `json:"from"`
+			Msisdn       string `json:"msisdn"`
+			Body         string `json:"body"`
+			Text         string `json:"text"`
+			Message      string `json:"message"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			if req.SenderNumber != "" {
+				sender = req.SenderNumber
+			} else if req.Sender != "" {
+				sender = req.Sender
+			} else if req.From != "" {
+				sender = req.From
+			} else if req.Msisdn != "" {
+				sender = req.Msisdn
+			}
+
+			if req.Body != "" {
+				body = req.Body
+			} else if req.Text != "" {
+				body = req.Text
+			} else if req.Message != "" {
+				body = req.Message
+			}
+		}
+	} else {
+		// Form-urlencoded
+		_ = r.ParseForm()
+		sender = r.FormValue("sender_number")
+		if sender == "" {
+			sender = r.FormValue("senderNumber")
+		}
+		if sender == "" {
+			sender = r.FormValue("from")
+		}
+		if sender == "" {
+			sender = r.FormValue("msisdn")
+		}
+
+		body = r.FormValue("body")
+		if body == "" {
+			body = r.FormValue("text")
+		}
+		if body == "" {
+			body = r.FormValue("message")
+		}
+	}
+
+	if sender == "" || body == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Missing sender_number or body in webhook payload",
+		})
+		return
+	}
+
+	record, err := h.reverseSmsService.ProcessInboundWebhook(sender, body)
+	if err != nil {
+		log.Printf("[InboundWebhook] Failed verification: %v", err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":  "SUCCESS",
+		"message": "Inbound reverse SMS verified successfully",
+		"nx_id":   record.AllocatedNxID,
+	})
+}
+
+func (h *AuthHandler) handleVerificationStatus(w http.ResponseWriter, r *http.Request) {
+	nonce := r.URL.Query().Get("nonce")
+	if nonce == "" {
+		http.Error(w, "Missing nonce query parameter", http.StatusBadRequest)
+		return
+	}
+
+	resp, err := h.reverseSmsService.GetVerificationStatus(nonce)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *AuthHandler) handleUserResolve(w http.ResponseWriter, r *http.Request) {
+	target := r.URL.Query().Get("target")
+	if target == "" {
+		http.Error(w, "Missing target query parameter (Nx-ID or phone)", http.StatusBadRequest)
+		return
+	}
+
+	callerNxID := ""
+	authHeader := r.Header.Get("Authorization")
+	sessionToken := strings.TrimPrefix(authHeader, "Bearer ")
+	if sessionToken != "" {
+		if sess, ok := h.store.GetSession(sessionToken); ok && sess != nil {
+			callerNxID = sess.NxID
+		}
+	}
+
+	resp, err := h.reverseSmsService.ResolveUser(target, callerNxID)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }

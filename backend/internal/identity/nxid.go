@@ -12,8 +12,9 @@ import (
 )
 
 // Allowed character set for the locked NX-XXXXXXXX format:
-// Uppercase English letters A-Z and digits 0-9 (36 characters).
-const NxIdCharset = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+// Uppercase Base32 characters avoiding visually ambiguous glyphs (0, O, 1, I).
+// Exactly 32 characters: 23456789ABCDEFGHJKLMNPQRSTUVWXYZ.
+const NxIdCharset = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
 
 var nxIdRegex = regexp.MustCompile(`^NX-[A-Z0-9]{8}$`)
 

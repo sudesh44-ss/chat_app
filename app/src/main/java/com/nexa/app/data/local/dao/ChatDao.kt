@@ -27,4 +27,7 @@ interface ChatDao {
 
     @Query("DELETE FROM chats WHERE conversationId = :conversationId")
     suspend fun deleteChat(conversationId: String): Int
+
+    @Query("UPDATE chats SET participantName = :newName WHERE participantNxId = :nxId")
+    suspend fun updateParticipantName(nxId: String, newName: String): Int
 }

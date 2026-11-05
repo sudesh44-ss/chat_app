@@ -37,6 +37,7 @@ import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.unit.dp
 import com.nexa.app.core.theme.NexaBadgeMonospace
 import com.nexa.app.core.theme.NexaWarningOrange
+import com.nexa.app.core.util.SafeMessageParser
 import com.nexa.app.domain.model.TransportType
 
 @Composable
@@ -99,7 +100,14 @@ fun ChatInputField(
 
         OutlinedTextField(
             value = text,
-            onValueChange = onTextChanged,
+            onValueChange = { input ->
+                val bounded = if (input.length > SafeMessageParser.MAX_INPUT_CHARS) {
+                    input.substring(0, SafeMessageParser.MAX_INPUT_CHARS)
+                } else {
+                    input
+                }
+                onTextChanged(bounded)
+            },
             placeholder = {
                 Text(
                     text = placeholderText,

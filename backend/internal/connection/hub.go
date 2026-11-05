@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"nexa/wire/internal/fcm"
@@ -29,6 +30,13 @@ type Hub struct {
 
 	// Identity store to lookup registered device FCM tokens
 	identityStore *identity.Store
+
+	// In-memory telemetry & traffic police metrics (Zero DB write IOPS)
+	relayedMessagesCount     uint64
+	relayedTypingCount       uint64
+	offlineBufferedCount     uint64
+	offlineFlushedCount      uint64
+	ingestedTelemetryBatches uint64
 }
 
 func NewHub(buffer queue.Buffer) *Hub {
@@ -160,6 +168,7 @@ func (h *Hub) RouteDecodedPacket(sender *ClientSession, packet *wire.NexaWirePac
 
 	// 3. Transient packets (Typing Indicators) are RAM-only and NEVER buffered offline
 	if packet.Type == wire.PacketType_PACKET_TYPING {
+		atomic.AddUint64(&h.relayedTypingCount, 1)
 		h.sessionsMu.RLock()
 		recipientDevices, isOnline := h.sessions[packet.RecipientNxId]
 		var targets []*ClientSession
@@ -172,6 +181,31 @@ func (h *Hub) RouteDecodedPacket(sender *ClientSession, packet *wire.NexaWirePac
 
 		for _, s := range targets {
 			s.SafeSend(rawBytes)
+		}
+		return
+	}
+
+	// 4. Ephemeral WebRTC Signaling (OP_SIGNALING): Zero server cost, zero disk, RAM-only routing
+	if packet.Type == wire.PacketType_PACKET_SIGNALING {
+		h.sessionsMu.RLock()
+		recipientDevices, isOnline := h.sessions[packet.RecipientNxId]
+		var targets []*ClientSession
+		if isOnline {
+			for _, s := range recipientDevices {
+				targets = append(targets, s)
+			}
+		}
+		h.sessionsMu.RUnlock()
+
+		if isOnline && len(targets) > 0 {
+			for _, s := range targets {
+				if !s.SafeSend(rawBytes) {
+					log.Printf("[Hub] Recipient %s signaling buffer full", packet.RecipientNxId)
+				}
+			}
+			log.Printf("[Hub] Relayed OP_SIGNALING packet %s from %s to %s", packet.PacketId, sender.NxId, packet.RecipientNxId)
+		} else {
+			log.Printf("[Hub] Dropped ephemeral OP_SIGNALING packet %s (Recipient %s offline)", packet.PacketId, packet.RecipientNxId)
 		}
 		return
 	}
@@ -193,6 +227,7 @@ func (h *Hub) RouteDecodedPacket(sender *ClientSession, packet *wire.NexaWirePac
 		for _, s := range activeSessions {
 			if s.SafeSend(rawBytes) {
 				deliveredCount++
+				atomic.AddUint64(&h.relayedMessagesCount, 1)
 				log.Printf("[Hub] Relayed packet %s: %s -> %s (Device: %s, RAM-only)", packet.PacketId, packet.SenderNxId, recipientId, s.DeviceId)
 			} else {
 				log.Printf("[Hub] Recipient %s (Device: %s) buffer full", recipientId, s.DeviceId)
@@ -234,6 +269,7 @@ func (h *Hub) bufferOffline(recipientId string, rawBytes []byte) {
 	}
 
 	log.Printf("[Hub] Buffered offline packet for %s in ephemeral Redis (TTL: 24h)", recipientId)
+	atomic.AddUint64(&h.offlineBufferedCount, 1)
 	go h.triggerFcmWakeup(recipientId)
 }
 
@@ -266,12 +302,42 @@ func (h *Hub) flushPendingQueue(recipientId string, session *ClientSession) {
 	}
 
 	log.Printf("[Hub] Flushing %d pending packets to freshly connected NX-ID: %s (Device: %s)", len(pendingPackets), recipientId, session.DeviceId)
+	atomic.AddUint64(&h.offlineFlushedCount, uint64(len(pendingPackets)))
 	for _, raw := range pendingPackets {
 		if !session.SafeSend(raw) {
 			log.Printf("[Hub] Buffer full or session closed streaming pending packet to %s", recipientId)
 			break
 		}
 	}
+}
+
+// GetTelemetryMetrics returns live in-memory operational metrics with zero DB load.
+func (h *Hub) GetTelemetryMetrics() map[string]interface{} {
+	h.sessionsMu.RLock()
+	activeUsers := len(h.sessions)
+	activeDevices := 0
+	for _, devMap := range h.sessions {
+		activeDevices += len(devMap)
+	}
+	h.sessionsMu.RUnlock()
+
+	return map[string]interface{}{
+		"active_users":              activeUsers,
+		"active_device_connections": activeDevices,
+		"relayed_messages_count":    atomic.LoadUint64(&h.relayedMessagesCount),
+		"relayed_typing_events":     atomic.LoadUint64(&h.relayedTypingCount),
+		"offline_buffered_packets":   atomic.LoadUint64(&h.offlineBufferedCount),
+		"offline_flushed_packets":    atomic.LoadUint64(&h.offlineFlushedCount),
+		"ingested_telemetry_batches": atomic.LoadUint64(&h.ingestedTelemetryBatches),
+		"coordinator_model":          "Zero-Disk RAM Traffic Police",
+		"database_write_iops_cost":   0,
+		"server_storage_bytes":       0,
+	}
+}
+
+// RecordTelemetryBatch records an ingested telemetry batch event atomically.
+func (h *Hub) RecordTelemetryBatch(count int) {
+	atomic.AddUint64(&h.ingestedTelemetryBatches, 1)
 }
 
 func (h *Hub) triggerFcmWakeup(recipientNxId string) {

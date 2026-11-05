@@ -146,6 +146,9 @@ class NexaApplication : Application() {
     lateinit var mediaPrefs: com.nexa.app.data.local.preferences.MediaPrefs
         private set
 
+    lateinit var chatPrivacyPrefs: com.nexa.app.data.local.preferences.ChatPrivacyPrefs
+        private set
+
     lateinit var mediaProcessingRepository: com.nexa.app.domain.repository.MediaProcessingRepository
         private set
 
@@ -192,6 +195,12 @@ class NexaApplication : Application() {
         private set
 
     lateinit var custodyTransferManager: com.nexa.app.core.mesh.dtn.CustodyTransferManager
+        private set
+
+    lateinit var notificationPrefs: com.nexa.app.data.local.preferences.NotificationPrefs
+        private set
+
+    lateinit var notificationDispatcher: com.nexa.app.core.notification.NexaNotificationDispatcher
         private set
 
     override fun onCreate() {
@@ -291,7 +300,13 @@ class NexaApplication : Application() {
             }
         )
 
-        // 9. Initialize Chat Repository with Outbox, WebSocket, Data SMS, DTN, and Double Ratchet E2EE
+        // 9. Initialize Privacy-First Notification Subsystem & Channels
+        notificationPrefs = com.nexa.app.data.local.preferences.NotificationPrefs(this)
+        com.nexa.app.core.notification.NexaNotificationChannelManager.createAllNotificationChannels(this)
+        notificationDispatcher = com.nexa.app.core.notification.NexaNotificationDispatcher(this, notificationPrefs)
+
+        // 10. Initialize Chat Repository with Outbox, WebSocket, Data SMS, DTN, and Double Ratchet E2EE
+        chatPrivacyPrefs = com.nexa.app.data.local.preferences.ChatPrivacyPrefs(this)
         chatRepository = ChatRepositoryImpl(
             messageDao = database.messageDao(),
             chatDao = database.chatDao(),
@@ -303,7 +318,9 @@ class NexaApplication : Application() {
             networkMonitor = networkMonitor,
             dtnRepository = dtnRepository,
             doubleRatchetEngine = doubleRatchetEngine,
-            contactDao = database.contactDao()
+            contactDao = database.contactDao(),
+            chatPrivacyPrefs = chatPrivacyPrefs,
+            notificationDispatcher = notificationDispatcher
         )
 
         // 10. Initialize WebRTC Signaling Client, Engine & P2P Transfer Repository
@@ -386,6 +403,7 @@ class NexaApplication : Application() {
         contactRepository = com.nexa.app.data.repository.ContactRepositoryImpl(
             context = this,
             contactDao = database.contactDao(),
+            chatDao = database.chatDao(),
             handshakeApi = handshakeApi,
             secureStorage = secureStorage,
             keystoreManager = keystoreManager,
@@ -467,27 +485,11 @@ class NexaApplication : Application() {
         com.nexa.app.data.worker.DtnOpportunisticDumpWorker.scheduleOpportunisticDump(this)
 
         // 18. Initialize Privacy-First Push Notification Subsystem
-        createNotificationChannels()
         pushManager = com.nexa.app.data.remote.push.NexaPushManager(
             context = this,
             authApiService = apiService,
             secureStorage = secureStorage
         )
-    }
-
-    private fun createNotificationChannels() {
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            val channel = android.app.NotificationChannel(
-                "nexa_messages_channel",
-                "NEXA Messages",
-                android.app.NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Encrypted message wake-up and arrival channel"
-                enableVibration(true)
-            }
-            val manager = getSystemService(android.app.NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
-        }
     }
 
     private fun bytesToHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }

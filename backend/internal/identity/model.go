@@ -12,8 +12,10 @@ type UserAccount struct {
 	GoogleID              string `json:"google_id,omitempty"`
 	Email                 string `json:"email,omitempty"`
 	ProfileName           string `json:"profile_name"`
+	AvatarUrl             string `json:"avatar_url,omitempty"`
 	Bio                   string `json:"bio,omitempty"`
 	Gender                string `json:"gender,omitempty"`
+	Age                   int    `json:"age,omitempty"`
 	CreatedAt             int64  `json:"created_at"`
 	UpdatedAt             int64  `json:"updated_at"`
 }

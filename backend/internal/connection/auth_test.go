@@ -11,7 +11,7 @@ import (
 )
 
 func TestSendChallenge(t *testing.T) {
-	session := NewClientSession(nil, nil, "NX-ALICE-123")
+	session := NewClientSession(nil, nil, "NX-ALICE-123", "dev_test")
 	if err := session.SendChallenge(); err != nil {
 		t.Fatalf("SendChallenge failed: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestVerifyAuthResponse_Valid(t *testing.T) {
 		t.Fatalf("Failed to generate Ed25519 keypair: %v", err)
 	}
 
-	session := NewClientSession(nil, nil, "NX-ALICE-123")
+	session := NewClientSession(nil, nil, "NX-ALICE-123", "dev_test")
 	if err := session.SendChallenge(); err != nil {
 		t.Fatalf("SendChallenge failed: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestVerifyAuthResponse_InvalidSignature(t *testing.T) {
 		t.Fatalf("Failed to generate key: %v", err)
 	}
 
-	session := NewClientSession(nil, nil, "NX-BOB-456")
+	session := NewClientSession(nil, nil, "NX-BOB-456", "dev_test")
 	if err := session.SendChallenge(); err != nil {
 		t.Fatalf("SendChallenge failed: %v", err)
 	}
@@ -135,7 +135,7 @@ func TestVerifyAuthResponse_ReplayAttack(t *testing.T) {
 		t.Fatalf("Failed to generate key: %v", err)
 	}
 
-	session := NewClientSession(nil, nil, "NX-REPLAY-USER")
+	session := NewClientSession(nil, nil, "NX-REPLAY-USER", "dev_test")
 	session.SendChallenge()
 	<-session.Send
 
@@ -172,7 +172,7 @@ func TestVerifyAuthResponse_ExpiredChallenge(t *testing.T) {
 		t.Fatalf("Failed to generate key: %v", err)
 	}
 
-	session := NewClientSession(nil, nil, "NX-TIMEOUT-USER")
+	session := NewClientSession(nil, nil, "NX-TIMEOUT-USER", "dev_test")
 	session.SendChallenge()
 	<-session.Send
 
@@ -207,7 +207,7 @@ func TestVerifyAuthResponse_ImpersonationBlocked(t *testing.T) {
 	}
 
 	// Session registered as VICTIM
-	session := NewClientSession(nil, nil, "NX-VICTIM-999")
+	session := NewClientSession(nil, nil, "NX-VICTIM-999", "dev_test")
 	session.SendChallenge()
 	<-session.Send
 

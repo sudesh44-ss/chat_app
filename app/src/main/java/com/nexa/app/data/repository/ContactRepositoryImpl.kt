@@ -30,7 +30,8 @@ class ContactRepositoryImpl(
     private val secureStorage: SecureStorage,
     private val keystoreManager: CryptoKeystoreManager,
     private val doubleRatchetEngine: DoubleRatchetEngine,
-    private val authApiService: com.nexa.app.data.remote.api.AuthApiService = com.nexa.app.data.remote.api.AuthApiServiceImpl()
+    private val authApiService: com.nexa.app.data.remote.api.AuthApiService = com.nexa.app.data.remote.api.AuthApiServiceImpl(),
+    private val chatDao: com.nexa.app.data.local.dao.ChatDao? = null
 ) : ContactRepository {
 
     private val secureRandom = SecureRandom()
@@ -244,6 +245,32 @@ class ContactRepositoryImpl(
 
     override suspend fun getContact(nxId: String): ContactEntity? {
         return contactDao.getContact(nxId)
+    }
+
+    override suspend fun setContactNickname(nxId: String, customNickname: String?): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val sanitized = customNickname?.trim()?.takeIf { it.isNotBlank() }
+            contactDao.updateNickname(nxId, sanitized)
+            val contact = contactDao.getContact(nxId)
+            val effective = contact?.effectiveDisplayName ?: sanitized ?: nxId
+            chatDao?.updateParticipantName(nxId, effective)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun updateAvatarUrl(nxId: String, avatarUrl: String?): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            contactDao.updateAvatarUrl(nxId, avatarUrl)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override fun searchContacts(query: String): Flow<List<ContactEntity>> {
+        return contactDao.searchContacts(query.trim())
     }
 
     // --- Keystore-Protected Key Pair Management ---

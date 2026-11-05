@@ -1,5 +1,7 @@
 package com.nexa.app.presentation.chat
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
@@ -26,8 +28,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.PushPin
+import androidx.compose.material.icons.filled.RemoveCircleOutline
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -51,6 +56,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -67,13 +73,22 @@ import com.nexa.app.core.theme.NexaWarningOrange
 import com.nexa.app.domain.model.TransportType
 import com.nexa.app.presentation.chat.components.ChatInputField
 import com.nexa.app.presentation.chat.components.MessageBubble
+import com.nexa.app.presentation.chat.components.NexaChatTopBar
+import com.nexa.app.presentation.chat.components.PinDurationDialog
+import com.nexa.app.presentation.chat.components.PinnedMessageBanner
+import com.nexa.app.presentation.chat.components.PinnedMessageUiModel
+import com.nexa.app.presentation.chat.components.SmsFailureBottomSheet
 import com.nexa.app.presentation.chat.components.TransportToggleBar
+import com.nexa.app.presentation.common.viewer.ProfileImageViewerDialog
+import com.nexa.app.presentation.contacts.components.EditNicknameDialog
+import com.nexa.app.presentation.contacts.components.PeerProfileDialog
 import com.nexa.app.presentation.chat.components.VideoQualityDialog
 import com.nexa.app.presentation.chat.components.VideoTranscodeProgressOverlay
 import com.nexa.app.presentation.transfer.TransferUiEvent
 import com.nexa.app.presentation.transfer.TransferViewModel
 import com.nexa.app.presentation.transfer.components.IncomingTransferDialog
 import com.nexa.app.presentation.transfer.components.TransferProgressCard
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -90,8 +105,10 @@ fun ChatScreen(
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
 
     var phoneInputText by remember { mutableStateOf(uiState.destinationPhone) }
+    var activeViewerImageModel by remember { mutableStateOf<Any?>(null) }
 
     LaunchedEffect(conversationId) {
         viewModel.onEvent(
@@ -170,6 +187,15 @@ fun ChatScreen(
         transferUiState?.errorMessage?.let { msg ->
             snackbarHostState.showSnackbar(msg)
             transferViewModel?.onEvent(TransferUiEvent.ClearError)
+        }
+    }
+
+    LaunchedEffect(uiState.pinLimitReachedSnackbar) {
+        if (uiState.pinLimitReachedSnackbar) {
+            snackbarHostState.showSnackbar(
+                message = "Pin limit reached: You can pin up to 4 messages in this chat. Unpin an existing message to pin another one."
+            )
+            viewModel.onEvent(ChatUiEvent.DismissPinLimitSnackbar)
         }
     }
 
@@ -261,82 +287,197 @@ fun ChatScreen(
         )
     }
 
+    // Carrier SMS & Multi-Transport Failure Remediation Sheet
+    if (uiState.showSmsFailureSheet && uiState.failedMessageCandidate != null) {
+        SmsFailureBottomSheet(
+            failedMessage = uiState.failedMessageCandidate!!,
+            onRetryTransport = { transport ->
+                viewModel.onEvent(ChatUiEvent.RetryFailedMessage(transport))
+            },
+            onDismiss = {
+                viewModel.onEvent(ChatUiEvent.DismissSmsFailureSheet)
+            }
+        )
+    }
+
+    // 3-Tier Identity Profile Dialog
+    if (uiState.showProfileDialog) {
+        PeerProfileDialog(
+            nxId = participantNxId,
+            originalRegisteredName = uiState.originalProfileName.ifBlank { participantName },
+            customNickname = uiState.customNickname,
+            deviceContactName = uiState.deviceContactName,
+            avatarUrl = uiState.participantAvatarUrl,
+            deviceContactPhotoUri = uiState.deviceContactPhotoUri,
+            onEditNickname = {
+                viewModel.onEvent(ChatUiEvent.SetProfileDialogVisible(false))
+                viewModel.onEvent(ChatUiEvent.SetNicknameDialogVisible(true))
+            },
+            onDismiss = {
+                viewModel.onEvent(ChatUiEvent.SetProfileDialogVisible(false))
+            }
+        )
+    }
+
+    // Client-Side Contact Nickname Dialog
+    if (uiState.showNicknameDialog) {
+        EditNicknameDialog(
+            contactNxId = participantNxId,
+            originalProfileName = uiState.originalProfileName.ifBlank { participantName },
+            currentNickname = uiState.customNickname,
+            onSaveNickname = { newNick ->
+                viewModel.onEvent(ChatUiEvent.SaveNickname(newNick))
+            },
+            onDismiss = {
+                viewModel.onEvent(ChatUiEvent.SetNicknameDialogVisible(false))
+            }
+        )
+    }
+
+    // Pin Duration Selection Dialog
+    if (uiState.showPinDurationDialog && uiState.candidateMessageToPin != null) {
+        PinDurationDialog(
+            onDismiss = {
+                viewModel.onEvent(ChatUiEvent.DismissPinDurationDialog)
+            },
+            onConfirmPin = { duration ->
+                viewModel.onEvent(ChatUiEvent.ConfirmPinMessage(duration))
+            }
+        )
+    }
+
+    // Full-Screen Profile Photo Viewer Dialog (Opens on photo tap, never on initial avatar)
+    activeViewerImageModel?.let { photoModel ->
+        ProfileImageViewerDialog(
+            imageModel = photoModel,
+            onDismiss = { activeViewerImageModel = null }
+        )
+    }
+
+    // Contextual Message Action Dialog (Pin / Unpin / Copy)
+    if (uiState.selectedMessageForAction != null) {
+        val selectedMsg = uiState.selectedMessageForAction!!
+        AlertDialog(
+            onDismissRequest = { viewModel.onEvent(ChatUiEvent.SetSelectedMessageForAction(null)) },
+            title = {
+                Text(
+                    text = "Message Actions",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+            },
+            text = {
+                Column {
+                    Text(
+                        text = selectedMsg.plainTextContent.take(120),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Pin / Unpin Action
+                    Surface(
+                        onClick = {
+                            if (selectedMsg.isPinned) {
+                                viewModel.onEvent(ChatUiEvent.RequestUnpinMessage(selectedMsg))
+                            } else {
+                                viewModel.onEvent(ChatUiEvent.RequestPinMessage(selectedMsg))
+                            }
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = if (selectedMsg.isPinned) Icons.Default.RemoveCircleOutline else Icons.Default.PushPin,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = if (selectedMsg.isPinned) "Unpin Message" else "Pin Message",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Copy Text Action
+                    Surface(
+                        onClick = {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                            clipboard?.setPrimaryClip(
+                                ClipData.newPlainText("NEXA Message", selectedMsg.plainTextContent)
+                            )
+                            viewModel.onEvent(ChatUiEvent.SetSelectedMessageForAction(null))
+                            coroutineScope.launch {
+                                snackbarHostState.showSnackbar("Copied to clipboard")
+                            }
+                        },
+                        shape = RoundedCornerShape(8.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(12.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Text(
+                                text = "Copy Text",
+                                style = MaterialTheme.typography.bodyLarge,
+                                fontWeight = FontWeight.Medium
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(
+                    onClick = { viewModel.onEvent(ChatUiEvent.SetSelectedMessageForAction(null)) }
+                ) {
+                    Text("Close")
+                }
+            }
+        )
+    }
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        val activeColor = when (uiState.selectedTransport) {
-                            TransportType.DATA_SMS -> NexaWarningOrange
-                            TransportType.DTN_MESH -> NexaBadgeMonospace
-                            TransportType.INTERNET -> MaterialTheme.colorScheme.primary
-                        }
-
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .background(
-                                    color = activeColor.copy(alpha = 0.15f),
-                                    shape = CircleShape
-                                ),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Shield,
-                                contentDescription = null,
-                                tint = activeColor,
-                                modifier = Modifier.size(20.dp)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(10.dp))
-
-                        Column {
-                            Text(
-                                text = participantName.ifBlank { participantNxId },
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold
-                            )
-                            if (uiState.isPeerTyping) {
-                                Text(
-                                    text = "typing...",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
-                                    ),
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            } else {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = participantNxId,
-                                        style = MaterialTheme.typography.labelSmall.copy(
-                                            fontFamily = FontFamily.Monospace,
-                                            fontSize = 11.sp
-                                        ),
-                                        color = NexaBadgeMonospace
-                                    )
-                                    Spacer(modifier = Modifier.width(6.dp))
-                                    ConnectionStatusIndicator(
-                                        connectionState = uiState.connectionState,
-                                        selectedTransport = uiState.selectedTransport
-                                    )
-                                }
-                            }
-                        }
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                )
+            NexaChatTopBar(
+                participantName = uiState.participantName.ifBlank { participantName },
+                participantNxId = participantNxId,
+                isPeerTyping = uiState.isPeerTyping,
+                isPeerOnline = uiState.isPeerOnline,
+                connectionState = uiState.connectionState,
+                selectedRouteMode = uiState.selectedRouteMode,
+                selectedTransport = uiState.selectedTransport,
+                showTransportBadges = uiState.showTransportBadges,
+                originalProfileName = uiState.originalProfileName.ifBlank { participantName },
+                deviceContactName = uiState.deviceContactName,
+                avatarUrl = uiState.participantAvatarUrl,
+                deviceContactPhotoUri = uiState.deviceContactPhotoUri,
+                onSelectRouteMode = { mode -> viewModel.onEvent(ChatUiEvent.SetRouteMode(mode)) },
+                onToggleTransportBadges = { show -> viewModel.onEvent(ChatUiEvent.SetShowTransportBadges(show)) },
+                onEditNickname = { viewModel.onEvent(ChatUiEvent.SetNicknameDialogVisible(true)) },
+                onViewProfile = { viewModel.onEvent(ChatUiEvent.SetProfileDialogVisible(true)) },
+                onAvatarPhotoClick = { photoModel -> activeViewerImageModel = photoModel },
+                onBack = onBack
             )
         },
         containerColor = MaterialTheme.colorScheme.background,
@@ -381,6 +522,33 @@ fun ChatScreen(
                 }
             }
 
+            // Pinned Messages Banner (Multi-pin cycle carousel)
+            if (uiState.pinnedMessages.isNotEmpty()) {
+                val pinnedUiModels = remember(uiState.pinnedMessages, uiState.messages) {
+                    uiState.pinnedMessages.map { pin ->
+                        val origIdx = uiState.messages.indexOfFirst { it.packetId == pin.packetId }.coerceAtLeast(0)
+                        PinnedMessageUiModel(
+                            messageId = pin.packetId,
+                            previewText = pin.plainTextContent.take(60),
+                            originalListIndex = origIdx
+                        )
+                    }
+                }
+                PinnedMessageBanner(
+                    pinnedMessages = pinnedUiModels,
+                    currentIndex = uiState.currentPinnedIndex,
+                    onBannerClick = {
+                        val curr = uiState.currentPinnedIndex.coerceIn(0, pinnedUiModels.lastIndex)
+                        val target = pinnedUiModels[curr]
+                        coroutineScope.launch {
+                            listState.animateScrollToItem(target.originalListIndex)
+                        }
+                        viewModel.onEvent(ChatUiEvent.OnPinnedBannerClicked)
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                )
+            }
+
             // Message Stream List
             LazyColumn(
                 state = listState,
@@ -392,7 +560,17 @@ fun ChatScreen(
                     items = uiState.messages,
                     key = { it.packetId }
                 ) { msg ->
-                    MessageBubble(message = msg)
+                    MessageBubble(
+                        message = msg,
+                        showTransportBadge = uiState.showTransportBadges,
+                        isHighlighted = uiState.highlightedMessageId == msg.packetId,
+                        onFailedClick = { failedMsg ->
+                            viewModel.onEvent(ChatUiEvent.OnFailedMessageClicked(failedMsg))
+                        },
+                        onLongClick = {
+                            viewModel.onEvent(ChatUiEvent.SetSelectedMessageForAction(msg))
+                        }
+                    )
                 }
             }
 

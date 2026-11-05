@@ -57,6 +57,17 @@ class ContactViewModel(
         contactsFlow,
         _addressState
     ) { baseState, addr ->
+        val query = addr.searchQuery.trim()
+        val filteredMutual = if (query.isBlank()) {
+            baseState.mutualFriends
+        } else {
+            baseState.mutualFriends.filter {
+                it.displayName.contains(query, ignoreCase = true) ||
+                    (it.customNickname?.contains(query, ignoreCase = true) == true) ||
+                    it.nxId.contains(query, ignoreCase = true)
+            }
+        }
+
         val filtered = if (addr.searchQuery.isBlank()) {
             addr.deviceContacts
         } else {
@@ -68,6 +79,7 @@ class ContactViewModel(
         }
 
         baseState.copy(
+            mutualFriends = filteredMutual,
             deviceContacts = filtered,
             searchQuery = addr.searchQuery,
             isPermissionGranted = addr.isPermissionGranted,
@@ -197,6 +209,12 @@ class ContactViewModel(
     fun blockContact(nxId: String) {
         viewModelScope.launch {
             contactRepository.rejectOrBlockContact(nxId, block = true)
+        }
+    }
+
+    fun setContactNickname(nxId: String, customNickname: String?) {
+        viewModelScope.launch {
+            contactRepository.setContactNickname(nxId, customNickname)
         }
     }
 

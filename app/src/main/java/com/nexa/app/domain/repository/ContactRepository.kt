@@ -44,6 +44,18 @@ interface ContactRepository {
     suspend fun getContact(nxId: String): ContactEntity?
 
     /**
+     * Sets or clears a private user-defined custom nickname for [nxId].
+     * Zero-Knowledge: This nickname is stored strictly on the local device in encrypted SQLite
+     * and is never transmitted to the relay server or peer.
+     */
+    suspend fun setContactNickname(nxId: String, customNickname: String?): Result<Unit>
+
+    /**
+     * Performs a local encrypted search matching nickname, original profile name, or NX-ID.
+     */
+    fun searchContacts(query: String): Flow<List<ContactEntity>>
+
+    /**
      * Reads device address-book contacts locally via ContentResolver, normalizes phone numbers,
      * performs authenticated batch lookup against backend for verified NEXA users,
      * and returns the augmented DeviceContact list.
@@ -55,4 +67,9 @@ interface ContactRepository {
      * Look up a single phone number against backend to check if registered.
      */
     suspend fun lookupSinglePhone(phoneNumber: String): Result<com.nexa.app.domain.model.DeviceContact?>
+
+    /**
+     * Updates the official VEYRA / NEXA avatar URL for [nxId] upon real-time PROFILE_UPDATE.
+     */
+    suspend fun updateAvatarUrl(nxId: String, avatarUrl: String?): Result<Unit> = Result.success(Unit)
 }

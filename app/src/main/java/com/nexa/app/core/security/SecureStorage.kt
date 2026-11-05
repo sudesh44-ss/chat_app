@@ -80,6 +80,28 @@ class SecureStorage(context: Context) {
         return prefs.getString(KEY_DEVICE_ID, null) ?: getOrCreateDeviceId()
     }
 
+    fun saveAvatarUrl(url: String?) {
+        if (url == null) {
+            prefs.edit().remove(KEY_AVATAR_URL).apply()
+        } else {
+            prefs.edit().putString(KEY_AVATAR_URL, url).apply()
+        }
+    }
+
+    fun getAvatarUrl(): String? = prefs.getString(KEY_AVATAR_URL, null)
+
+    fun saveIdentityKeyPair(publicKeyHex: String, encryptedPrivKeyHex: String, ivHex: String) {
+        prefs.edit()
+            .putString(KEY_IDENTITY_PUBLIC_KEY, publicKeyHex)
+            .putString(KEY_IDENTITY_ENCRYPTED_PRIVKEY, encryptedPrivKeyHex)
+            .putString(KEY_IDENTITY_IV, ivHex)
+            .apply()
+    }
+
+    fun getIdentityPublicKey(): String? = prefs.getString(KEY_IDENTITY_PUBLIC_KEY, null)
+    fun getIdentityEncryptedPrivKey(): String? = prefs.getString(KEY_IDENTITY_ENCRYPTED_PRIVKEY, null)
+    fun getIdentityIv(): String? = prefs.getString(KEY_IDENTITY_IV, null)
+
     fun clearAll() {
         prefs.edit().clear().apply()
     }
@@ -92,5 +114,9 @@ class SecureStorage(context: Context) {
         private const val KEY_DB_PASSPHRASE = "key_db_passphrase"
         private const val KEY_RECOVERY_PASSPHRASE = "key_recovery_passphrase"
         private const val KEY_DEVICE_ID = "key_device_id"
+        private const val KEY_AVATAR_URL = "key_avatar_url"
+        private const val KEY_IDENTITY_PUBLIC_KEY = "key_identity_public_key"
+        private const val KEY_IDENTITY_ENCRYPTED_PRIVKEY = "key_identity_encrypted_privkey"
+        private const val KEY_IDENTITY_IV = "key_identity_iv"
     }
 }

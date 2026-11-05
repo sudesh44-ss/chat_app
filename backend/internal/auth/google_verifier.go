@@ -20,6 +20,7 @@ type GoogleClaims struct {
 	Email         string `json:"email"`
 	EmailVerified bool   `json:"email_verified"`
 	Name          string `json:"name"`
+	Picture       string `json:"picture"`
 	ExpiresAt     int64  `json:"exp"`
 	IssuedAt      int64  `json:"iat"`
 }

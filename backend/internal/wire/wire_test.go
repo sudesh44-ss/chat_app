@@ -140,3 +140,45 @@ func TestNexaWirePacket_AuthResponse_EncodeDecode(t *testing.T) {
 		t.Errorf("PublicKey mismatch")
 	}
 }
+
+func TestNexaWirePacket_Signaling_EncodeDecode(t *testing.T) {
+	orig := &NexaWirePacket{
+		PacketId:      "sig_777",
+		Type:          PacketType_PACKET_SIGNALING,
+		SenderNxId:    "NX-ALICE",
+		RecipientNxId: "NX-BOB",
+		Timestamp:     1731568200000,
+		Signaling: &SignalingPayload{
+			TransferId: 987654321,
+			Action:     "OFFER",
+			Data:       "v=0\r\no=- 12345 2 IN IP4 127.0.0.1\r\n",
+		},
+	}
+
+	encoded, err := orig.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Type != PacketType_PACKET_SIGNALING {
+		t.Errorf("Type mismatch: got %v, want %v", decoded.Type, PacketType_PACKET_SIGNALING)
+	}
+	if decoded.Signaling == nil {
+		t.Fatal("Decoded Signaling is nil")
+	}
+	if decoded.Signaling.TransferId != 987654321 {
+		t.Errorf("TransferId mismatch: got %d, want 987654321", decoded.Signaling.TransferId)
+	}
+	if decoded.Signaling.Action != "OFFER" {
+		t.Errorf("Action mismatch: got %s, want OFFER", decoded.Signaling.Action)
+	}
+	if decoded.Signaling.Data != orig.Signaling.Data {
+		t.Errorf("Data mismatch: got %s, want %s", decoded.Signaling.Data, orig.Signaling.Data)
+	}
+}
+

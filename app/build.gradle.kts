@@ -137,6 +137,12 @@ dependencies {
     implementation(libs.androidx.media3.effect)
     implementation(libs.androidx.media3.common)
 
+    // Coil Image Loading Pipeline
+    implementation(libs.coil.compose)
+
+    // AndroidX ExifInterface for Image Orientation & Metadata Sanitization
+    implementation(libs.androidx.exifinterface)
+
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation("org.json:json:20240303")

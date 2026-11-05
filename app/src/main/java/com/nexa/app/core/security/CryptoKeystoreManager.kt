@@ -98,6 +98,31 @@ class CryptoKeystoreManager(private val context: Context) {
     }
 
     /**
+     * Retrieves an existing identity keypair from secure storage, or creates a new one.
+     */
+    fun getOrCreateIdentityKeyPair(secureStorage: SecureStorage): IdentityKeyPair {
+        val pub = secureStorage.getIdentityPublicKey()
+        val enc = secureStorage.getIdentityEncryptedPrivKey()
+        val iv = secureStorage.getIdentityIv()
+
+        if (!pub.isNullOrBlank() && !enc.isNullOrBlank() && !iv.isNullOrBlank()) {
+            return IdentityKeyPair(
+                publicKeyHex = pub,
+                encryptedPrivateKey = enc.hexToByteArray(),
+                iv = iv.hexToByteArray()
+            )
+        }
+
+        val generated = generateIdentityKeyPair()
+        secureStorage.saveIdentityKeyPair(
+            publicKeyHex = generated.publicKeyHex,
+            encryptedPrivKeyHex = generated.encryptedPrivateKey.toHex(),
+            ivHex = generated.iv.toHex()
+        )
+        return generated
+    }
+
+    /**
      * Derives a 32-byte public key from a 32-byte private key seed using SHA-256 / Edwards curve point compression.
      */
     private fun derivePublicKeyBytes(privateSeed: ByteArray): ByteArray {

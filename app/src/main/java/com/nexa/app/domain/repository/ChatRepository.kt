@@ -17,6 +17,11 @@ interface ChatRepository {
         transport: TransportType = TransportType.INTERNET,
         destinationPhone: String? = null
     ): Result<Message>
+    suspend fun retryFailedMessage(
+        packetId: String,
+        transport: TransportType,
+        destinationPhone: String? = null
+    ): Result<Message> = Result.failure(UnsupportedOperationException())
     suspend fun markConversationRead(conversationId: String)
     suspend fun createOrGetConversation(participantNxId: String, participantName: String? = null): ChatConversation
     fun startConnection()
@@ -25,4 +30,8 @@ interface ChatRepository {
     suspend fun handleIncomingDataSmsPacket(packet: NexaWirePacket)
     fun sendTypingIndicator(recipientNxId: String, conversationId: String, isTyping: Boolean)
     fun getTypingEvents(): Flow<Pair<String, Boolean>>
+    fun getPinnedMessages(conversationId: String): Flow<List<Message>> = kotlinx.coroutines.flow.emptyFlow()
+    suspend fun pinMessage(packetId: String, conversationId: String, recipientNxId: String, durationMillis: Long?): Result<Unit> = Result.success(Unit)
+    suspend fun unpinMessage(packetId: String, conversationId: String, recipientNxId: String): Result<Unit> = Result.success(Unit)
+    suspend fun clearExpiredPins(conversationId: String) {}
 }

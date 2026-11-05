@@ -20,6 +20,7 @@ const (
 	PacketType_PACKET_AUTH_FAILURE   PacketType = 7
 	PacketType_PACKET_TYPING         PacketType = 10
 	PacketType_PACKET_DEVICE_SYNC    PacketType = 11
+	PacketType_PACKET_SIGNALING      PacketType = 12 // OP_SIGNALING for WebRTC SDP & ICE candidates
 )
 
 type AckStatus int32
@@ -67,6 +68,12 @@ type DeviceSyncPayload struct {
 	EncryptedPayload []byte `json:"encrypted_payload"`
 }
 
+type SignalingPayload struct {
+	TransferId int64  `json:"transfer_id"`
+	Action     string `json:"action"` // "OFFER", "ACCEPT", "DECLINE", "SDP", "ICE", "RESUME", "TIMEOUT_FALLBACK"
+	Data       string `json:"data,omitempty"`
+}
+
 type NexaWirePacket struct {
 	PacketId      string                   `json:"packet_id"`
 	Type          PacketType               `json:"type"`
@@ -79,6 +86,7 @@ type NexaWirePacket struct {
 	AuthResponse  *AuthResponsePayload     `json:"auth_response,omitempty"`
 	Typing        *TypingPayload           `json:"typing,omitempty"`
 	DeviceSync    *DeviceSyncPayload       `json:"device_sync,omitempty"`
+	Signaling     *SignalingPayload        `json:"signaling,omitempty"`
 }
 
 // Encode encodes a NexaWirePacket into standard Protobuf wire binary format.
@@ -238,6 +246,26 @@ func (p *NexaWirePacket) Encode() ([]byte, error) {
 		writeLengthDelimited(buf, dsBuf.Bytes())
 	}
 
+	// Field 12: signaling (SignalingPayload, wire type 2)
+	if p.Signaling != nil {
+		sBuf := new(bytes.Buffer)
+		if p.Signaling.TransferId != 0 {
+			writeTag(sBuf, 1, 0)
+			writeVarint(sBuf, uint64(p.Signaling.TransferId))
+		}
+		if p.Signaling.Action != "" {
+			writeTag(sBuf, 2, 2)
+			writeLengthDelimited(sBuf, []byte(p.Signaling.Action))
+		}
+		if p.Signaling.Data != "" {
+			writeTag(sBuf, 3, 2)
+			writeLengthDelimited(sBuf, []byte(p.Signaling.Data))
+		}
+
+		writeTag(buf, 12, 2)
+		writeLengthDelimited(buf, sBuf.Bytes())
+	}
+
 	return buf.Bytes(), nil
 }
 
@@ -349,6 +377,16 @@ func Decode(data []byte) (*NexaWirePacket, error) {
 				return nil, err
 			}
 			packet.DeviceSync = ds
+		case 12: // signaling
+			val, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			sig, err := decodeSignalingPayload(val)
+			if err != nil {
+				return nil, err
+			}
+			packet.Signaling = sig
 		default:
 			// Skip unknown fields according to wire type
 			if err := skipField(r, wireType); err != nil {
@@ -615,6 +653,50 @@ func decodeDeviceSyncPayload(data []byte) (*DeviceSyncPayload, error) {
 				return nil, err
 			}
 			payload.EncryptedPayload = b
+		default:
+			if err := skipField(r, wireType); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return payload, nil
+}
+
+func decodeSignalingPayload(data []byte) (*SignalingPayload, error) {
+	r := bytes.NewReader(data)
+	payload := &SignalingPayload{}
+
+	for {
+		tag, err := binary.ReadUvarint(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+
+		switch fieldNum {
+		case 1:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.TransferId = int64(v)
+		case 2:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Action = string(b)
+		case 3:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Data = string(b)
 		default:
 			if err := skipField(r, wireType); err != nil {
 				return nil, err

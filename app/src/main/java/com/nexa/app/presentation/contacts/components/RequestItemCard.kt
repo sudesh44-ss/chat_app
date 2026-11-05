@@ -32,6 +32,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexa.app.data.local.entity.ContactEntity
+import com.nexa.app.presentation.common.avatar.NexaAvatar
 
 /**
  * Material 3 Card rendering an inbound connection request with sender avatar, NX-ID badge,
@@ -42,7 +43,8 @@ fun RequestItemCard(
     contact: ContactEntity,
     onAccept: () -> Unit,
     onReject: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    onPhotoClick: ((Any) -> Unit)? = null
 ) {
     Card(
         shape = RoundedCornerShape(16.dp),
@@ -57,22 +59,14 @@ fun RequestItemCard(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                // Avatar with Initials
-                val initial = contact.displayName.firstOrNull()?.uppercaseChar()?.toString() ?: "U"
-                Box(
-                    modifier = Modifier
-                        .size(44.dp)
-                        .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = initial,
-                        style = MaterialTheme.typography.titleMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    )
-                }
+                // Universal 3-Tier Priority Avatar (Photo viewer only when photo exists)
+                NexaAvatar(
+                    nexaAvatarUrl = contact.effectiveAvatarUrl,
+                    deviceContactPhotoUri = contact.deviceContactPhotoUri,
+                    displayName = contact.effectiveDisplayName,
+                    size = 44.dp,
+                    onPhotoClick = onPhotoClick
+                )
 
                 Spacer(modifier = Modifier.width(12.dp))
 

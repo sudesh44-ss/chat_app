@@ -18,11 +18,12 @@ data class UserEntity(
     val createdAt: Long = System.currentTimeMillis()
 )
 
-fun UserEntity.toDomain(): UserProfile {
+fun UserEntity.toDomain(avatarUrl: String? = null): UserProfile {
     return UserProfile(
         nxId = nxId,
         fullName = fullName,
         phoneNumber = phoneNumber,
+        avatarUrl = avatarUrl,
         age = age,
         gender = gender,
         bio = bio,

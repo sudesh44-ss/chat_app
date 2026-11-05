@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.People
 import androidx.compose.material.icons.filled.PersonAdd
@@ -79,8 +80,13 @@ import androidx.core.content.ContextCompat
 import com.nexa.app.core.contacts.ContactsProviderHelper
 import com.nexa.app.core.theme.NexaBadgeMonospace
 import com.nexa.app.core.theme.NexaVerifiedGreen
+import com.nexa.app.data.local.entity.ContactEntity
 import com.nexa.app.domain.model.DeviceContact
+import com.nexa.app.presentation.common.avatar.NexaAvatar
+import com.nexa.app.presentation.common.viewer.ProfileImageViewerDialog
 import com.nexa.app.presentation.contacts.components.AddContactByPhoneDialog
+import com.nexa.app.presentation.contacts.components.EditNicknameDialog
+import com.nexa.app.presentation.contacts.components.PeerProfileDialog
 
 /**
  * Dedicated Contacts screen displaying device address-book contacts,
@@ -101,6 +107,16 @@ fun ContactListScreen(
     val coroutineScope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsState()
     var showAddPhoneDialog by remember { mutableStateOf(false) }
+    var contactForNicknameEdit by remember { mutableStateOf<ContactEntity?>(null) }
+    var contactForProfileView by remember { mutableStateOf<ContactEntity?>(null) }
+    var activeViewerPhoto by remember { mutableStateOf<Any?>(null) }
+
+    if (activeViewerPhoto != null) {
+        ProfileImageViewerDialog(
+            imageModel = activeViewerPhoto!!,
+            onDismiss = { activeViewerPhoto = null }
+        )
+    }
 
     // 1. Permission Check and Request
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -228,54 +244,7 @@ fun ContactListScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp)
             )
 
-            // 2. Pending Connection Requests Banner (if any)
-            if (uiState.pendingCount > 0) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp)
-                        .clickable { onNavigateToPending() },
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
-                    )
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            BadgedBox(
-                                badge = {
-                                    Badge { Text(uiState.pendingCount.toString()) }
-                                }
-                            ) {
-                                Icon(
-                                    Icons.Default.Notifications,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            Spacer(modifier = Modifier.width(14.dp))
-                            Text(
-                                text = "Connection Requests",
-                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
-                            )
-                        }
-
-                        Icon(
-                            Icons.Default.ChevronRight,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                }
-            }
-
-            // 3. Network Warning Banner (if offline/lookup failed, but keeping local contacts)
+            // 2. Network Warning Banner (if offline/lookup failed, but keeping local contacts)
             if (uiState.isNetworkError) {
                 Card(
                     modifier = Modifier
@@ -339,7 +308,7 @@ fun ContactListScreen(
                     }
                 }
 
-                uiState.deviceContacts.isEmpty() -> {
+                uiState.deviceContacts.isEmpty() && uiState.mutualFriends.isEmpty() -> {
                     EmptyContactsCard(
                         hasSearch = uiState.searchQuery.isNotEmpty(),
                         onAddContact = { showAddPhoneDialog = true }
@@ -348,30 +317,108 @@ fun ContactListScreen(
 
                 else -> {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        items(uiState.deviceContacts, key = { it.normalizedNumber }) { contact ->
-                            DeviceContactItemRow(
-                                contact = contact,
-                                onStartChat = {
-                                    if (contact.nexaNxId != null) {
-                                        onStartChat(contact.nexaNxId, contact.displayName)
+                        if (uiState.mutualFriends.isNotEmpty()) {
+                            item {
+                                Text(
+                                    text = "NEXA Contacts (${uiState.mutualFriends.size})",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                )
+                            }
+                            items(uiState.mutualFriends, key = { it.nxId }) { contact ->
+                                MutualContactItemRow(
+                                    contact = contact,
+                                    onStartChat = {
+                                        onStartChat(contact.nxId, contact.effectiveDisplayName)
+                                    },
+                                    onEditNickname = {
+                                        contactForNicknameEdit = contact
+                                    },
+                                    onViewProfile = {
+                                        contactForProfileView = contact
+                                    },
+                                    onPhotoClick = { photoModel ->
+                                        activeViewerPhoto = photoModel
                                     }
-                                },
-                                onInvite = {
-                                    val inviteIntent = Intent(Intent.ACTION_SENDTO).apply {
-                                        data = Uri.parse("smsto:${contact.normalizedNumber}")
-                                        putExtra("sms_body", "Hey! Connect with me on NEXA, the private end-to-end encrypted messenger.")
-                                    }
-                                    context.startActivity(inviteIntent)
+                                )
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
+                                )
+                            }
+                        }
+
+                        if (uiState.deviceContacts.isNotEmpty()) {
+                            if (uiState.mutualFriends.isNotEmpty()) {
+                                item {
+                                    Text(
+                                        text = "Address Book (${uiState.deviceContacts.size})",
+                                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                                    )
                                 }
-                            )
-                            HorizontalDivider(
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
-                            )
+                            }
+                            items(uiState.deviceContacts, key = { it.normalizedNumber }) { contact ->
+                                DeviceContactItemRow(
+                                    contact = contact,
+                                    onStartChat = {
+                                        if (contact.nexaNxId != null) {
+                                            onStartChat(contact.nexaNxId, contact.displayName)
+                                        }
+                                    },
+                                    onInvite = {
+                                        val inviteIntent = Intent(Intent.ACTION_SENDTO).apply {
+                                            data = Uri.parse("smsto:${contact.normalizedNumber}")
+                                            putExtra("sms_body", "Hey! Connect with me on NEXA, the private end-to-end encrypted messenger.")
+                                        }
+                                        context.startActivity(inviteIntent)
+                                    },
+                                    onPhotoClick = { photoModel ->
+                                        activeViewerPhoto = photoModel
+                                    }
+                                )
+                                HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 16.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f)
+                                )
+                            }
                         }
                     }
                 }
             }
+        }
+
+        // 3-Tier Identity Profile Dialog
+        contactForProfileView?.let { contact ->
+            PeerProfileDialog(
+                nxId = contact.nxId,
+                originalRegisteredName = contact.displayName,
+                customNickname = contact.customNickname,
+                deviceContactName = contact.deviceContactName,
+                avatarUrl = contact.effectiveAvatarUrl,
+                deviceContactPhotoUri = contact.deviceContactPhotoUri,
+                onEditNickname = {
+                    contactForNicknameEdit = contact
+                    contactForProfileView = null
+                },
+                onDismiss = { contactForProfileView = null }
+            )
+        }
+
+        // Edit Nickname Modal Dialog
+        contactForNicknameEdit?.let { contact ->
+            EditNicknameDialog(
+                contactNxId = contact.nxId,
+                originalProfileName = contact.displayName,
+                currentNickname = contact.customNickname,
+                onSaveNickname = { newNick ->
+                    viewModel.setContactNickname(contact.nxId, newNick)
+                    contactForNicknameEdit = null
+                },
+                onDismiss = { contactForNicknameEdit = null }
+            )
         }
 
         // Add Contact by Phone Modal Dialog
@@ -394,7 +441,8 @@ fun ContactListScreen(
 private fun DeviceContactItemRow(
     contact: DeviceContact,
     onStartChat: () -> Unit,
-    onInvite: () -> Unit
+    onInvite: () -> Unit,
+    onPhotoClick: ((Any) -> Unit)? = null
 ) {
     Row(
         modifier = Modifier
@@ -403,26 +451,14 @@ private fun DeviceContactItemRow(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        val initial = contact.displayName.firstOrNull()?.uppercase() ?: "U"
-
-        // Avatar
-        Box(
-            modifier = Modifier
-                .size(46.dp)
-                .background(
-                    if (contact.isNexaUser) NexaVerifiedGreen.copy(alpha = 0.18f) else MaterialTheme.colorScheme.surfaceVariant,
-                    CircleShape
-                ),
-            contentAlignment = Alignment.Center
-        ) {
-            Text(
-                text = initial,
-                style = MaterialTheme.typography.titleMedium.copy(
-                    fontWeight = FontWeight.Bold,
-                    color = if (contact.isNexaUser) NexaVerifiedGreen else MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            )
-        }
+        // Universal 3-Tier Priority Avatar (Photo viewer only when photo exists)
+        NexaAvatar(
+            nexaAvatarUrl = null,
+            deviceContactPhotoUri = contact.avatarUri,
+            displayName = contact.displayName,
+            size = 46.dp,
+            onPhotoClick = onPhotoClick
+        )
 
         Spacer(modifier = Modifier.width(14.dp))
 
@@ -612,6 +648,94 @@ private fun EmptyContactsCard(
                     Text("Add Contact")
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun MutualContactItemRow(
+    contact: ContactEntity,
+    onStartChat: () -> Unit,
+    onEditNickname: () -> Unit,
+    onViewProfile: () -> Unit = {},
+    onPhotoClick: ((Any) -> Unit)? = null
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onStartChat)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        // Universal 3-Tier Priority Avatar (Photo viewer only when photo exists)
+        NexaAvatar(
+            nexaAvatarUrl = contact.effectiveAvatarUrl,
+            deviceContactPhotoUri = contact.deviceContactPhotoUri,
+            displayName = contact.effectiveDisplayName,
+            size = 46.dp,
+            onPhotoClick = onPhotoClick
+        )
+
+        Spacer(modifier = Modifier.width(14.dp))
+
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .clickable(onClick = onViewProfile)
+        ) {
+            // Main Heading: Nickname if present, else device contact, else original registered name
+            Text(
+                text = contact.effectiveDisplayName,
+                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                maxLines = 1
+            )
+
+            // 3-Tier Contextual Subtitle: "Device Name • ~ Original Name" or "~ Original Name"
+            contact.resolvedIdentity.topBarSubtitle?.let { sub ->
+                Text(
+                    text = sub,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontSize = 11.sp,
+                        fontFamily = FontFamily.Monospace
+                    ),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Text(
+                text = contact.nxId,
+                style = MaterialTheme.typography.labelSmall.copy(
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 10.sp
+                ),
+                color = NexaBadgeMonospace
+            )
+        }
+
+        IconButton(onClick = onEditNickname) {
+            Icon(
+                imageVector = Icons.Default.Edit,
+                contentDescription = "Edit Nickname",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp)
+            )
+        }
+
+        Spacer(modifier = Modifier.width(4.dp))
+
+        Button(
+            onClick = onStartChat,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = NexaVerifiedGreen,
+                contentColor = MaterialTheme.colorScheme.surface
+            ),
+            shape = RoundedCornerShape(10.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+            modifier = Modifier.height(34.dp)
+        ) {
+            Icon(Icons.AutoMirrored.Filled.Chat, contentDescription = null, modifier = Modifier.size(14.dp))
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Chat", fontSize = 12.sp, fontWeight = FontWeight.Bold)
         }
     }
 }

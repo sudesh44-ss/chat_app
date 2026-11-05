@@ -1,9 +1,15 @@
 package com.nexa.app.data.remote.transfer
 
 import android.content.Context
+import com.nexa.app.core.security.ArchiveSanitizer
+import com.nexa.app.core.security.ArchiveScanResult
 import com.nexa.app.core.security.DualScanEngine
+import com.nexa.app.core.security.MediaSanitizer
+import com.nexa.app.core.security.NexaFileSecurityEngine
 import com.nexa.app.core.security.ScanResult
+import com.nexa.app.core.security.ValidationResult
 import com.nexa.app.core.util.FileShredder
+import com.nexa.app.core.util.SafeMessageParser
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -84,7 +90,23 @@ class QuarantineSandboxSink(
         // Compute or verify calculated SHA-256 digest
         val inFlightHash = session?.digest?.digest()?.joinToString("") { "%02x".format(it) }
 
-        // Perform Gate 2 verification
+        // 1. Verify Magic Bytes & Extension Spoofing via NexaFileSecurityEngine
+        val integrity = NexaFileSecurityEngine.validateFileIntegrity(tempFile, declaredExt)
+        if (integrity is ValidationResult.Blocked) {
+            FileShredder.shred(tempFile)
+            return@withContext ScanResult.Malicious("File Security Gate Blocked: ${integrity.reason}")
+        }
+
+        // 2. Archive Safety Gate: Verify Decompression Ratios, Zip-Slip, and Nested Archives
+        if (declaredExt.lowercase().removePrefix(".").trim() == "zip") {
+            val archiveVerdict = ArchiveSanitizer.inspectArchive(tempFile)
+            if (archiveVerdict is ArchiveScanResult.Blocked) {
+                FileShredder.shred(tempFile)
+                return@withContext ScanResult.Malicious("Archive Security Gate Blocked: ${archiveVerdict.reason}")
+            }
+        }
+
+        // 3. Perform Gate 2 verification (Cryptographic Hash Integrity + LibYARA)
         val scanVerdict = dualScanEngine.scanInboundQuarantine(
             tempFile = tempFile,
             expectedHash = expectedHash,
@@ -93,10 +115,29 @@ class QuarantineSandboxSink(
 
         when (scanVerdict) {
             is ScanResult.Clean -> {
-                // Atomic promotion to safe vault
-                val safeDestination = File(safeVaultDir, fileName)
-                tempFile.copyTo(safeDestination, overwrite = true)
-                tempFile.delete()
+                // Atomic promotion to safe vault using Content-Addressed Storage
+                val safeDestination = SafeMessageParser.getContentAddressedFile(
+                    baseDir = safeVaultDir,
+                    fileHash = expectedHash.ifBlank { "f_${System.currentTimeMillis()}" },
+                    extension = "bin"
+                )
+
+                // 4. Re-encoding Sanitizer Gate for Images (Neutralize Steganographic LSB & EOF Payloads)
+                if (MediaSanitizer.isSanitizableImage(declaredExt)) {
+                    val sanitized = MediaSanitizer.sanitizeImage(
+                        rawFile = tempFile,
+                        sanitizedOutputFile = safeDestination,
+                        deleteOriginal = true
+                    )
+                    if (!sanitized) {
+                        tempFile.copyTo(safeDestination, overwrite = true)
+                        tempFile.delete()
+                    }
+                } else {
+                    tempFile.copyTo(safeDestination, overwrite = true)
+                    tempFile.delete()
+                }
+
                 ScanResult.Clean(safeDestination.absolutePath)
             }
             is ScanResult.Corrupted -> {
@@ -111,9 +152,14 @@ class QuarantineSandboxSink(
         }
     }
 
-    fun forcePromote(transferId: String, fileName: String): File {
+    fun forcePromote(transferId: String, fileName: String, fileHash: String = ""): File {
         val tempFile = getTempFile(transferId)
-        val safeDestination = File(safeVaultDir, fileName)
+        val hashKey = fileHash.ifBlank { SafeMessageParser.sanitizeFileName(fileName) }
+        val safeDestination = SafeMessageParser.getContentAddressedFile(
+            baseDir = safeVaultDir,
+            fileHash = hashKey,
+            extension = "bin"
+        )
         tempFile.copyTo(safeDestination, overwrite = true)
         tempFile.delete()
         return safeDestination

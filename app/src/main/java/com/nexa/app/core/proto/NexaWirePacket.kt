@@ -15,7 +15,8 @@ enum class PacketType(val value: Int) {
     PACKET_AUTH_SUCCESS(6),
     PACKET_AUTH_FAILURE(7),
     PACKET_TYPING(10),
-    PACKET_DEVICE_SYNC(11);
+    PACKET_DEVICE_SYNC(11),
+    PACKET_SIGNALING(12);
 
     companion object {
         fun fromValue(v: Int): PacketType = entries.find { it.value == v } ?: PACKET_UNKNOWN
@@ -141,6 +142,12 @@ data class DeviceSyncPayload(
     }
 }
 
+data class SignalingPayload(
+    val transferId: Long = 0L,
+    val action: String = "",
+    val data: String = ""
+)
+
 data class NexaWirePacket(
     val packetId: String = "",
     val type: PacketType = PacketType.PACKET_UNKNOWN,
@@ -152,7 +159,8 @@ data class NexaWirePacket(
     val authChallenge: AuthChallengePayload? = null,
     val authResponse: AuthResponsePayload? = null,
     val typing: TypingPayload? = null,
-    val deviceSync: DeviceSyncPayload? = null
+    val deviceSync: DeviceSyncPayload? = null,
+    val signaling: SignalingPayload? = null
 ) {
     /**
      * Serializes this packet into standard binary Protobuf wire format.
@@ -308,14 +316,40 @@ data class NexaWirePacket(
             writeLengthDelimited(out, dsOut.toByteArray())
         }
 
+        // Field 12: signaling (SignalingPayload, wire type 2)
+        signaling?.let { sig ->
+            val sigOut = ByteArrayOutputStream()
+            if (sig.transferId != 0L) {
+                writeTag(sigOut, 1, 0)
+                writeVarint(sigOut, sig.transferId)
+            }
+            if (sig.action.isNotEmpty()) {
+                writeTag(sigOut, 2, 2)
+                writeLengthDelimited(sigOut, sig.action.toByteArray(Charsets.UTF_8))
+            }
+            if (sig.data.isNotEmpty()) {
+                writeTag(sigOut, 3, 2)
+                writeLengthDelimited(sigOut, sig.data.toByteArray(Charsets.UTF_8))
+            }
+
+            writeTag(out, 12, 2)
+            writeLengthDelimited(out, sigOut.toByteArray())
+        }
+
         return out.toByteArray()
     }
 
     companion object {
+        const val MAX_FIELD_SIZE = 4 * 1024 * 1024 // 4 MB safety bound against OOM
+        const val MAX_PACKET_SIZE = 4 * 1024 * 1024 // 4 MB safety bound against malformed envelopes
+
         /**
          * Deserializes a binary Protobuf wire packet into NexaWirePacket.
          */
         fun decode(bytes: ByteArray): NexaWirePacket {
+            if (bytes.size > MAX_PACKET_SIZE) {
+                throw IllegalArgumentException("Malformed wire packet: size ${bytes.size} exceeds maximum allowable bound $MAX_PACKET_SIZE")
+            }
             val input = ByteArrayInputStream(bytes)
             var packetId = ""
             var type = PacketType.PACKET_UNKNOWN
@@ -328,6 +362,7 @@ data class NexaWirePacket(
             var authResponse: AuthResponsePayload? = null
             var typing: TypingPayload? = null
             var deviceSync: DeviceSyncPayload? = null
+            var signaling: SignalingPayload? = null
 
             while (input.available() > 0) {
                 val tag = readVarint(input)
@@ -346,6 +381,7 @@ data class NexaWirePacket(
                     9 -> authResponse = decodeAuthResponsePayload(readLengthDelimited(input))
                     10 -> typing = decodeTypingPayload(readLengthDelimited(input))
                     11 -> deviceSync = decodeDeviceSyncPayload(readLengthDelimited(input))
+                    12 -> signaling = decodeSignalingPayload(readLengthDelimited(input))
                     else -> skipField(input, wireType)
                 }
             }
@@ -361,7 +397,8 @@ data class NexaWirePacket(
                 authChallenge = authChallenge,
                 authResponse = authResponse,
                 typing = typing,
-                deviceSync = deviceSync
+                deviceSync = deviceSync,
+                signaling = signaling
             )
         }
 
@@ -491,6 +528,27 @@ data class NexaWirePacket(
             return DeviceSyncPayload(syncId, sourceDeviceId, seq, encrypted)
         }
 
+        private fun decodeSignalingPayload(bytes: ByteArray): SignalingPayload {
+            val input = ByteArrayInputStream(bytes)
+            var transferId = 0L
+            var action = ""
+            var data = ""
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> transferId = readVarint(input)
+                    2 -> action = String(readLengthDelimited(input), Charsets.UTF_8)
+                    3 -> data = String(readLengthDelimited(input), Charsets.UTF_8)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return SignalingPayload(transferId, action, data)
+        }
+
         private fun writeTag(out: OutputStream, fieldNum: Int, wireType: Int) {
             val tag = ((fieldNum shl 3) or (wireType and 0x07)).toLong()
             writeVarint(out, tag)
@@ -529,12 +587,18 @@ data class NexaWirePacket(
 
         private fun readLengthDelimited(input: InputStream): ByteArray {
             val length = readVarint(input).toInt()
+            if (length < 0 || length > MAX_FIELD_SIZE) {
+                throw IllegalArgumentException("Malformed wire packet: field length $length violates bounds [0, $MAX_FIELD_SIZE]")
+            }
             val buf = ByteArray(length)
             var read = 0
             while (read < length) {
                 val count = input.read(buf, read, length - read)
                 if (count == -1) break
                 read += count
+            }
+            if (read < length) {
+                throw IllegalArgumentException("Malformed wire packet: expected $length bytes but stream truncated at $read")
             }
             return buf
         }
@@ -545,6 +609,9 @@ data class NexaWirePacket(
                 1 -> input.skip(8)
                 2 -> {
                     val len = readVarint(input)
+                    if (len < 0 || len > MAX_FIELD_SIZE) {
+                        throw IllegalArgumentException("Malformed wire packet: skip length $len violates bounds")
+                    }
                     input.skip(len)
                 }
                 5 -> input.skip(4)
