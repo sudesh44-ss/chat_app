@@ -182,3 +182,65 @@ func TestReverseSmsSecurityAttacks(t *testing.T) {
 		t.Fatal("expected error for expired nonce")
 	}
 }
+
+func TestReverseSmsZeroPermissionPayloadsAndSessionLookup(t *testing.T) {
+	tmpDir, _ := os.MkdirTemp("", "nexa_test_zeroperm_*")
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "identity.json")
+	store, _ := identity.NewStore(dbPath)
+	svc := NewReverseSmsService(store)
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pubHex := hex.EncodeToString(pub)
+
+	initReq := &InitiateReverseVerifyRequest{
+		GoogleUID:    "google_sub_carol_789",
+		PhoneNumber:  "+919811122233",
+		Name:         "Carol Danvers",
+		PublicKeyHex: pubHex,
+		DeviceID:     "dev_pixel_zero_perm",
+	}
+
+	resp, err := svc.InitiateVerification(initReq, "10.0.0.2")
+	if err != nil {
+		t.Fatalf("InitiateVerification failed: %v", err)
+	}
+
+	if resp.SessionID == "" {
+		t.Fatalf("expected non-empty SessionID")
+	}
+	if resp.InboundNumber == "" {
+		t.Fatalf("expected non-empty InboundNumber")
+	}
+
+	// Verify status by SessionID before inbound SMS
+	statusBySession, err := svc.GetVerificationStatus(resp.SessionID)
+	if err != nil || statusBySession.Status != "PENDING" || statusBySession.IsVerified {
+		t.Fatalf("expected PENDING and IsVerified=false by SessionID lookup, got %v", statusBySession)
+	}
+
+	// Test compound payload format: NEXA-VERIFY:<nonce>:<sessionId>
+	compoundBody := "NEXA-VERIFY:" + resp.Nonce + ":" + resp.SessionID
+	record, err := svc.ProcessInboundWebhook("+919811122233", compoundBody)
+	if err != nil {
+		t.Fatalf("ProcessInboundWebhook with compound payload failed: %v", err)
+	}
+
+	if record.Status != "VERIFIED" {
+		t.Fatalf("expected status VERIFIED, got: %s", record.Status)
+	}
+
+	// Verify status by SessionID after inbound SMS
+	statusVerifiedBySession, err := svc.GetVerificationStatus(resp.SessionID)
+	if err != nil {
+		t.Fatalf("GetVerificationStatus by SessionID failed: %v", err)
+	}
+	if !statusVerifiedBySession.IsVerified || statusVerifiedBySession.Status != "VERIFIED" {
+		t.Fatalf("expected IsVerified=true and status=VERIFIED, got %+v", statusVerifiedBySession)
+	}
+	if statusVerifiedBySession.NxID != record.AllocatedNxID {
+		t.Fatalf("NX-ID mismatch: expected %s, got %s", record.AllocatedNxID, statusVerifiedBySession.NxID)
+	}
+}
+

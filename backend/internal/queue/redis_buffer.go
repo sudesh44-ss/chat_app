@@ -103,6 +103,10 @@ func (r *RedisBuffer) PopAllPending(ctx context.Context, recipientNxId string) (
 	return items, nil
 }
 
+func (r *RedisBuffer) GetClient() *redis.Client {
+	return r.client
+}
+
 func (r *RedisBuffer) Close() error {
 	if r.client != nil {
 		return r.client.Close()

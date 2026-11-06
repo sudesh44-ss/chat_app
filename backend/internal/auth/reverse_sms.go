@@ -76,13 +76,16 @@ type InitiateReverseVerifyRequest struct {
 type InitiateReverseVerifyResponse struct {
 	Status                string `json:"status"`
 	Nonce                 string `json:"nonce"`
+	SessionID             string `json:"session_id,omitempty"`
 	InboundReceiverNumber string `json:"inbound_receiver_number"`
+	InboundNumber         string `json:"inbound_number,omitempty"`
 	SmsPayload            string `json:"sms_payload"`
 	ExpiresInSeconds      int    `json:"expires_in_seconds"`
 }
 
 type PendingVerification struct {
 	Nonce            string `json:"nonce"`
+	SessionID        string `json:"session_id,omitempty"`
 	GoogleUID        string `json:"google_uid"`
 	Email            string `json:"email"`
 	PhoneNumber      string `json:"phone_number"`
@@ -105,10 +108,14 @@ type PendingVerification struct {
 
 type VerificationStatusResponse struct {
 	Status           string                `json:"status"` // "PENDING", "VERIFIED", "EXPIRED"
+	IsVerified       bool                  `json:"is_verified"`
 	ExpiresInSeconds int                   `json:"expires_in_seconds,omitempty"`
 	NxID             string                `json:"nx_id,omitempty"`
 	SessionAuthToken string                `json:"session_auth_token,omitempty"`
 	SessionToken     string                `json:"session_token,omitempty"`
+	Name             string                `json:"name,omitempty"`
+	Phone            string                `json:"phone,omitempty"`
+	AvatarURL        string                `json:"avatar_url,omitempty"`
 	User             *identity.UserAccount `json:"user,omitempty"`
 }
 
@@ -124,6 +131,7 @@ type ReverseSmsService struct {
 	mu                 sync.RWMutex
 	store              *identity.Store
 	pending            map[string]*PendingVerification // nonce -> record
+	bySession          map[string]string               // sessionId -> nonce
 	byPhone            map[string]string               // phone -> active nonce
 	ipRate             map[string][]int64              // ip -> timestamps
 	userRate           map[string][]int64              // googleUid/device -> timestamps
@@ -140,6 +148,7 @@ func NewReverseSmsService(store *identity.Store) *ReverseSmsService {
 	return &ReverseSmsService{
 		store:              store,
 		pending:            make(map[string]*PendingVerification),
+		bySession:          make(map[string]string),
 		byPhone:            make(map[string]string),
 		ipRate:             make(map[string][]int64),
 		userRate:           make(map[string][]int64),
@@ -215,8 +224,13 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 	}
 
 	now := time.Now().UnixMilli()
+	sessionBytes := make([]byte, 16)
+	rand.Read(sessionBytes)
+	sessionID := hex.EncodeToString(sessionBytes)
+
 	record := &PendingVerification{
 		Nonce:          nonce,
+		SessionID:      sessionID,
 		GoogleUID:      req.GoogleUID,
 		Email:          req.Email,
 		PhoneNumber:    canonicalPhone,
@@ -237,6 +251,7 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 
 	s.pending[nonce] = record
 	s.byPhone[canonicalPhone] = nonce
+	s.bySession[sessionID] = nonce
 
 	log.Printf("[ReverseSMS] Initiated reverse verification for %s (Nonce: %s, Inbound: %s, TTL: 90s)",
 		maskPhone(canonicalPhone), nonce, s.inboundReceiverNum)
@@ -244,8 +259,10 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 	return &InitiateReverseVerifyResponse{
 		Status:                "PENDING",
 		Nonce:                 nonce,
+		SessionID:             sessionID,
 		InboundReceiverNumber: s.inboundReceiverNum,
-		SmsPayload:            fmt.Sprintf("NX-VERIFY %s", nonce),
+		InboundNumber:         s.inboundReceiverNum,
+		SmsPayload:            fmt.Sprintf("NEXA-VERIFY:%s:%s", nonce, sessionID),
 		ExpiresInSeconds:      90,
 	}, nil
 }
@@ -257,12 +274,33 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 		return nil, fmt.Errorf("inbound webhook: invalid sender phone %s: %w", senderNumber, err)
 	}
 
-	// Extract Nonce from message body: e.g. "NX-VERIFY NX-8F92A" -> "NX-8F92A"
-	match := nonceExtractorRegex.FindString(body)
-	if match == "" {
-		return nil, fmt.Errorf("inbound webhook: no valid NX-XXXXX nonce found in message body: '%s'", body)
+	// Extract Nonce from message body:
+	// Format 1: "NEXA-VERIFY:<nonce>:<sessionId>" or "NEXA-VERIFY:<nonce>"
+	// Format 2: "NX-VERIFY <nonce>"
+	// Format 3: Raw NX-XXXXX regex
+	cleanBody := strings.TrimSpace(body)
+	var nonce string
+	if strings.Contains(cleanBody, ":") {
+		parts := strings.Split(cleanBody, ":")
+		if len(parts) >= 2 {
+			nonce = strings.TrimSpace(parts[1])
+		}
 	}
-	nonce := match
+	if nonce == "" {
+		match := nonceExtractorRegex.FindString(cleanBody)
+		if match != "" {
+			nonce = match
+		}
+	}
+	if nonce == "" && strings.HasPrefix(cleanBody, "NX-VERIFY") {
+		fields := strings.Fields(cleanBody)
+		if len(fields) >= 2 {
+			nonce = fields[1]
+		}
+	}
+	if nonce == "" {
+		return nil, fmt.Errorf("inbound webhook: no valid verification nonce found in message body: '%s'", body)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -435,10 +473,15 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 	return record, nil
 }
 
-// GetVerificationStatus queries the state of a pending verification nonce.
-func (s *ReverseSmsService) GetVerificationStatus(nonce string) (*VerificationStatusResponse, error) {
+// GetVerificationStatus queries the state of a pending verification nonce or sessionId.
+func (s *ReverseSmsService) GetVerificationStatus(key string) (*VerificationStatusResponse, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	nonce := key
+	if n, found := s.bySession[key]; found {
+		nonce = n
+	}
 
 	record, exists := s.pending[nonce]
 	if !exists {
@@ -448,7 +491,8 @@ func (s *ReverseSmsService) GetVerificationStatus(nonce string) (*VerificationSt
 	now := time.Now().UnixMilli()
 	if record.Status == "PENDING" && now > record.ExpiresAt {
 		return &VerificationStatusResponse{
-			Status: "EXPIRED",
+			Status:     "EXPIRED",
+			IsVerified: false,
 		}, nil
 	}
 
@@ -456,9 +500,13 @@ func (s *ReverseSmsService) GetVerificationStatus(nonce string) (*VerificationSt
 		account, _ := s.store.GetAccountByNxID(record.AllocatedNxID)
 		return &VerificationStatusResponse{
 			Status:           "VERIFIED",
+			IsVerified:       true,
 			NxID:             record.AllocatedNxID,
 			SessionAuthToken: record.SessionAuthToken,
 			SessionToken:     record.SessionAuthToken,
+			Name:             record.Name,
+			Phone:            record.PhoneNumber,
+			AvatarURL:        record.AvatarURL,
 			User:             account,
 		}, nil
 	}
@@ -470,6 +518,7 @@ func (s *ReverseSmsService) GetVerificationStatus(nonce string) (*VerificationSt
 
 	return &VerificationStatusResponse{
 		Status:           "PENDING",
+		IsVerified:       false,
 		ExpiresInSeconds: remainingSeconds,
 	}, nil
 }

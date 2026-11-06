@@ -59,8 +59,25 @@ func (s *Store) load() error {
 
 	var snap storeSnapshot
 	if err := json.Unmarshal(data, &snap); err != nil {
-		return err
+		// Attempt automatic fallback to .bak if available
+		bakPath := s.filePath + ".bak"
+		if bakData, bakErr := os.ReadFile(bakPath); bakErr == nil {
+			var bakSnap storeSnapshot
+			if json.Unmarshal(bakData, &bakSnap) == nil {
+				log.Printf("[IdentityStore] Recovered corrupt identity store from backup %s", bakPath)
+				snap = bakSnap
+				data = bakData
+			} else {
+				return err
+			}
+		} else {
+			return err
+		}
 	}
+
+	// Create or update safe backup on clean load
+	bakPath := s.filePath + ".bak"
+	_ = os.WriteFile(bakPath, data, 0600)
 
 	for _, a := range snap.Accounts {
 		s.accounts[a.NxID] = a

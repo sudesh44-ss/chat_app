@@ -1,0 +1,358 @@
+# NEXA — Application Update Data Reset: Root Cause Analysis & Verified Fix Implementation
+
+## OBJECTIVE
+
+NEXA Android application currently loses its entire application state whenever a new version is installed over the existing application.
+
+The issue occurs through both:
+
+1. Android Studio → Run / Install.
+2. Manual APK installation through USB → Update.
+
+Observed problems:
+- User gets logged out.
+- Authentication session is not preserved.
+- Application appears to reset.
+- Existing local application state is not restored.
+- Possible loss or reinitialization of local database, preferences, or cryptographic identity.
+
+Your task is to investigate the existing implementation, identify the actual root cause, and then fix the confirmed issue without introducing unrelated architectural changes.
+
+# IMPORTANT: TWO-STAGE EXECUTION
+
+You must follow the stages in the exact order below.
+
+Do not skip Stage 1 or start implementation prematurely.
+
+---
+
+# STAGE 1 — STUDY AND ROOT CAUSE ANALYSIS
+
+## 1.1 Study Existing Audit Evidence First
+
+Before inspecting or modifying code:
+
+- Read the previously generated application update/session persistence audit, if available.
+- Read any earlier reports related to authentication, database migrations, Android Keystore, and application initialization.
+- Review existing project documentation and implementation decisions.
+- Identify findings that were already investigated.
+- Do not repeat completed investigations unnecessarily.
+- Verify previous audit conclusions against the current source code.
+
+Do not assume that an earlier audit report is correct without checking its evidence.
+
+## 1.2 Investigate Application Identity
+
+Inspect:
+
+- applicationId
+- namespace
+- versionCode
+- versionName
+- Debug and Release application IDs
+- Signing configurations
+- Signing certificate fingerprints
+- Product flavors
+- Android installation configuration
+
+Determine whether both installation methods use the same application identity and compatible signing certificates.
+
+## 1.3 Investigate Application Initialization
+
+Trace the actual startup sequence:
+
+Application startup → Dependency injection → Local storage initialization → Database initialization → Session restoration → Authentication validation → Home/Login navigation.
+
+Inspect:
+
+- Application class.
+- MainActivity.
+- ViewModels.
+- Dependency injection modules.
+- Repository initialization.
+- First-launch detection.
+- Version-change detection.
+- DataStore initialization.
+- SharedPreferences initialization.
+- Room database initialization.
+- Authentication initialization.
+
+Search for code that resets, clears, recreates, or reinitializes application data.
+
+## 1.4 Investigate Database Persistence
+
+Inspect:
+
+- Room database configuration.
+- Database version.
+- Migration classes.
+- Migration registration.
+- fallbackToDestructiveMigration usage.
+- Database creation callbacks.
+- Database deletion operations.
+- SQLCipher configuration.
+- Encryption key initialization.
+- Database file locations.
+
+Determine whether a version update triggers destructive migration or makes the existing encrypted database inaccessible.
+
+## 1.5 Investigate Authentication Persistence
+
+Inspect:
+
+- Supabase Auth initialization.
+- Access token persistence.
+- Refresh token persistence.
+- Go backend session persistence.
+- Google authentication state.
+- Session restoration.
+- Token refresh.
+- Session invalidation.
+- Automatic logout conditions.
+- Authentication state observers.
+
+Identify every path that can cause automatic logout.
+
+A temporary network failure or token refresh failure must not automatically be interpreted as a permanent account logout unless the session is genuinely invalid or revoked.
+
+## 1.6 Investigate Device Identity and E2EE
+
+Inspect:
+
+- Android Keystore aliases.
+- Device identity persistence.
+- X25519 identity keys.
+- Ed25519 identity keys.
+- X3DH session state.
+- Double Ratchet state.
+- Encryption key storage.
+- Database encryption key storage.
+- Device registration and revocation.
+
+Determine whether application updates cause unnecessary key regeneration or identity replacement.
+
+## 1.7 Stage 1 Root Cause Report
+
+Before implementing anything, produce a report in your response containing:
+
+1. Confirmed root cause.
+2. Supporting source-code evidence.
+3. Exact affected file paths.
+4. Relevant classes and functions.
+5. Why Android Studio updates trigger the problem.
+6. Why manual APK updates trigger the problem.
+7. Whether authentication, database, and cryptographic identity are affected.
+8. Other related risks.
+9. Exact proposed changes.
+10. Files that would need modification.
+
+Classify each finding:
+
+- CONFIRMED ROOT CAUSE
+- LIKELY ROOT CAUSE
+- POSSIBLE CAUSE
+- NOT VERIFIED
+
+**Do not implement a fix based on a possible or unverified cause.**
+
+---
+
+# STAGE 2 — IMPLEMENTATION OF CONFIRMED FIXES
+
+Proceed to this stage only after completing Stage 1.
+
+Use the actual evidence from Stage 1 to implement the smallest necessary changes.
+
+Do not introduce unrelated improvements or refactor the architecture.
+
+## 2.1 Preserve Existing Authentication Sessions
+
+Ensure:
+
+- Existing valid Supabase sessions survive application updates.
+- Access tokens are restored correctly.
+- Refresh tokens remain available and are refreshed securely.
+- Go backend session state is restored when still valid.
+- Authentication initialization does not incorrectly redirect users to login.
+- Temporary network failures do not trigger unnecessary logout.
+- Genuine token expiration or revocation is handled correctly.
+
+Do not bypass authentication or accept invalid tokens to avoid logout.
+
+## 2.2 Preserve Local Application Data
+
+Ensure:
+
+- Existing Room database remains intact.
+- DataStore and SharedPreferences are preserved.
+- Database migration is non-destructive.
+- No unnecessary database recreation occurs.
+- Existing chat history and contacts remain available.
+- User preferences and application settings survive updates.
+
+Do not use destructive migrations as a fallback for migration failures.
+
+If a migration cannot safely complete, preserve the original database and report the failure rather than deleting user data.
+
+## 2.3 Preserve Cryptographic Device Identity
+
+Ensure:
+
+- Existing Android Keystore keys are reused.
+- Existing device identity is not regenerated unnecessarily.
+- E2EE identity keys remain associated with the existing device.
+- Existing encryption sessions are preserved.
+- Database encryption keys remain accessible.
+- Key invalidation is handled safely.
+
+Never generate a replacement identity silently when an existing key cannot be accessed.
+
+If a cryptographic key is genuinely invalidated, follow the existing secure recovery or device-replacement workflow.
+
+## 2.4 Preserve Application Update Compatibility
+
+Ensure that a normal in-place update:
+
+- Does not clear app-private data.
+- Does not reset authentication.
+- Does not recreate the local database.
+- Does not regenerate cryptographic identities.
+- Does not create a new NX-ID.
+- Does not reset user preferences.
+- Does not discard pending messages.
+
+Maintain compatibility with the existing application ID and signing configuration.
+
+Do not change package identity or signing certificates as part of this fix.
+
+## 2.5 Testing Requirements
+
+Create or update appropriate tests only after the root cause is confirmed.
+
+Test the following scenarios:
+
+### Authentication
+- Existing valid session restored after app restart.
+- Existing valid session restored after application update.
+- Expired access token with valid refresh token.
+- Invalid or revoked refresh token.
+- Temporary network failure.
+- Genuine logout.
+
+### Database
+- Existing database survives version upgrade.
+- Migration preserves existing records.
+- Encrypted database remains accessible.
+- Migration failure does not delete existing data.
+
+### Device Identity
+- Existing Keystore aliases remain accessible.
+- Device identity remains unchanged.
+- Existing E2EE identity is not regenerated.
+- Existing encryption sessions remain available.
+
+### Installation Compatibility
+- Android Studio in-place update.
+- Manual APK in-place update.
+- Debug-to-debug update.
+- Release-to-release update using the same signing certificate.
+
+Do not uninstall or clear data to simulate a normal update.
+
+Use a disposable test device or test installation where appropriate.
+
+Do not use production user data or production cryptographic keys for destructive tests.
+
+If a test cannot be performed safely, mark it NOT VERIFIED.
+
+## 2.6 Regression Testing
+
+After implementation:
+
+- Run relevant Android unit tests.
+- Run available instrumentation tests.
+- Run backend tests if backend files were changed.
+- Verify database migration compatibility.
+- Verify authentication restoration.
+- Verify no unrelated authentication or E2EE behavior was changed.
+
+Do not claim successful update testing unless an actual in-place upgrade was performed using the same application identity and compatible signing certificate.
+
+---
+
+# 3. STRICT ARCHITECTURAL PRESERVATION
+
+The following existing NEXA architecture must remain intact:
+
+- Kotlin + Jetpack Compose.
+- Google Credential Manager.
+- Supabase Auth.
+- PostgreSQL.
+- Go backend.
+- WebSocket messaging.
+- Room + SQLCipher.
+- Android Keystore.
+- X3DH + Double Ratchet.
+- X25519 + Ed25519.
+- WebRTC.
+- Firebase Cloud Messaging.
+- Cloudflare R2.
+- Existing NX-ID and device identity architecture.
+
+Do not replace existing technologies or introduce new infrastructure unless the confirmed root cause makes a change absolutely necessary and it is explicitly explained.
+
+Do not use plaintext storage as a workaround for encryption problems.
+
+Do not weaken authentication, database security, or cryptographic verification.
+
+---
+
+# 4. CHANGE CONTROL
+
+Before making modifications:
+
+1. Identify all affected files.
+2. Explain why each modification is necessary.
+3. Preserve unrelated user changes.
+4. Do not overwrite existing work.
+5. Do not delete files or data without explicit authorization.
+6. Keep changes limited to confirmed root causes.
+
+Do not modify unrelated project documentation, roadmaps, or implementation status.
+
+---
+
+# 5. FINAL IMPLEMENTATION REPORT
+
+After completing the work, provide:
+
+1. Original root cause.
+2. Evidence supporting the diagnosis.
+3. Exact files modified.
+4. Description of each modification.
+5. Authentication persistence test results.
+6. Database preservation test results.
+7. Device identity preservation test results.
+8. Build and test results.
+9. Remaining limitations.
+10. Any risks that still require attention.
+
+Clearly distinguish between:
+- Confirmed fixed.
+- Tested successfully.
+- Partially verified.
+- Not verified.
+
+Do not claim that the issue is completely resolved unless an actual in-place update test confirms it.
+
+# FINAL INSTRUCTION
+
+FIRST STUDY THE EXISTING AUDIT REPORTS AND CURRENT SOURCE CODE.
+
+THEN IDENTIFY AND CONFIRM THE EXACT ROOT CAUSE.
+
+ONLY AFTER THAT, IMPLEMENT THE MINIMUM NECESSARY FIXES.
+
+PRESERVE ALL EXISTING USER DATA, AUTHENTICATION SESSIONS, DEVICE IDENTITIES, E2EE KEYS, AND APPLICATION STATE.
+
+DO NOT REWRITE OR REPLACE THE EXISTING ARCHITECTURE.

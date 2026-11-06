@@ -3,10 +3,14 @@ package connection
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"nexa/wire/internal/identity"
 	"nexa/wire/internal/wire"
 )
 
@@ -230,5 +234,105 @@ func TestVerifyAuthResponse_ImpersonationBlocked(t *testing.T) {
 
 	if session.VerifyAuthResponse(respPacket) {
 		t.Fatal("Impersonation attempt with mismatched sender NX-ID must be rejected")
+	}
+}
+
+func TestVerifyAuthResponse_IdentityStoreValidation(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "nexa_conn_test_*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "identity.json")
+	store, err := identity.NewStore(dbPath)
+	if err != nil {
+		t.Fatalf("Failed to create identity store: %v", err)
+	}
+
+	// Legitimate user Bob with registered Ed25519 key
+	bobPub, bobPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to generate Bob's key: %v", err)
+	}
+	bobPubHex := hex.EncodeToString(bobPub)
+	bobNx := "NX-BOB-REGISTERED"
+
+	err = store.CreateAccount(&identity.UserAccount{
+		ID:           "usr_bob",
+		NxID:         bobNx,
+		PublicKeyHex: bobPubHex,
+		ProfileName:  "Bob",
+		CreatedAt:    time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("Failed to create Bob's account: %v", err)
+	}
+
+	hub := NewHub(nil)
+	hub.SetIdentityStore(store)
+
+	// Attacker generates their own keypair
+	attPub, attPriv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("Failed to generate attacker key: %v", err)
+	}
+
+	// 1. Attacker connects claiming to be Bob, but signing with attacker's key
+	attSession := NewClientSession(hub, nil, bobNx, "dev_attacker")
+	attSession.SendChallenge()
+	<-attSession.Send
+
+	attDataToSign := append(append(attSession.ChallengeNonce, []byte(":"+bobNx+":")...), []byte(fmt.Sprintf("%d", attSession.ChallengeTime))...)
+	attSig := ed25519.Sign(attPriv, attDataToSign)
+
+	spoofPacket := &wire.NexaWirePacket{
+		PacketId:      "resp_spoof",
+		Type:          wire.PacketType_PACKET_AUTH_RESPONSE,
+		SenderNxId:    bobNx,
+		RecipientNxId: "SERVER",
+		Timestamp:     time.Now().UnixMilli(),
+		AuthResponse: &wire.AuthResponsePayload{
+			Signature: attSig,
+			PublicKey: attPub, // Attacker's own public key!
+			Timestamp: time.Now().UnixMilli(),
+		},
+	}
+
+	if attSession.VerifyAuthResponse(spoofPacket) {
+		t.Fatal("Attacker presenting non-matching public key MUST be rejected by identity store validation")
+	}
+
+	if attSession.Authenticated {
+		t.Fatal("Attacker session should remain unauthenticated")
+	}
+
+	// 2. Legitimate Bob connects with registered key
+	bobSession := NewClientSession(hub, nil, bobNx, "dev_bob")
+	bobSession.SendChallenge()
+	<-bobSession.Send
+
+	bobDataToSign := append(append(bobSession.ChallengeNonce, []byte(":"+bobNx+":")...), []byte(fmt.Sprintf("%d", bobSession.ChallengeTime))...)
+	bobSig := ed25519.Sign(bobPriv, bobDataToSign)
+
+	legitPacket := &wire.NexaWirePacket{
+		PacketId:      "resp_legit",
+		Type:          wire.PacketType_PACKET_AUTH_RESPONSE,
+		SenderNxId:    bobNx,
+		RecipientNxId: "SERVER",
+		Timestamp:     time.Now().UnixMilli(),
+		AuthResponse: &wire.AuthResponsePayload{
+			Signature: bobSig,
+			PublicKey: bobPub, // Bob's true registered public key
+			Timestamp: time.Now().UnixMilli(),
+		},
+	}
+
+	if !bobSession.VerifyAuthResponse(legitPacket) {
+		t.Fatal("Legitimate user with matching registered public key MUST succeed")
+	}
+
+	if !bobSession.Authenticated {
+		t.Fatal("Legitimate session must be marked authenticated")
 	}
 }

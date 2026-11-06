@@ -70,6 +70,7 @@ func main() {
 	otpService := auth.NewOtpService(smsProvider)
 	googleVerifier := auth.NewGoogleVerifier()
 	authHandler := auth.NewAuthHandler(identityStore, otpService, googleVerifier)
+	authHandler.SetChallengeStore(auth.NewChallengeStore(buffer.GetClient()))
 	authHandler.RegisterRoutes(http.DefaultServeMux)
 
 	// 3. Initialize FCM Background Wake-Up Service (Cost: ₹0)

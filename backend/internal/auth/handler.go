@@ -1,14 +1,21 @@
 package auth
 
 import (
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,15 +23,29 @@ import (
 )
 
 type RegisterRequest struct {
-	AuthProofTicket string `json:"auth_proof_ticket"`
-	AuthType        string `json:"auth_type"` // "PHONE_OTP", "GOOGLE", or "SUPABASE"
-	PublicKeyHex    string `json:"public_key_hex"`
-	DhPublicKeyHex  string `json:"dh_public_key_hex,omitempty"`
-	DeviceID        string `json:"device_id"`
-	DeviceName      string `json:"device_name"`
-	ProfileName     string `json:"profile_name"`
-	SignatureHex    string `json:"signature_hex,omitempty"`
-	ProtocolVersion int    `json:"protocol_version"`
+	AuthProofTicket    string `json:"auth_proof_ticket"`
+	AuthType           string `json:"auth_type"` // "PHONE_OTP", "GOOGLE", or "SUPABASE"
+	PublicKeyHex       string `json:"public_key_hex"`
+	DhPublicKeyHex     string `json:"dh_public_key_hex,omitempty"`
+	DevicePublicKeyHex string `json:"device_public_key_hex,omitempty"` // EC P-256 hardware keystore DER hex
+	DeviceID           string `json:"device_id"`
+	DeviceName         string `json:"device_name"`
+	ProfileName        string `json:"profile_name"`
+	SignatureHex       string `json:"signature_hex,omitempty"`
+	ProtocolVersion    int    `json:"protocol_version"`
+}
+
+type LoginChallengeRequest struct {
+	NxID     string `json:"nx_id"`
+	DeviceID string `json:"device_id"`
+}
+
+type LoginVerifyRequest struct {
+	ChallengeID string `json:"challenge_id,omitempty"`
+	Challenge   string `json:"challenge"`
+	NxID        string `json:"nx_id"`
+	DeviceID    string `json:"device_id"`
+	Signature   string `json:"signature"`
 }
 
 type AccountLinkRequest struct {
@@ -60,6 +81,7 @@ type AuthHandler struct {
 	reverseSmsService *ReverseSmsService
 	googleVerifier    *GoogleVerifier
 	supabaseVerifier  *SupabaseVerifier
+	challengeStore    ChallengeStore
 }
 
 func NewAuthHandler(store *identity.Store, otpService *OtpService, googleVerifier *GoogleVerifier) *AuthHandler {
@@ -69,6 +91,13 @@ func NewAuthHandler(store *identity.Store, otpService *OtpService, googleVerifie
 		reverseSmsService: NewReverseSmsService(store),
 		googleVerifier:    googleVerifier,
 		supabaseVerifier:  NewSupabaseVerifier(),
+		challengeStore:    NewMemoryChallengeStore(),
+	}
+}
+
+func (h *AuthHandler) SetChallengeStore(cs ChallengeStore) {
+	if cs != nil {
+		h.challengeStore = cs
 	}
 }
 
@@ -78,11 +107,15 @@ func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/auth/google", h.handleGoogleAuth)
 	mux.HandleFunc("/api/v1/auth/google/verify", h.handleGoogleVerify)
 	mux.HandleFunc("/api/v1/auth/supabase/verify", h.handleSupabaseVerify)
+	mux.HandleFunc("/api/v1/auth/login-challenge", h.handleLoginChallenge)
+	mux.HandleFunc("/api/v1/auth/login-verify", h.handleLoginVerify)
 	mux.HandleFunc("/api/v1/auth/initiate-reverse-verify", h.handleInitiateReverseVerify)
+	mux.HandleFunc("/api/v1/auth/initiate-reverse-sms", h.handleInitiateReverseVerify)
 	mux.HandleFunc("/api/v1/auth/initiate-registration", h.handleInitiateReverseVerify)
 	mux.HandleFunc("/api/v1/webhooks/sms-inbound", h.handleInboundSmsWebhook)
 	mux.HandleFunc("/api/v1/webhooks/sms-received", h.handleInboundSmsWebhook)
 	mux.HandleFunc("/api/v1/auth/verification-status", h.handleVerificationStatus)
+	mux.HandleFunc("/api/v1/auth/status", h.handleVerificationStatus)
 	mux.HandleFunc("/api/v1/users/resolve", h.handleUserResolve)
 	mux.HandleFunc("/api/v1/auth/register", h.handleRegister)
 	mux.HandleFunc("/api/v1/auth/link", h.handleAccountLink)
@@ -442,12 +475,17 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		deviceName = "Android Device"
 	}
 
+	devPubKey := req.DevicePublicKeyHex
+	if devPubKey == "" {
+		devPubKey = req.PublicKeyHex
+	}
+
 	device := &identity.Device{
 		DeviceID:     deviceID,
 		AccountID:    account.ID,
 		NxID:         account.NxID,
 		DeviceName:   deviceName,
-		PublicKeyHex: req.PublicKeyHex,
+		PublicKeyHex: devPubKey,
 		DhKeyHex:     req.DhPublicKeyHex,
 		IsRevoked:    false,
 		CreatedAt:    now,
@@ -834,39 +872,27 @@ func (h *AuthHandler) handleGoogleAuth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if isSameDevice {
-		// Scenario 1: Same device, direct instant login (₹0 cost, zero friction)
-		now := time.Now().UnixMilli()
-		tokenBytes := make([]byte, 32)
-		rand.Read(tokenBytes)
-		sessionToken := "nexa_sess_" + hex.EncodeToString(tokenBytes)
-
-		devID := req.DeviceID
-		if devID == "" {
-			devID = fmt.Sprintf("dev_%d", now)
+		// Scenario 1: Same device - Issue cryptographic challenge to verify hardware key possession
+		chal, err := h.challengeStore.CreateChallenge(r.Context(), existingAcc.NxID, req.DeviceID, 60*time.Second)
+		if err != nil {
+			http.Error(w, "Failed to create authentication challenge: "+err.Error(), http.StatusInternalServerError)
+			return
 		}
-
-		session := &identity.Session{
-			Token:     sessionToken,
-			AccountID: existingAcc.ID,
-			NxID:      existingAcc.NxID,
-			DeviceID:  devID,
-			ExpiresAt: now + (30 * 24 * 60 * 60 * 1000), // 30 days
-			IsRevoked: false,
-			CreatedAt: now,
-		}
-		h.store.CreateSession(session)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":             "LOGIN_SUCCESS",
-			"session_auth_token": sessionToken,
-			"session_token":      sessionToken,
+			"status":             "REQUIRE_DEVICE_CHALLENGE",
+			"challenge_id":       chal.ChallengeID,
+			"challenge":          chal.Challenge,
 			"nx_id":              existingAcc.NxID,
+			"device_id":          req.DeviceID,
+			"expires_in_seconds": 60,
+			"timestamp":          chal.CreatedAt,
 			"user": map[string]interface{}{
-				"nx_id":       existingAcc.NxID,
-				"name":        existingAcc.ProfileName,
-				"phone":       existingAcc.PhoneNumber,
-				"avatar_url":  existingAcc.AvatarUrl,
+				"nx_id":      existingAcc.NxID,
+				"name":       existingAcc.ProfileName,
+				"phone":      existingAcc.PhoneNumber,
+				"avatar_url": existingAcc.AvatarUrl,
 			},
 		})
 		return
@@ -931,10 +957,33 @@ func (h *AuthHandler) handleInboundSmsWebhook(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// 1. Read entire raw request body
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Failed to read request body: " + err.Error(),
+		})
+		return
+	}
+
+	// 2. Authenticate webhook HMAC-SHA256 signature (fail-closed if secret missing or invalid signature)
+	if err := VerifyGatewaySignature(r, bodyBytes); err != nil {
+		log.Printf("[InboundWebhook] Unauthorized request rejected: %v (IP: %s)", err, getClientIP(r))
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+			"code":  "UNAUTHORIZED_WEBHOOK",
+		})
+		return
+	}
+
 	sender := ""
 	body := ""
 
-	// Support JSON payload
+	// 3. Support JSON or form-urlencoded payload from validated raw body
 	if strings.Contains(r.Header.Get("Content-Type"), "application/json") {
 		var req struct {
 			SenderNumber string `json:"sender_number"`
@@ -945,7 +994,7 @@ func (h *AuthHandler) handleInboundSmsWebhook(w http.ResponseWriter, r *http.Req
 			Text         string `json:"text"`
 			Message      string `json:"message"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+		if err := json.Unmarshal(bodyBytes, &req); err == nil {
 			if req.SenderNumber != "" {
 				sender = req.SenderNumber
 			} else if req.Sender != "" {
@@ -966,24 +1015,26 @@ func (h *AuthHandler) handleInboundSmsWebhook(w http.ResponseWriter, r *http.Req
 		}
 	} else {
 		// Form-urlencoded
-		_ = r.ParseForm()
-		sender = r.FormValue("sender_number")
-		if sender == "" {
-			sender = r.FormValue("senderNumber")
-		}
-		if sender == "" {
-			sender = r.FormValue("from")
-		}
-		if sender == "" {
-			sender = r.FormValue("msisdn")
-		}
+		formValues, err := url.ParseQuery(string(bodyBytes))
+		if err == nil {
+			sender = formValues.Get("sender_number")
+			if sender == "" {
+				sender = formValues.Get("senderNumber")
+			}
+			if sender == "" {
+				sender = formValues.Get("from")
+			}
+			if sender == "" {
+				sender = formValues.Get("msisdn")
+			}
 
-		body = r.FormValue("body")
-		if body == "" {
-			body = r.FormValue("text")
-		}
-		if body == "" {
-			body = r.FormValue("message")
+			body = formValues.Get("body")
+			if body == "" {
+				body = formValues.Get("text")
+			}
+			if body == "" {
+				body = formValues.Get("message")
+			}
 		}
 	}
 
@@ -1018,7 +1069,13 @@ func (h *AuthHandler) handleInboundSmsWebhook(w http.ResponseWriter, r *http.Req
 func (h *AuthHandler) handleVerificationStatus(w http.ResponseWriter, r *http.Request) {
 	nonce := r.URL.Query().Get("nonce")
 	if nonce == "" {
-		http.Error(w, "Missing nonce query parameter", http.StatusBadRequest)
+		nonce = r.URL.Query().Get("sessionId")
+	}
+	if nonce == "" {
+		nonce = r.URL.Query().Get("session_id")
+	}
+	if nonce == "" {
+		http.Error(w, "Missing nonce or sessionId query parameter", http.StatusBadRequest)
 		return
 	}
 
@@ -1064,4 +1121,245 @@ func (h *AuthHandler) handleUserResolve(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *AuthHandler) handleLoginChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req LoginChallengeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Malformed request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.NxID == "" || req.DeviceID == "" {
+		http.Error(w, "nx_id and device_id are required", http.StatusBadRequest)
+		return
+	}
+
+	account, found := h.store.GetAccountByNxID(req.NxID)
+	if !found {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Account not found",
+			"code":  "ACCOUNT_NOT_FOUND",
+		})
+		return
+	}
+
+	device, found := h.store.GetDevice(req.DeviceID)
+	if !found || device.IsRevoked || device.NxID != account.NxID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Device is not registered or revoked",
+			"code":  "DEVICE_UNAUTHORIZED",
+		})
+		return
+	}
+
+	chal, err := h.challengeStore.CreateChallenge(r.Context(), req.NxID, req.DeviceID, 60*time.Second)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Failed to create challenge: " + err.Error(),
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":             "CHALLENGE_ISSUED",
+		"challenge_id":       chal.ChallengeID,
+		"challenge":          chal.Challenge,
+		"nx_id":              chal.NxID,
+		"device_id":          chal.DeviceID,
+		"expires_in_seconds": 60,
+		"timestamp":          chal.CreatedAt,
+	})
+}
+
+func (h *AuthHandler) handleLoginVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req LoginVerifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Malformed request body", http.StatusBadRequest)
+		return
+	}
+
+	challengeKey := req.ChallengeID
+	if challengeKey == "" {
+		challengeKey = req.Challenge
+	}
+	if challengeKey == "" {
+		http.Error(w, "Missing challenge identifier", http.StatusBadRequest)
+		return
+	}
+
+	// 1. Atomically consume the challenge (anti-replay single use)
+	chal, err := h.challengeStore.ConsumeChallenge(r.Context(), challengeKey)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Authentication challenge invalid or expired: " + err.Error(),
+			"code":  "CHALLENGE_INVALID_OR_EXPIRED",
+		})
+		return
+	}
+
+	// 2. Validate Identity & Device binding
+	if (req.NxID != "" && req.NxID != chal.NxID) || (req.DeviceID != "" && req.DeviceID != chal.DeviceID) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Challenge parameters mismatch identity or device",
+			"code":  "IDENTITY_MISMATCH",
+		})
+		return
+	}
+
+	account, found := h.store.GetAccountByNxID(chal.NxID)
+	if !found {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Account not found for challenged identity",
+			"code":  "ACCOUNT_NOT_FOUND",
+		})
+		return
+	}
+
+	device, found := h.store.GetDevice(chal.DeviceID)
+	if !found || device.IsRevoked || device.NxID != chal.NxID {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Device is not registered or has been revoked",
+			"code":  "DEVICE_UNAUTHORIZED",
+		})
+		return
+	}
+
+	// 3. Cryptographic Signature Verification
+	// The device public key may be an EC P-256 public key (X.509 DER hex from Keystore) or Ed25519 (32-byte hex)
+	registeredKeyHex := device.PublicKeyHex
+	if registeredKeyHex == "" {
+		registeredKeyHex = account.PublicKeyHex
+	}
+
+	pubBytes, err := hex.DecodeString(strings.TrimSpace(registeredKeyHex))
+	if err != nil || len(pubBytes) == 0 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Invalid registered public key in identity store",
+		})
+		return
+	}
+
+	// Decode signature (supports hex and standard base64)
+	sigBytes, err := hex.DecodeString(strings.TrimSpace(req.Signature))
+	if err != nil || len(sigBytes) == 0 {
+		sigBytes, err = base64.StdEncoding.DecodeString(strings.TrimSpace(req.Signature))
+		if err != nil || len(sigBytes) == 0 {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Invalid signature encoding (expected hex or base64)",
+				"code":  "INVALID_SIGNATURE_ENCODING",
+			})
+			return
+		}
+	}
+
+	// Decode raw challenge bytes
+	var challengeBytes []byte
+	challengeBytes, err = hex.DecodeString(chal.Challenge)
+	if err != nil || len(challengeBytes) == 0 {
+		challengeBytes = []byte(chal.Challenge)
+	}
+
+	signatureValid := false
+
+	// Attempt 1: EC P-256 (SubjectPublicKeyInfo PKIX DER)
+	if pub, err := x509.ParsePKIXPublicKey(pubBytes); err == nil {
+		if ecPub, ok := pub.(*ecdsa.PublicKey); ok {
+			digest := sha256.Sum256(challengeBytes)
+			if ecdsa.VerifyASN1(ecPub, digest[:], sigBytes) {
+				signatureValid = true
+			}
+		}
+	}
+
+	// Attempt 2: Uncompressed EC P-256 point (65 bytes: 0x04 || X || Y)
+	if !signatureValid && len(pubBytes) == 65 && pubBytes[0] == 0x04 {
+		x, y := elliptic.Unmarshal(elliptic.P256(), pubBytes)
+		if x != nil && y != nil {
+			ecPub := &ecdsa.PublicKey{Curve: elliptic.P256(), X: x, Y: y}
+			digest := sha256.Sum256(challengeBytes)
+			if ecdsa.VerifyASN1(ecPub, digest[:], sigBytes) {
+				signatureValid = true
+			}
+		}
+	}
+
+	// Attempt 3: Ed25519 public key (32 bytes)
+	if !signatureValid && len(pubBytes) == 32 && len(sigBytes) == 64 {
+		if ed25519.Verify(pubBytes, challengeBytes, sigBytes) {
+			signatureValid = true
+		}
+	}
+
+	if !signatureValid {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Cryptographic signature verification failed: invalid hardware proof of possession",
+			"code":  "SIGNATURE_INVALID",
+		})
+		return
+	}
+
+	// 4. Issue authenticated 30-day session token
+	now := time.Now().UnixMilli()
+	tokenBytes := make([]byte, 32)
+	rand.Read(tokenBytes)
+	sessionToken := "nexa_sess_" + hex.EncodeToString(tokenBytes)
+
+	session := &identity.Session{
+		Token:     sessionToken,
+		AccountID: account.ID,
+		NxID:      account.NxID,
+		DeviceID:  device.DeviceID,
+		ExpiresAt: now + (30 * 24 * 60 * 60 * 1000),
+		IsRevoked: false,
+		CreatedAt: now,
+	}
+	h.store.CreateSession(session)
+	device.LastActiveAt = now
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":             "LOGIN_SUCCESS",
+		"session_auth_token": sessionToken,
+		"session_token":      sessionToken,
+		"nx_id":              account.NxID,
+		"device_id":          device.DeviceID,
+		"user": map[string]interface{}{
+			"nx_id":      account.NxID,
+			"name":       account.ProfileName,
+			"phone":      account.PhoneNumber,
+			"avatar_url": account.AvatarUrl,
+		},
+	})
 }

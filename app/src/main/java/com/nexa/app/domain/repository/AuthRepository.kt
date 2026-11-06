@@ -14,6 +14,8 @@ interface AuthRepository {
 
     suspend fun loginWithGoogle(idToken: String): Result<GoogleAuthResponse>
 
+    suspend fun requestAndVerifyLoginChallenge(nxId: String, deviceId: String): Result<com.nexa.app.data.remote.dto.LoginVerifyResponseDto>
+
     suspend fun initiateReverseVerify(
         phone: String,
         name: String,

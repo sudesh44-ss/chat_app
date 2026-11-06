@@ -16,11 +16,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * High-priority BroadcastReceiver listening on port 8901 (android.intent.action.DATA_SMS_RECEIVED).
- * Bypasses the standard Android Telephony Provider (content://sms/inbox).
- * Validates NEXA magic bytes [0x4E, 0x58], reassembles multi-part chunks,
- * and passes the complete binary Protobuf packet to the repository layer.
+ * Port-bound Data SMS Receiver (DEACTIVATED).
+ *
+ * Notice: This receiver declaration has been deactivated from AndroidManifest.xml
+ * to eliminate high-risk RECEIVE_SMS declarations and comply with Google Play Protect
+ * anti-fraud installation guidelines and Android 15 Enhanced Confirmation Mode (ECM).
+ * Reverse SMS verification does not require this receiver.
  */
+@Deprecated("Deactivated to comply with Google Play Protect and eliminate RECEIVE_SMS permission")
 class NexaDataSmsReceiver : BroadcastReceiver() {
 
     private val receiverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)

@@ -17,9 +17,7 @@ object PermissionHelper {
 
     fun getRequiredPermissions(): List<String> {
         val permissions = mutableListOf(
-            Manifest.permission.READ_CONTACTS,
-            Manifest.permission.SEND_SMS,
-            Manifest.permission.RECEIVE_SMS
+            Manifest.permission.READ_CONTACTS
         )
 
         // Notification permission only exists on Android 13+ (API 33)
@@ -51,17 +49,16 @@ object PermissionHelper {
         return getRequiredPermissions().all { isPermissionGranted(context, it) }
     }
 
+    /**
+     * Zero-Permission Reverse SMS uses Android's standard ACTION_SENDTO intent.
+     * Dangerous telephony permissions (SEND_SMS, READ_PHONE_STATE, RECEIVE_SMS) are not required.
+     */
     fun hasSmsPermissions(context: Context): Boolean {
-        return isPermissionGranted(context, Manifest.permission.SEND_SMS) &&
-                isPermissionGranted(context, Manifest.permission.RECEIVE_SMS)
+        return true
     }
 
     fun getSmsPermissions(): List<String> {
-        return listOf(
-            Manifest.permission.SEND_SMS,
-            Manifest.permission.RECEIVE_SMS,
-            Manifest.permission.READ_PHONE_STATE
-        )
+        return emptyList()
     }
 
     fun getPermissionDisplayItems(context: Context): List<PermissionItem> {
@@ -77,19 +74,7 @@ object PermissionHelper {
             )
         )
 
-        // 2. Data SMS Airwaves
-        val hasSms = isPermissionGranted(context, Manifest.permission.SEND_SMS) &&
-                isPermissionGranted(context, Manifest.permission.RECEIVE_SMS)
-        list.add(
-            PermissionItem(
-                permission = Manifest.permission.SEND_SMS,
-                title = "Port 8901 Data SMS (Offline Fallback)",
-                description = "Sends and receives encrypted port-bound binary SMS when internet is dead. Messages stay 100% invisible to default SMS apps.",
-                isGranted = hasSms
-            )
-        )
-
-        // 3. Notifications (API 33+)
+        // 2. Notifications (API 33+)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             list.add(
                 PermissionItem(

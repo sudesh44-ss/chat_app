@@ -1,9 +1,12 @@
 package auth
 
 import (
+	"crypto"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -11,6 +14,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+)
+
+var (
+	ErrMissingGoogleClientID = errors.New("google token verification failed: GOOGLE_CLIENT_ID is not configured on server")
+	ErrInvalidGoogleIssuer   = errors.New("google token verification failed: invalid token issuer")
+	ErrTokenAudienceMismatch = errors.New("google token verification failed: audience mismatch")
+	ErrGoogleTokenExpired    = errors.New("google token verification failed: token has expired")
+	ErrMissingGoogleSubject  = errors.New("google token verification failed: missing subject (Google user ID)")
 )
 
 type GoogleClaims struct {
@@ -34,7 +45,7 @@ type GoogleVerifier struct {
 }
 
 func NewGoogleVerifier() *GoogleVerifier {
-	clientID := os.Getenv("GOOGLE_CLIENT_ID")
+	clientID := strings.TrimSpace(os.Getenv("GOOGLE_CLIENT_ID"))
 	return &GoogleVerifier{
 		clientID:   clientID,
 		httpClient: &http.Client{Timeout: 10 * time.Second},
@@ -42,8 +53,37 @@ func NewGoogleVerifier() *GoogleVerifier {
 	}
 }
 
-// VerifyIdToken parses and validates a Google OAuth ID token.
+// SetClientIDForTesting sets the client ID for deterministic unit tests.
+func (v *GoogleVerifier) SetClientIDForTesting(clientID string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.clientID = clientID
+}
+
+// SetKeysForTesting sets pre-generated RSA public keys for unit testing without network calls.
+func (v *GoogleVerifier) SetKeysForTesting(keys map[string]*rsa.PublicKey) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.cachedKeys = keys
+	v.keysExpiry = time.Now().Add(24 * time.Hour)
+}
+
+// VerifyIdToken parses, validates, and cryptographically verifies a Google OAuth ID token.
+//
+// Security guarantees:
+// 1. Fail-closed: Rejects immediately if GOOGLE_CLIENT_ID is unset or empty.
+// 2. Cryptographic signature check: Always verifies RS256 signature against Google JWKS public keys.
+// 3. Claims validation: Validates expiry, issuer, audience, and subject.
 func (v *GoogleVerifier) VerifyIdToken(tokenString string) (*GoogleClaims, error) {
+	v.mu.RLock()
+	clientID := v.clientID
+	v.mu.RUnlock()
+
+	// Fail closed if server has no GOOGLE_CLIENT_ID configured
+	if clientID == "" {
+		return nil, ErrMissingGoogleClientID
+	}
+
 	parts := strings.Split(tokenString, ".")
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("malformed JWT: expected 3 parts, got %d", len(parts))
@@ -62,6 +102,10 @@ func (v *GoogleVerifier) VerifyIdToken(tokenString string) (*GoogleClaims, error
 		return nil, fmt.Errorf("invalid header JSON: %w", err)
 	}
 
+	if header.Algorithm != "RS256" {
+		return nil, fmt.Errorf("unsupported JWT algorithm: %s (expected RS256)", header.Algorithm)
+	}
+
 	// 2. Decode Claims
 	claimsBytes, err := base64.RawURLEncoding.DecodeString(parts[1])
 	if err != nil {
@@ -76,30 +120,28 @@ func (v *GoogleVerifier) VerifyIdToken(tokenString string) (*GoogleClaims, error
 
 	// 3. Validate Expiration
 	if claims.ExpiresAt <= now {
-		return nil, fmt.Errorf("google ID token has expired (exp=%d, now=%d)", claims.ExpiresAt, now)
+		return nil, fmt.Errorf("%w: exp=%d, now=%d", ErrGoogleTokenExpired, claims.ExpiresAt, now)
 	}
 
 	// 4. Validate Issuer
 	if claims.Issuer != "accounts.google.com" && claims.Issuer != "https://accounts.google.com" {
-		return nil, fmt.Errorf("invalid token issuer: %s", claims.Issuer)
+		return nil, fmt.Errorf("%w: %s", ErrInvalidGoogleIssuer, claims.Issuer)
 	}
 
-	// 5. Validate Audience if GOOGLE_CLIENT_ID is configured
-	if v.clientID != "" && claims.Audience != v.clientID {
-		return nil, fmt.Errorf("token audience mismatch: got %s, expected %s", claims.Audience, v.clientID)
+	// 5. Validate Audience
+	if claims.Audience != clientID {
+		return nil, fmt.Errorf("%w: got '%s', expected '%s'", ErrTokenAudienceMismatch, claims.Audience, clientID)
 	}
 
 	// 6. Validate Subject
 	if strings.TrimSpace(claims.Subject) == "" {
-		return nil, fmt.Errorf("missing subject (Google user ID) in token claims")
+		return nil, ErrMissingGoogleSubject
 	}
 
-	// 7. Signature Verification
-	// In production, verify against Google's public JWKS certificates
-	if v.clientID != "" {
-		if err := v.verifySignature(header.KeyID, parts[0]+"."+parts[1], parts[2]); err != nil {
-			return nil, fmt.Errorf("cryptographic token signature verification failed: %w", err)
-		}
+	// 7. Mandatory RS256 Cryptographic Signature Verification
+	signedContent := parts[0] + "." + parts[1]
+	if err := v.verifySignature(header.KeyID, signedContent, parts[2]); err != nil {
+		return nil, fmt.Errorf("cryptographic token signature verification failed: %w", err)
 	}
 
 	return &claims, nil
@@ -119,20 +161,23 @@ func (v *GoogleVerifier) verifySignature(keyID, signedContent, signatureB64 stri
 		pubKey, exists = v.cachedKeys[keyID]
 		v.mu.RUnlock()
 		if !exists {
-			return fmt.Errorf("Google signing key ID %s not found in public certs", keyID)
+			return fmt.Errorf("Google signing key ID '%s' not found in public JWKS certs", keyID)
 		}
 	}
 
 	sigBytes, err := base64.RawURLEncoding.DecodeString(signatureB64)
 	if err != nil {
-		return fmt.Errorf("invalid signature encoding: %w", err)
+		return fmt.Errorf("invalid signature base64 encoding: %w", err)
 	}
 
-	h := strings.NewReader(signedContent)
-	_ = h
-	_ = sigBytes
-	_ = pubKey
-	// Verified using rsa.VerifyPKCS1v15 with crypto.SHA256
+	hasher := sha256.New()
+	hasher.Write([]byte(signedContent))
+	hashed := hasher.Sum(nil)
+
+	if err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, hashed, sigBytes); err != nil {
+		return fmt.Errorf("RSA PKCS1v15 signature mismatch: %w", err)
+	}
+
 	return nil
 }
 
@@ -152,7 +197,7 @@ func (v *GoogleVerifier) refreshGoogleCerts() error {
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&jwks); err != nil {
-		return fmt.Errorf("failed to decode Google JWKS: %w", err)
+		return fmt.Errorf("failed to decode Google JWKS JSON: %w", err)
 	}
 
 	v.mu.Lock()

@@ -1,11 +1,13 @@
 package connection
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -151,6 +153,31 @@ func (c *ClientSession) VerifyAuthResponse(packet *wire.NexaWirePacket) bool {
 		return false
 	}
 
+	// Verify against registered public key in identityStore when available (anti-spoofing)
+	pubKeyToVerify := resp.PublicKey
+	if c.Hub != nil && c.Hub.identityStore != nil {
+		account, found := c.Hub.identityStore.GetAccountByNxID(c.NxId)
+		if !found {
+			log.Printf("[Session %s] Auth failed: NX-ID %s not found in identity store", c.NxId, c.NxId)
+			c.ChallengeNonce = nil
+			return false
+		}
+
+		expectedPubBytes, err := hex.DecodeString(strings.TrimSpace(account.PublicKeyHex))
+		if err != nil || len(expectedPubBytes) != ed25519.PublicKeySize {
+			log.Printf("[Session %s] Auth failed: invalid registered public key for NX-ID %s in store", c.NxId, c.NxId)
+			c.ChallengeNonce = nil
+			return false
+		}
+
+		if !bytes.Equal(resp.PublicKey, expectedPubBytes) {
+			log.Printf("[Session %s] Auth failed: packet public key does not match registered account public key", c.NxId)
+			c.ChallengeNonce = nil
+			return false
+		}
+		pubKeyToVerify = expectedPubBytes
+	}
+
 	// Data to sign: challengeNonce + ":" + nxId + ":" + challengeTime
 	dataToSign := append(append(c.ChallengeNonce, []byte(":"+c.NxId+":")...), []byte(fmt.Sprintf("%d", c.ChallengeTime))...)
 	altDataToSign := []byte(fmt.Sprintf("%s:%s:%d", hex.EncodeToString(c.ChallengeNonce), c.NxId, c.ChallengeTime))
@@ -158,8 +185,8 @@ func (c *ClientSession) VerifyAuthResponse(packet *wire.NexaWirePacket) bool {
 	// Invalidate challenge immediately (anti-replay single use)
 	c.ChallengeNonce = nil
 
-	valid := ed25519.Verify(resp.PublicKey, dataToSign, resp.Signature) ||
-		ed25519.Verify(resp.PublicKey, altDataToSign, resp.Signature)
+	valid := ed25519.Verify(pubKeyToVerify, dataToSign, resp.Signature) ||
+		ed25519.Verify(pubKeyToVerify, altDataToSign, resp.Signature)
 
 	if !valid {
 		log.Printf("[Session %s] Auth failed: cryptographic Ed25519 signature verification failed", c.NxId)

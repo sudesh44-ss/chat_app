@@ -40,7 +40,7 @@ data class GoogleAuthRequest(
 )
 
 data class GoogleAuthResponse(
-    val status: String, // "LOGIN_SUCCESS", "NEW_USER", "REQUIRE_SIM_VERIFICATION"
+    val status: String, // "LOGIN_SUCCESS", "REQUIRE_DEVICE_CHALLENGE", "NEW_USER", "REQUIRE_SIM_VERIFICATION"
     val googleUid: String? = null,
     val email: String? = null,
     val prefillName: String? = null,
@@ -49,7 +49,50 @@ data class GoogleAuthResponse(
     val nxId: String? = null,
     val registeredPhoneMasked: String? = null,
     val phoneNumber: String? = null,
-    val inboundReceiverNumber: String? = null
+    val inboundReceiverNumber: String? = null,
+    val challengeId: String? = null,
+    val challenge: String? = null,
+    val expiresInSeconds: Int? = null,
+    val deviceId: String? = null
+)
+
+data class LoginChallengeRequestDto(
+    val nxId: String,
+    val deviceId: String
+)
+
+data class LoginChallengeResponseDto(
+    val status: String,
+    val challengeId: String,
+    val challenge: String,
+    val nxId: String,
+    val deviceId: String,
+    val expiresInSeconds: Int,
+    val timestamp: Long
+)
+
+data class LoginVerifyRequestDto(
+    val challengeId: String? = null,
+    val challenge: String,
+    val nxId: String,
+    val deviceId: String,
+    val signature: String
+)
+
+data class UserProfileSummaryDto(
+    val nxId: String,
+    val name: String? = null,
+    val phone: String? = null,
+    val avatarUrl: String? = null
+)
+
+data class LoginVerifyResponseDto(
+    val status: String,
+    val sessionAuthToken: String,
+    val sessionToken: String? = null,
+    val nxId: String,
+    val deviceId: String,
+    val user: UserProfileSummaryDto? = null
 )
 
 data class InitiateReverseVerifyRequestDto(
@@ -73,12 +116,15 @@ data class InitiateReverseVerifyResponseDto(
     val status: String,
     val nonce: String,
     val inboundReceiverNumber: String,
+    val inboundNumber: String = inboundReceiverNumber,
     val smsPayload: String,
-    val expiresInSeconds: Int
+    val expiresInSeconds: Int,
+    val sessionId: String? = null
 )
 
 data class VerificationStatusDto(
     val status: String, // "PENDING", "VERIFIED", "EXPIRED"
+    val isVerified: Boolean = (status == "VERIFIED"),
     val expiresInSeconds: Int? = null,
     val nxId: String? = null,
     val sessionAuthToken: String? = null,

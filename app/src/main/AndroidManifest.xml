@@ -14,10 +14,7 @@
     <!-- Contacts -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
 
-    <!-- SMS (Data SMS port 8901 fallback transport) -->
-    <uses-permission android:name="android.permission.SEND_SMS" />
-    <uses-permission android:name="android.permission.RECEIVE_SMS" />
-    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <!-- Zero-Permission Client-Initiated Reverse SMS uses Android Intent.ACTION_SENDTO (No telephony permissions required) -->
 
     <!-- Notifications (Android 13+, API 33+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -82,20 +79,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- Port-Bound Binary Data SMS Receiver (Port 8901) -->
-        <receiver
-            android:name=".data.remote.sms.NexaDataSmsReceiver"
-            android:exported="true"
-            android:permission="android.permission.BROADCAST_SMS">
-            <intent-filter>
-                <action android:name="android.intent.action.DATA_SMS_RECEIVED" />
-                <data
-                    android:scheme="sms"
-                    android:host="localhost"
-                    android:port="8901" />
-            </intent-filter>
-        </receiver>
 
         <!-- Push Wake-Up Broadcast Receiver -->
         <receiver

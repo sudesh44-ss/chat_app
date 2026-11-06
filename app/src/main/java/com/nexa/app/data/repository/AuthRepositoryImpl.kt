@@ -56,18 +56,49 @@ class AuthRepositoryImpl(
                 publicKeyHex = keys.publicKeyHex
             ).getOrThrow()
 
-            if (response.status == "LOGIN_SUCCESS" && !response.sessionAuthToken.isNullOrBlank() && !response.nxId.isNullOrBlank()) {
-                // Instantly logged in on same physical device
-                secureStorage.saveAuthToken(response.sessionAuthToken)
-                secureStorage.saveActiveNxId(response.nxId)
-                if (!response.prefillAvatar.isNullOrBlank()) {
-                    secureStorage.saveAvatarUrl(response.prefillAvatar)
+            var finalResponse = response
+            // If the server requires hardware challenge proof of possession
+            if (response.status == "REQUIRE_DEVICE_CHALLENGE" && !response.challenge.isNullOrBlank()) {
+                val challengeHex = response.challenge
+                val challengeId = response.challengeId ?: challengeHex
+                val challengeBytes = challengeHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+
+                val hardwareSecurity = com.nexa.app.core.keystore.NexaHardwareSecurity()
+                val signatureBytes = hardwareSecurity.signChallenge(challengeBytes)
+                val signatureHex = signatureBytes.joinToString("") { "%02x".format(it) }
+
+                val verifyResult = apiService.verifyLoginChallenge(
+                    com.nexa.app.data.remote.dto.LoginVerifyRequestDto(
+                        challengeId = challengeId,
+                        challenge = challengeHex,
+                        nxId = response.nxId ?: "",
+                        deviceId = deviceId,
+                        signature = signatureHex
+                    )
+                ).getOrThrow()
+
+                finalResponse = response.copy(
+                    status = "LOGIN_SUCCESS",
+                    sessionAuthToken = verifyResult.sessionAuthToken,
+                    nxId = verifyResult.nxId,
+                    prefillName = verifyResult.user?.name ?: response.prefillName,
+                    phoneNumber = verifyResult.user?.phone ?: response.phoneNumber,
+                    prefillAvatar = verifyResult.user?.avatarUrl ?: response.prefillAvatar
+                )
+            }
+
+            if (finalResponse.status == "LOGIN_SUCCESS" && !finalResponse.sessionAuthToken.isNullOrBlank() && !finalResponse.nxId.isNullOrBlank()) {
+                // Instantly logged in on same physical device with verified hardware Keystore signature
+                secureStorage.saveAuthToken(finalResponse.sessionAuthToken)
+                secureStorage.saveActiveNxId(finalResponse.nxId)
+                if (!finalResponse.prefillAvatar.isNullOrBlank()) {
+                    secureStorage.saveAvatarUrl(finalResponse.prefillAvatar)
                 }
 
                 val userEntity = UserEntity(
-                    nxId = response.nxId,
-                    fullName = response.prefillName ?: "NEXA User",
-                    phoneNumber = response.phoneNumber ?: "",
+                    nxId = finalResponse.nxId,
+                    fullName = finalResponse.prefillName ?: "NEXA User",
+                    phoneNumber = finalResponse.phoneNumber ?: "",
                     age = null,
                     gender = null,
                     bio = null,
@@ -78,7 +109,57 @@ class AuthRepositoryImpl(
                 userDao.saveUserProfile(userEntity)
             }
 
-            Result.success(response)
+            Result.success(finalResponse)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun requestAndVerifyLoginChallenge(
+        nxId: String,
+        deviceId: String
+    ): Result<com.nexa.app.data.remote.dto.LoginVerifyResponseDto> = withContext(Dispatchers.IO) {
+        try {
+            val challengeResp = apiService.requestLoginChallenge(
+                com.nexa.app.data.remote.dto.LoginChallengeRequestDto(
+                    nxId = nxId,
+                    deviceId = deviceId
+                )
+            ).getOrThrow()
+
+            val challengeBytes = challengeResp.challenge.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
+            val hardwareSecurity = com.nexa.app.core.keystore.NexaHardwareSecurity()
+            val signatureBytes = hardwareSecurity.signChallenge(challengeBytes)
+            val signatureHex = signatureBytes.joinToString("") { "%02x".format(it) }
+
+            val verifyResp = apiService.verifyLoginChallenge(
+                com.nexa.app.data.remote.dto.LoginVerifyRequestDto(
+                    challengeId = challengeResp.challengeId,
+                    challenge = challengeResp.challenge,
+                    nxId = nxId,
+                    deviceId = deviceId,
+                    signature = signatureHex
+                )
+            ).getOrThrow()
+
+            secureStorage.saveAuthToken(verifyResp.sessionAuthToken)
+            secureStorage.saveActiveNxId(verifyResp.nxId)
+
+            val keys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
+            val userEntity = UserEntity(
+                nxId = verifyResp.nxId,
+                fullName = verifyResp.user?.name ?: "NEXA User",
+                phoneNumber = verifyResp.user?.phone ?: "",
+                age = null,
+                gender = null,
+                bio = null,
+                publicKeyHex = keys.publicKeyHex,
+                isVerified = true,
+                createdAt = System.currentTimeMillis()
+            )
+            userDao.saveUserProfile(userEntity)
+
+            Result.success(verifyResp)
         } catch (e: Exception) {
             Result.failure(e)
         }

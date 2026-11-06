@@ -24,6 +24,8 @@ interface AuthApiService {
     suspend fun verifyOtpAndRegister(request: VerifyOtpRequest): Result<RegistrationSuccessResponse>
     suspend fun verifyGoogleIdToken(idToken: String): Result<String>
     suspend fun googleAuth(idToken: String, deviceId: String? = null, publicKeyHex: String? = null): Result<com.nexa.app.data.remote.dto.GoogleAuthResponse>
+    suspend fun requestLoginChallenge(request: com.nexa.app.data.remote.dto.LoginChallengeRequestDto): Result<com.nexa.app.data.remote.dto.LoginChallengeResponseDto>
+    suspend fun verifyLoginChallenge(request: com.nexa.app.data.remote.dto.LoginVerifyRequestDto): Result<com.nexa.app.data.remote.dto.LoginVerifyResponseDto>
     suspend fun initiateReverseVerify(request: com.nexa.app.data.remote.dto.InitiateReverseVerifyRequestDto): Result<com.nexa.app.data.remote.dto.InitiateReverseVerifyResponseDto>
     suspend fun getVerificationStatus(nonce: String): Result<com.nexa.app.data.remote.dto.VerificationStatusDto>
     suspend fun resolveUser(target: String, sessionToken: String? = null): Result<com.nexa.app.data.remote.dto.UserResolveDto>
@@ -177,10 +179,17 @@ class AuthApiServiceImpl(
                 "Android Device"
             }
 
+            val hardwareKeyHex = try {
+                com.nexa.app.core.keystore.NexaHardwareSecurity().getOrCreateDevicePublicKeyHex()
+            } catch (_: Throwable) { null }
+
             val registerJson = JSONObject().apply {
                 put("auth_proof_ticket", authTicket)
                 put("auth_type", "PHONE_OTP")
                 put("public_key_hex", request.publicKeyHex)
+                if (!hardwareKeyHex.isNullOrBlank()) {
+                    put("device_public_key_hex", hardwareKeyHex)
+                }
                 put("device_id", deviceId)
                 put("device_name", deviceName)
                 put("profile_name", request.profileName)
@@ -405,11 +414,140 @@ class AuthApiServiceImpl(
                 registeredPhoneMasked = respJson.optString("registered_phone_masked").takeIf { it.isNotEmpty() },
                 phoneNumber = respJson.optString("phone_number").takeIf { it.isNotEmpty() }
                     ?: userJson?.optString("phone"),
-                inboundReceiverNumber = respJson.optString("inbound_receiver_number").takeIf { it.isNotEmpty() }
+                inboundReceiverNumber = respJson.optString("inbound_receiver_number").takeIf { it.isNotEmpty() },
+                challengeId = respJson.optString("challenge_id").takeIf { it.isNotEmpty() },
+                challenge = respJson.optString("challenge").takeIf { it.isNotEmpty() },
+                expiresInSeconds = respJson.optInt("expires_in_seconds").takeIf { it > 0 },
+                deviceId = respJson.optString("device_id").takeIf { it.isNotEmpty() }
             )
             Result.success(responseDto)
         } catch (e: Exception) {
             Log.e(TAG, "Google auth call failed", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun requestLoginChallenge(
+        request: com.nexa.app.data.remote.dto.LoginChallengeRequestDto
+    ): Result<com.nexa.app.data.remote.dto.LoginChallengeResponseDto> = withContext(Dispatchers.IO) {
+        if (isTestMode) {
+            val chalNonce = UUID.randomUUID().toString().replace("-", "")
+            return@withContext Result.success(
+                com.nexa.app.data.remote.dto.LoginChallengeResponseDto(
+                    status = "CHALLENGE_ISSUED",
+                    challengeId = "chal_mock",
+                    challenge = chalNonce,
+                    nxId = request.nxId,
+                    deviceId = request.deviceId,
+                    expiresInSeconds = 60,
+                    timestamp = System.currentTimeMillis()
+                )
+            )
+        }
+
+        try {
+            val url = "$baseUrl/api/v1/auth/login-challenge"
+            val json = JSONObject().apply {
+                put("nx_id", request.nxId)
+                put("device_id", request.deviceId)
+            }
+
+            val req = Request.Builder()
+                .url(url)
+                .post(json.toString().toRequestBody(JSON_MEDIA))
+                .build()
+
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+
+            if (!resp.isSuccessful) {
+                val errorMsg = try { JSONObject(body).optString("error", "HTTP ${resp.code}") } catch (_: Exception) { body }
+                return@withContext Result.failure(SecurityException("Login challenge failed: $errorMsg"))
+            }
+
+            val respJson = JSONObject(body)
+            Result.success(
+                com.nexa.app.data.remote.dto.LoginChallengeResponseDto(
+                    status = respJson.optString("status", "CHALLENGE_ISSUED"),
+                    challengeId = respJson.optString("challenge_id"),
+                    challenge = respJson.getString("challenge"),
+                    nxId = respJson.getString("nx_id"),
+                    deviceId = respJson.getString("device_id"),
+                    expiresInSeconds = respJson.optInt("expires_in_seconds", 60),
+                    timestamp = respJson.optLong("timestamp", System.currentTimeMillis())
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Request login challenge failed", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun verifyLoginChallenge(
+        request: com.nexa.app.data.remote.dto.LoginVerifyRequestDto
+    ): Result<com.nexa.app.data.remote.dto.LoginVerifyResponseDto> = withContext(Dispatchers.IO) {
+        if (isTestMode) {
+            val sessToken = "test_sess_" + UUID.randomUUID().toString().take(12)
+            return@withContext Result.success(
+                com.nexa.app.data.remote.dto.LoginVerifyResponseDto(
+                    status = "LOGIN_SUCCESS",
+                    sessionAuthToken = sessToken,
+                    sessionToken = sessToken,
+                    nxId = request.nxId,
+                    deviceId = request.deviceId
+                )
+            )
+        }
+
+        try {
+            val url = "$baseUrl/api/v1/auth/login-verify"
+            val json = JSONObject().apply {
+                if (!request.challengeId.isNullOrBlank()) {
+                    put("challenge_id", request.challengeId)
+                }
+                put("challenge", request.challenge)
+                put("nx_id", request.nxId)
+                put("device_id", request.deviceId)
+                put("signature", request.signature)
+            }
+
+            val req = Request.Builder()
+                .url(url)
+                .post(json.toString().toRequestBody(JSON_MEDIA))
+                .build()
+
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+
+            if (!resp.isSuccessful) {
+                val errorMsg = try { JSONObject(body).optString("error", "HTTP ${resp.code}") } catch (_: Exception) { body }
+                return@withContext Result.failure(SecurityException("Login verification rejected: $errorMsg"))
+            }
+
+            val respJson = JSONObject(body)
+            val userJson = respJson.optJSONObject("user")
+            val userDto = if (userJson != null) {
+                com.nexa.app.data.remote.dto.UserProfileSummaryDto(
+                    nxId = userJson.optString("nx_id"),
+                    name = userJson.optString("name").takeIf { it.isNotEmpty() },
+                    phone = userJson.optString("phone").takeIf { it.isNotEmpty() },
+                    avatarUrl = userJson.optString("avatar_url").takeIf { it.isNotEmpty() }
+                )
+            } else null
+
+            Result.success(
+                com.nexa.app.data.remote.dto.LoginVerifyResponseDto(
+                    status = respJson.optString("status", "LOGIN_SUCCESS"),
+                    sessionAuthToken = respJson.optString("session_auth_token").takeIf { it.isNotEmpty() }
+                        ?: respJson.getString("session_token"),
+                    sessionToken = respJson.optString("session_token"),
+                    nxId = respJson.getString("nx_id"),
+                    deviceId = respJson.getString("device_id"),
+                    user = userDto
+                )
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Verify login challenge failed", e)
             Result.failure(e)
         }
     }
@@ -450,12 +588,19 @@ class AuthApiServiceImpl(
             }
 
             val respJson = JSONObject(body)
+            val inbound = respJson.optString("inbound_receiver_number").takeIf { it.isNotEmpty() }
+                ?: respJson.optString("inbound_number").takeIf { it.isNotEmpty() }
+                ?: "+919800000000"
+            val sessionId = respJson.optString("session_id").takeIf { it.isNotEmpty() }
+
             val result = com.nexa.app.data.remote.dto.InitiateReverseVerifyResponseDto(
                 status = respJson.optString("status", "PENDING"),
                 nonce = respJson.getString("nonce"),
-                inboundReceiverNumber = respJson.getString("inbound_receiver_number"),
+                inboundReceiverNumber = inbound,
+                inboundNumber = inbound,
                 smsPayload = respJson.optString("sms_payload", "NX-VERIFY " + respJson.optString("nonce")),
-                expiresInSeconds = respJson.optInt("expires_in_seconds", 90)
+                expiresInSeconds = respJson.optInt("expires_in_seconds", 90),
+                sessionId = sessionId
             )
             Result.success(result)
         } catch (e: Exception) {
@@ -484,6 +629,23 @@ class AuthApiServiceImpl(
             val respJson = JSONObject(body)
             val userJson = respJson.optJSONObject("user")
             val status = respJson.optString("status", "PENDING")
+            val isVerified = respJson.optBoolean("is_verified", status == "VERIFIED")
+
+            val result = com.nexa.app.data.remote.dto.VerificationStatusDto(
+                status = status,
+                isVerified = isVerified,
+                expiresInSeconds = respJson.optInt("expires_in_seconds").takeIf { it > 0 },
+                nxId = respJson.optString("nx_id").takeIf { it.isNotEmpty() }
+                    ?: userJson?.optString("nx_id"),
+                sessionAuthToken = respJson.optString("session_auth_token").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("session_token").takeIf { it.isNotEmpty() },
+                name = respJson.optString("name").takeIf { it.isNotEmpty() }
+                    ?: userJson?.optString("profile_name"),
+                phone = respJson.optString("phone").takeIf { it.isNotEmpty() }
+                    ?: userJson?.optString("phone_number"),
+                avatarUrl = respJson.optString("avatar_url").takeIf { it.isNotEmpty() }
+                    ?: userJson?.optString("avatar_url")
+            )
 
             val dto = com.nexa.app.data.remote.dto.VerificationStatusDto(
                 status = status,

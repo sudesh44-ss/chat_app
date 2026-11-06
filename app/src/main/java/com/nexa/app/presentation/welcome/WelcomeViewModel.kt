@@ -137,6 +137,33 @@ class WelcomeViewModel(
                                         )
                                     }
                                 }
+                                "REQUIRE_DEVICE_CHALLENGE" -> {
+                                    viewModelScope.launch {
+                                        val deviceId = resp.deviceId ?: "dev_default"
+                                        val nxId = resp.nxId ?: ""
+                                        val challengeResult = authRepository.requestAndVerifyLoginChallenge(nxId, deviceId)
+                                        challengeResult.onSuccess {
+                                            _uiState.update {
+                                                it.copy(
+                                                    isLoading = false,
+                                                    googleIdToken = token,
+                                                    userEmail = email,
+                                                    suggestedName = displayName,
+                                                    googleResponse = resp.copy(status = "LOGIN_SUCCESS"),
+                                                    isInstantLogin = true,
+                                                    errorMessage = null
+                                                )
+                                            }
+                                        }.onFailure { chalErr ->
+                                            _uiState.update {
+                                                it.copy(
+                                                    isLoading = false,
+                                                    errorMessage = "Hardware authentication failed: ${chalErr.message}"
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
                                 else -> { // "NEW_USER"
                                     _uiState.update {
                                         it.copy(
