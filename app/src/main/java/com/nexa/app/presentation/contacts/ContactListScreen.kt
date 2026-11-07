@@ -24,6 +24,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -72,11 +73,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import com.nexa.app.core.contacts.ContactsProviderHelper
 import com.nexa.app.core.theme.NexaBadgeMonospace
 import com.nexa.app.core.theme.NexaVerifiedGreen
@@ -112,10 +116,12 @@ fun ContactListScreen(
     var contactForNicknameEdit by remember { mutableStateOf<ContactEntity?>(null) }
     var contactForProfileView by remember { mutableStateOf<ContactEntity?>(null) }
     var activeViewerPhoto by remember { mutableStateOf<Any?>(null) }
+    val lifecycleOwner = LocalLifecycleOwner.current
 
-    if (activeViewerPhoto != null) {
+    val photoToView = activeViewerPhoto
+    if (photoToView != null) {
         ProfileImageViewerDialog(
-            imageModel = activeViewerPhoto!!,
+            imageModel = photoToView,
             onDismiss = { activeViewerPhoto = null }
         )
     }
@@ -124,7 +130,28 @@ fun ContactListScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
     ) { isGranted ->
-        viewModel.setPermissionState(isGranted)
+        val permanentlyDenied = !isGranted && if (context is android.app.Activity) {
+            !androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(
+                context,
+                Manifest.permission.READ_CONTACTS
+            )
+        } else false
+        viewModel.setPermissionState(isGranted, permanentlyDenied)
+    }
+
+    // Sync permission on Resume (e.g. returning from System Settings)
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                val hasPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.READ_CONTACTS
+                ) == PackageManager.PERMISSION_GRANTED
+                viewModel.setPermissionState(hasPermission)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     LaunchedEffect(Unit) {
@@ -283,6 +310,7 @@ fun ContactListScreen(
             when {
                 !uiState.isPermissionGranted -> {
                     PermissionDeniedCard(
+                        isPermanentlyDenied = uiState.isPermissionDeniedPermanently,
                         onRequestPermission = {
                             permissionLauncher.launch(Manifest.permission.READ_CONTACTS)
                         },
@@ -331,7 +359,10 @@ fun ContactListScreen(
                                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                                 )
                             }
-                            items(uiState.mutualFriends, key = { it.nxId }) { contact ->
+                            itemsIndexed(
+                                items = uiState.mutualFriends,
+                                key = { index, contact -> "mutual_${contact.nxId}_$index" }
+                            ) { _, contact ->
                                 MutualContactItemRow(
                                     contact = contact,
                                     onStartChat = {
@@ -365,7 +396,10 @@ fun ContactListScreen(
                                     )
                                 }
                             }
-                            items(uiState.deviceContacts, key = { it.normalizedNumber }) { contact ->
+                            itemsIndexed(
+                                items = uiState.deviceContacts,
+                                key = { index, contact -> "device_${contact.id}_${contact.normalizedNumber}_$index" }
+                            ) { _, contact ->
                                 DeviceContactItemRow(
                                     contact = contact,
                                     onStartChat = {
@@ -568,6 +602,7 @@ private fun DeviceContactItemRow(
 
 @Composable
 private fun PermissionDeniedCard(
+    isPermanentlyDenied: Boolean = false,
     onRequestPermission: () -> Unit,
     onOpenSettings: () -> Unit
 ) {
@@ -606,12 +641,16 @@ private fun PermissionDeniedCard(
                 }
 
                 Text(
-                    text = "Contacts Permission Required",
+                    text = if (isPermanentlyDenied) "Contacts Permission Blocked" else "Contacts Permission Required",
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold)
                 )
 
                 Text(
-                    text = "NEXA needs access to your contacts to discover which of your friends are already using NEXA.\n\nYour address book remains 100% private and is never uploaded or saved to our servers.",
+                    text = if (isPermanentlyDenied) {
+                        "NEXA needs access to your contacts to discover which of your friends are on NEXA.\n\nContacts permission has been denied. Please enable it in system settings to see your contacts.\n\nYour address book remains 100% private and is never uploaded."
+                    } else {
+                        "NEXA needs access to your contacts to discover which of your friends are already using NEXA.\n\nYour address book remains 100% private and is never uploaded or saved to our servers."
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 18.sp
@@ -621,18 +660,27 @@ private fun PermissionDeniedCard(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    OutlinedButton(
-                        onClick = onOpenSettings,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("App Settings")
-                    }
+                    if (isPermanentlyDenied) {
+                        Button(
+                            onClick = onOpenSettings,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("Open App Settings")
+                        }
+                    } else {
+                        OutlinedButton(
+                            onClick = onOpenSettings,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("App Settings")
+                        }
 
-                    Button(
-                        onClick = onRequestPermission,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("Grant Access")
+                        Button(
+                            onClick = onRequestPermission,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Grant Access")
+                        }
                     }
                 }
             }

@@ -30,4 +30,7 @@ interface ChatDao {
 
     @Query("UPDATE chats SET participantName = :newName WHERE participantNxId = :nxId")
     suspend fun updateParticipantName(nxId: String, newName: String): Int
+
+    @Query("UPDATE chats SET lastMessageText = '', unreadCount = 0 WHERE conversationId = :conversationId")
+    suspend fun clearLastMessageText(conversationId: String): Int
 }

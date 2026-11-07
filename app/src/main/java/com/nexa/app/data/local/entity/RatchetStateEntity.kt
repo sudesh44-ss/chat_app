@@ -1,5 +1,6 @@
 package com.nexa.app.data.local.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 
@@ -14,8 +15,11 @@ data class RatchetStateEntity(
     val localDhPrivateKeyHex: String,
     val localDhPublicKeyHex: String,
     val remoteDhPublicKeyHex: String,
+    @ColumnInfo(defaultValue = "0")
     val previousChainLength: Int = 0,
+    @ColumnInfo(defaultValue = "''")
     val sessionId: String = "",
+    @ColumnInfo(defaultValue = "''")
     val remoteDeviceId: String = "",
     val lastUpdatedTimestamp: Long = System.currentTimeMillis()
 )

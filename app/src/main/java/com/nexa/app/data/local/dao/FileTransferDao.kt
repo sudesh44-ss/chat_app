@@ -31,6 +31,9 @@ interface FileTransferDao {
     @Query("SELECT * FROM file_transfers WHERE conversationId = :conversationId ORDER BY timestamp DESC")
     fun observeTransfersForConversation(conversationId: String): Flow<List<TransferEntity>>
 
+    @Query("SELECT * FROM file_transfers WHERE conversationId = :conversationId ORDER BY timestamp DESC")
+    suspend fun getTransfersForConversation(conversationId: String): List<TransferEntity>
+
     @Query("DELETE FROM file_transfers WHERE transferId = :transferId")
     suspend fun deleteTransfer(transferId: Long): Int
 }

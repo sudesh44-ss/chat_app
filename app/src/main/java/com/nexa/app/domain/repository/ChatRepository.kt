@@ -34,4 +34,5 @@ interface ChatRepository {
     suspend fun pinMessage(packetId: String, conversationId: String, recipientNxId: String, durationMillis: Long?): Result<Unit> = Result.success(Unit)
     suspend fun unpinMessage(packetId: String, conversationId: String, recipientNxId: String): Result<Unit> = Result.success(Unit)
     suspend fun clearExpiredPins(conversationId: String) {}
+    suspend fun clearChatMessages(conversationId: String): Result<Unit> = Result.success(Unit)
 }

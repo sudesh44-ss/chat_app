@@ -57,6 +57,10 @@ class WebSocketManager(
     }
 
     fun connect(nxId: String, deviceId: String? = null) {
+        if (nxId.isBlank()) {
+            Log.w(TAG, "Cannot connect WebSocket with blank nxId")
+            return
+        }
         currentNxId = nxId
         currentDeviceId = deviceId
         isManuallyClosed.set(false)
@@ -77,112 +81,133 @@ class WebSocketManager(
         activeWebSocket = null
 
         _connectionState.value = ConnectionState.Connecting
-        val url = if (!deviceId.isNullOrEmpty()) {
-            "$serverBaseUrl?nx_id=$nxId&device_id=$deviceId"
-        } else {
-            "$serverBaseUrl?nx_id=$nxId"
-        }
-        val request = Request.Builder().url(url).build()
-
-        activeWebSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
-            override fun onOpen(webSocket: WebSocket, response: Response) {
-                Log.d(TAG, "WebSocket transport opened for NX-ID: $nxId, awaiting Ed25519 challenge...")
-                // Note: Remains in Connecting state until server sends PACKET_AUTH_SUCCESS
+        try {
+            val url = if (!deviceId.isNullOrEmpty()) {
+                "$serverBaseUrl?nx_id=$nxId&device_id=$deviceId"
+            } else {
+                "$serverBaseUrl?nx_id=$nxId"
             }
+            val request = Request.Builder().url(url).build()
 
-            override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                try {
-                    val packet = NexaWirePacket.decode(bytes.toByteArray())
-                    when (packet.type) {
-                        PacketType.PACKET_AUTH_CHALLENGE -> {
-                            handleAuthChallenge(webSocket, nxId, packet)
-                        }
-                        PacketType.PACKET_AUTH_SUCCESS -> {
-                            Log.i(TAG, "Ed25519 authentication ACK confirmed by server for $nxId")
-                            _connectionState.value = ConnectionState.Connected
-                            startHeartbeatPing()
-                        }
-                        PacketType.PACKET_AUTH_FAILURE -> {
-                            Log.e(TAG, "Server rejected Ed25519 authentication signature for $nxId")
-                            _connectionState.value = ConnectionState.Error(
-                                SecurityException("Server rejected Ed25519 authentication")
-                            )
-                            webSocket.close(4001, "Authentication failed")
-                        }
-                        else -> {
-                            scope.launch {
-                                _incomingPackets.emit(packet)
+            activeWebSocket = okHttpClient.newWebSocket(request, object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    Log.d(TAG, "WebSocket transport opened for NX-ID: $nxId, awaiting Ed25519 challenge...")
+                    // Note: Remains in Connecting state until server sends PACKET_AUTH_SUCCESS
+                }
+
+                override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                    try {
+                        val packet = NexaWirePacket.decode(bytes.toByteArray())
+                        when (packet.type) {
+                            PacketType.PACKET_AUTH_CHALLENGE -> {
+                                handleAuthChallenge(webSocket, nxId, packet)
+                            }
+                            PacketType.PACKET_AUTH_SUCCESS -> {
+                                Log.i(TAG, "Ed25519 authentication ACK confirmed by server for $nxId")
+                                _connectionState.value = ConnectionState.Connected
+                                startHeartbeatPing()
+                            }
+                            PacketType.PACKET_AUTH_FAILURE -> {
+                                Log.e(TAG, "Server rejected Ed25519 authentication signature for $nxId")
+                                _connectionState.value = ConnectionState.Error(
+                                    SecurityException("Server rejected Ed25519 authentication")
+                                )
+                                webSocket.close(4001, "Authentication failed")
+                            }
+                            else -> {
+                                scope.launch {
+                                    _incomingPackets.emit(packet)
+                                }
                             }
                         }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Error decoding incoming wire packet", e)
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Error decoding incoming wire packet", e)
                 }
-            }
 
-            override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
-                webSocket.close(1000, null)
-                handleDisconnect(null)
-            }
+                override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+                    webSocket.close(1000, null)
+                    handleDisconnect(null)
+                }
 
-            override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                Log.w(TAG, "WebSocket connection failed: ${t.message}")
-                handleDisconnect(t)
-            }
-        })
+                override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+                    Log.w(TAG, "WebSocket connection failed: ${t.message}")
+                    handleDisconnect(t)
+                }
+            })
+        } catch (e: Throwable) {
+            Log.e(TAG, "Failed to initiate WebSocket connection to $serverBaseUrl", e)
+            handleDisconnect(e)
+        }
     }
 
     private fun handleAuthChallenge(webSocket: WebSocket, nxId: String, packet: NexaWirePacket) {
-        val challenge = packet.authChallenge ?: return
-        val now = System.currentTimeMillis()
-        if (challenge.expiresAt in 1..now) {
-            Log.w(TAG, "Received expired auth challenge from server (now=$now, exp=${challenge.expiresAt})")
-            return
-        }
+        try {
+            val challenge = packet.authChallenge ?: return
+            val now = System.currentTimeMillis()
+            if (challenge.expiresAt in 1..now) {
+                Log.w(TAG, "Received expired auth challenge from server (now=$now, exp=${challenge.expiresAt})")
+                return
+            }
 
-        val nonce = challenge.challengeNonce
-        val challengeTs = challenge.timestamp
-        // Canonical dataToSign: challengeNonce + ":" + nxId + ":" + challengeTimestamp
-        val dataToSign = nonce + ":$nxId:$challengeTs".toByteArray(Charsets.UTF_8)
+            val nonce = challenge.challengeNonce
+            val challengeTs = challenge.timestamp
+            // Canonical dataToSign: challengeNonce + ":" + nxId + ":" + challengeTimestamp
+            val dataToSign = nonce + ":$nxId:$challengeTs".toByteArray(Charsets.UTF_8)
 
-        val (signature, publicKey) = identitySigner?.invoke(dataToSign) ?: run {
-            // Ephemeral Ed25519 signing fallback if no persistent provider configured
-            val privKey = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-            val pubKey = Ed25519Signer.derivePublicKey(privKey)
-            val sig = Ed25519Signer.sign(dataToSign, privKey)
-            Pair(sig, pubKey)
-        }
+            val (signature, publicKey) = try {
+                identitySigner?.invoke(dataToSign) ?: run {
+                    // Ephemeral Ed25519 signing fallback if no persistent provider configured
+                    val privKey = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+                    val pubKey = Ed25519Signer.derivePublicKey(privKey)
+                    val sig = Ed25519Signer.sign(dataToSign, privKey)
+                    Pair(sig, pubKey)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Identity challenge signer threw exception, falling back to ephemeral key", e)
+                val privKey = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+                val pubKey = Ed25519Signer.derivePublicKey(privKey)
+                val sig = Ed25519Signer.sign(dataToSign, privKey)
+                Pair(sig, pubKey)
+            }
 
-        val responsePacket = NexaWirePacket(
-            packetId = "auth_resp_${UUID.randomUUID()}",
-            type = PacketType.PACKET_AUTH_RESPONSE,
-            senderNxId = nxId,
-            recipientNxId = "SERVER",
-            timestamp = now,
-            authResponse = AuthResponsePayload(
-                signature = signature,
-                publicKey = publicKey,
-                timestamp = now
+            val responsePacket = NexaWirePacket(
+                packetId = "auth_resp_${UUID.randomUUID()}",
+                type = PacketType.PACKET_AUTH_RESPONSE,
+                senderNxId = nxId,
+                recipientNxId = "SERVER",
+                timestamp = now,
+                authResponse = AuthResponsePayload(
+                    signature = signature,
+                    publicKey = publicKey,
+                    timestamp = now
+                )
             )
-        )
 
-        val encoded = responsePacket.encode()
-        webSocket.send(encoded.toByteString())
-        Log.d(TAG, "Dispatched Ed25519 auth response packet to server for NX-ID: $nxId")
+            val encoded = responsePacket.encode()
+            webSocket.send(encoded.toByteString())
+            Log.d(TAG, "Dispatched Ed25519 auth response packet to server for NX-ID: $nxId")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error handling auth challenge", e)
+        }
     }
 
     private fun startHeartbeatPing() {
         pingJob?.cancel()
         pingJob = scope.launch {
-            while (isActive && _connectionState.value == ConnectionState.Connected) {
-                delay(30_000) // 30-second ping interval
-                val pingPacket = NexaWirePacket(
-                    packetId = UUID.randomUUID().toString(),
-                    type = PacketType.PACKET_PING,
-                    senderNxId = currentNxId ?: "",
-                    timestamp = System.currentTimeMillis()
-                )
-                sendPacket(pingPacket)
+            try {
+                while (isActive && _connectionState.value == ConnectionState.Connected) {
+                    delay(30_000) // 30-second ping interval
+                    val pingPacket = NexaWirePacket(
+                        packetId = UUID.randomUUID().toString(),
+                        type = PacketType.PACKET_PING,
+                        senderNxId = currentNxId ?: "",
+                        timestamp = System.currentTimeMillis()
+                    )
+                    sendPacket(pingPacket)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Heartbeat ping loop terminated: ${e.message}")
             }
         }
     }
@@ -199,16 +224,20 @@ class WebSocketManager(
     private fun scheduleReconnect() {
         reconnectJob?.cancel()
         reconnectJob = scope.launch {
-            var baseDelayMs = 1500L
-            while (isActive && !isManuallyClosed.get() && _connectionState.value !is ConnectionState.Connected) {
-                val jitter = (0..500).random().toLong()
-                val delayMs = (baseDelayMs + jitter).coerceAtMost(30_000L)
-                delay(delayMs)
-                currentNxId?.let { id ->
-                    Log.d(TAG, "Attempting WebSocket reconnect to relay for $id (device: $currentDeviceId) with backoff ${delayMs}ms...")
-                    initiateSocketConnection(id, currentDeviceId)
+            try {
+                var baseDelayMs = 1500L
+                while (isActive && !isManuallyClosed.get() && _connectionState.value !is ConnectionState.Connected) {
+                    val jitter = (0..500).random().toLong()
+                    val delayMs = (baseDelayMs + jitter).coerceAtMost(30_000L)
+                    delay(delayMs)
+                    currentNxId?.let { id ->
+                        Log.d(TAG, "Attempting WebSocket reconnect to relay for $id (device: $currentDeviceId) with backoff ${delayMs}ms...")
+                        initiateSocketConnection(id, currentDeviceId)
+                    }
+                    baseDelayMs = (baseDelayMs * 2).coerceAtMost(30_000L) // Exponential backoff max 30s
                 }
-                baseDelayMs = (baseDelayMs * 2).coerceAtMost(30_000L) // Exponential backoff max 30s
+            } catch (e: Exception) {
+                Log.w(TAG, "Reconnect loop terminated: ${e.message}")
             }
         }
     }

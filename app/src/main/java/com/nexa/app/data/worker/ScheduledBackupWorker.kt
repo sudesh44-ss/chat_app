@@ -49,18 +49,25 @@ class ScheduledBackupWorker(
         const val UNIQUE_WORK_NAME = "nexa_nightly_backup"
 
         /**
-         * Enqueues or retains the 24-hour periodic backup schedule.
+         * Builds the 24-hour periodic backup work request.
+         * Note: Does not set requiresDeviceIdle(true) to avoid WorkManager backoff criteria conflicts.
          */
-        fun scheduleNightlyBackup(context: Context) {
+        fun createPeriodicWorkRequest(): androidx.work.PeriodicWorkRequest {
             val constraints = Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.UNMETERED)
                 .setRequiresCharging(true)
-                .setRequiresDeviceIdle(true)
                 .build()
 
-            val periodicRequest = PeriodicWorkRequestBuilder<ScheduledBackupWorker>(24, TimeUnit.HOURS)
+            return PeriodicWorkRequestBuilder<ScheduledBackupWorker>(24, TimeUnit.HOURS)
                 .setConstraints(constraints)
                 .build()
+        }
+
+        /**
+         * Enqueues or retains the 24-hour periodic backup schedule.
+         */
+        fun scheduleNightlyBackup(context: Context) {
+            val periodicRequest = createPeriodicWorkRequest()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 UNIQUE_WORK_NAME,

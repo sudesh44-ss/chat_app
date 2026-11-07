@@ -9,46 +9,69 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 
+/**
+ * Appearance mode preference for NEXA:
+ * - SYSTEM: Follows Android system setting
+ * - DARK: Pure Black #000000 AMOLED Mode
+ * - LIGHT: Pure White #FFFFFF Light Mode
+ */
+enum class AppearanceMode {
+    SYSTEM,
+    DARK,
+    LIGHT
+}
+
+val LocalAppearanceMode = compositionLocalOf { AppearanceMode.SYSTEM }
+
 private val DarkColorScheme = darkColorScheme(
     primary = NexaCyan80,
     secondary = NexaCyanGrey80,
     tertiary = NexaAccent80,
-    background = NexaDarkBackground,
-    surface = NexaDarkSurface,
-    surfaceVariant = NexaDarkSurfaceVariant,
-    onPrimary = NexaDarkBackground,
-    onSecondary = NexaDarkBackground,
-    onTertiary = NexaDarkBackground,
-    onBackground = NexaLightBackground,
-    onSurface = NexaLightBackground,
-    outline = NexaDarkCardBorder
+    background = NexaPureBlack,
+    surface = NexaDarkGlassSurface,
+    surfaceVariant = NexaDarkGlassSurfaceHigh,
+    onPrimary = NexaPureBlack,
+    onSecondary = NexaPureBlack,
+    onTertiary = NexaPureBlack,
+    onBackground = NexaDarkTextPrimary,
+    onSurface = NexaDarkTextPrimary,
+    onSurfaceVariant = NexaDarkTextSecondary,
+    outline = NexaDarkGlassBorder
 )
 
 private val LightColorScheme = lightColorScheme(
     primary = NexaCyan40,
     secondary = NexaCyanGrey40,
     tertiary = NexaAccent40,
-    background = NexaLightBackground,
-    surface = NexaLightSurface,
-    surfaceVariant = NexaLightSurfaceVariant,
-    onPrimary = NexaLightSurface,
-    onSecondary = NexaLightSurface,
-    onTertiary = NexaLightSurface,
-    onBackground = NexaDarkBackground,
-    onSurface = NexaDarkBackground,
-    outline = NexaLightCardBorder
+    background = NexaPureWhite,
+    surface = NexaLightGlassSurface,
+    surfaceVariant = NexaLightGlassSurfaceHigh,
+    onPrimary = NexaPureWhite,
+    onSecondary = NexaPureWhite,
+    onTertiary = NexaPureWhite,
+    onBackground = NexaLightTextPrimary,
+    onSurface = NexaLightTextPrimary,
+    onSurfaceVariant = NexaLightTextSecondary,
+    outline = NexaLightGlassBorder
 )
 
 @Composable
 fun NexaTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    dynamicColor: Boolean = false, // Preserve brand identity by default
+    appearanceMode: AppearanceMode = AppearanceMode.SYSTEM,
+    darkTheme: Boolean = when (appearanceMode) {
+        AppearanceMode.SYSTEM -> isSystemInDarkTheme()
+        AppearanceMode.DARK -> true
+        AppearanceMode.LIGHT -> false
+    },
+    dynamicColor: Boolean = false,
     content: @Composable () -> Unit
 ) {
     val colorScheme = when {
@@ -71,13 +94,14 @@ fun NexaTheme(
                 }
                 WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
             }
-
         }
     }
 
-    MaterialTheme(
-        colorScheme = colorScheme,
-        typography = Typography,
-        content = content
-    )
+    CompositionLocalProvider(LocalAppearanceMode provides appearanceMode) {
+        MaterialTheme(
+            colorScheme = colorScheme,
+            typography = Typography,
+            content = content
+        )
+    }
 }

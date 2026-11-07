@@ -15,6 +15,7 @@ data class ContactUiState(
     val searchQuery: String = "",
     val isPermissionGranted: Boolean = false,
     val isPermissionDeniedPermanently: Boolean = false,
+    val permissionChecked: Boolean = false,
     val isLoading: Boolean = false,
     val isNetworkError: Boolean = false,
     val isPoWComputing: Boolean = false,

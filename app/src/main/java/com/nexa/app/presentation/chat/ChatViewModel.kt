@@ -346,25 +346,33 @@ class ChatViewModel(
         }
 
         viewModelScope.launch {
-            val contact = contactRepository?.getContact(event.participantNxId)
-            if (contact != null) {
-                _uiState.update {
-                    it.copy(
-                        participantName = contact.effectiveDisplayName,
-                        originalProfileName = contact.displayName,
-                        customNickname = contact.customNickname,
-                        deviceContactName = contact.deviceContactName,
-                        participantAvatarUrl = contact.effectiveAvatarUrl,
-                        deviceContactPhotoUri = contact.deviceContactPhotoUri
-                    )
+            try {
+                val contact = contactRepository?.getContact(event.participantNxId)
+                if (contact != null) {
+                    _uiState.update {
+                        it.copy(
+                            participantName = contact.effectiveDisplayName,
+                            originalProfileName = contact.displayName,
+                            customNickname = contact.customNickname,
+                            deviceContactName = contact.deviceContactName,
+                            participantAvatarUrl = contact.effectiveAvatarUrl,
+                            deviceContactPhotoUri = contact.deviceContactPhotoUri
+                        )
+                    }
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error querying contact info for ${event.participantNxId}", e)
             }
         }
 
         messagesJob?.cancel()
         messagesJob = viewModelScope.launch {
-            chatRepository.getMessages(event.conversationId).collect { list ->
-                _uiState.update { it.copy(messages = list) }
+            try {
+                chatRepository.getMessages(event.conversationId).collect { list ->
+                    _uiState.update { it.copy(messages = list) }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error collecting messages for ${event.conversationId}", e)
             }
         }
 
@@ -376,12 +384,16 @@ class ChatViewModel(
     private fun observePinnedMessages(conversationId: String) {
         pinnedMessagesJob?.cancel()
         pinnedMessagesJob = viewModelScope.launch {
-            chatRepository.clearExpiredPins(conversationId)
-            chatRepository.getPinnedMessages(conversationId).collect { pinned ->
-                _uiState.update { current ->
-                    val newIndex = if (pinned.isNotEmpty()) current.currentPinnedIndex.coerceIn(0, pinned.lastIndex) else 0
-                    current.copy(pinnedMessages = pinned, currentPinnedIndex = newIndex)
+            try {
+                chatRepository.clearExpiredPins(conversationId)
+                chatRepository.getPinnedMessages(conversationId).collect { pinned ->
+                    _uiState.update { current ->
+                        val newIndex = if (pinned.isNotEmpty()) current.currentPinnedIndex.coerceIn(0, pinned.lastIndex) else 0
+                        current.copy(pinnedMessages = pinned, currentPinnedIndex = newIndex)
+                    }
                 }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error observing pinned messages for $conversationId", e)
             }
         }
     }

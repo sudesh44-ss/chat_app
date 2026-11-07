@@ -4,6 +4,7 @@ import com.nexa.app.data.remote.dto.GoogleAuthResponse
 import com.nexa.app.data.remote.dto.InitiateReverseVerifyResponseDto
 import com.nexa.app.data.remote.dto.UserResolveDto
 import com.nexa.app.data.remote.dto.VerificationStatusDto
+import com.nexa.app.domain.model.AccountStatus
 import com.nexa.app.domain.model.UserProfile
 import kotlinx.coroutines.flow.Flow
 
@@ -53,6 +54,18 @@ interface AuthRepository {
         gender: String?,
         bio: String?
     ): Result<UserProfile>
+
+    // Account Lifecycle & Settings Management
+    fun getAccountStatus(): Flow<AccountStatus> = kotlinx.coroutines.flow.flowOf(AccountStatus.ACTIVE)
+    suspend fun updateDisplayName(name: String): Result<Boolean> = Result.success(true)
+    suspend fun requestChangePhoneOtp(newPhone: String): Result<Boolean> = Result.success(true)
+    suspend fun verifyChangePhoneOtp(newPhone: String, otp: String): Result<Boolean> = Result.success(true)
+    suspend fun deactivateAccount(): Result<Boolean> = Result.success(true)
+    suspend fun reactivateAccount(): Result<Boolean> = Result.success(true)
+    suspend fun requestDeletionOtp(): Result<Boolean> = Result.success(true)
+    suspend fun verifyDeletionOtp(otp: String): Result<Boolean> = Result.success(true)
+    suspend fun confirmPermanentDeletion(): Result<Boolean> = Result.success(true)
+    suspend fun cancelDeletionRequest(): Result<Boolean> = Result.success(true)
 
     suspend fun clearSession()
 }

@@ -114,6 +114,14 @@ class SecureStorage(context: Context) {
     fun getDhIdentityEncryptedPrivKey(): String? = prefs.getString(KEY_DH_IDENTITY_ENCRYPTED_PRIVKEY, null)
     fun getDhIdentityIv(): String? = prefs.getString(KEY_DH_IDENTITY_IV, null)
 
+    fun saveAccountStatus(status: String) {
+        prefs.edit().putString(KEY_ACCOUNT_STATUS, status).apply()
+    }
+
+    fun getAccountStatus(): String {
+        return prefs.getString(KEY_ACCOUNT_STATUS, "ACTIVE") ?: "ACTIVE"
+    }
+
     fun clearAll() {
         prefs.edit().clear().apply()
     }
@@ -133,5 +141,6 @@ class SecureStorage(context: Context) {
         private const val KEY_DH_IDENTITY_PUBLIC_KEY = "key_dh_identity_public_key"
         private const val KEY_DH_IDENTITY_ENCRYPTED_PRIVKEY = "key_dh_identity_encrypted_privkey"
         private const val KEY_DH_IDENTITY_IV = "key_dh_identity_iv"
+        private const val KEY_ACCOUNT_STATUS = "key_account_status"
     }
 }

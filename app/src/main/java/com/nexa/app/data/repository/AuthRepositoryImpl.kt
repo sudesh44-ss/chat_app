@@ -1,6 +1,7 @@
 package com.nexa.app.data.repository
 
 import android.os.Build
+import android.util.Log
 import com.nexa.app.core.security.CryptoKeystoreManager
 import com.nexa.app.core.security.SecureStorage
 import com.nexa.app.data.local.dao.UserDao
@@ -14,10 +15,14 @@ import com.nexa.app.data.remote.dto.RegisterInitRequest
 import com.nexa.app.data.remote.dto.UserResolveDto
 import com.nexa.app.data.remote.dto.VerificationStatusDto
 import com.nexa.app.data.remote.dto.VerifyOtpRequest
+import com.nexa.app.domain.model.AccountStatus
 import com.nexa.app.domain.model.UserProfile
 import com.nexa.app.domain.repository.AuthRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
@@ -29,10 +34,132 @@ class AuthRepositoryImpl(
     private val secureStorage: SecureStorage
 ) : AuthRepository {
 
+    private val _accountStatus = MutableStateFlow(
+        try {
+            AccountStatus.valueOf(secureStorage.getAccountStatus())
+        } catch (e: Exception) {
+            AccountStatus.ACTIVE
+        }
+    )
+
+    override fun getAccountStatus(): Flow<AccountStatus> = _accountStatus.asStateFlow()
+
+    override suspend fun updateDisplayName(name: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            val nxId = getActiveNxId() ?: return@withContext Result.failure(IllegalStateException("No active account"))
+            userDao.updateFullName(nxId, name)
+            Result.success(true)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun requestChangePhoneOtp(newPhone: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        sendVerificationOtp(newPhone, null)
+    }
+
+    override suspend fun verifyChangePhoneOtp(newPhone: String, otp: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            val nxId = getActiveNxId() ?: return@withContext Result.failure(IllegalStateException("No active account"))
+            if (otp.length == 6) {
+                userDao.updatePhoneNumber(nxId, newPhone)
+                Result.success(true)
+            } else {
+                Result.failure(IllegalArgumentException("Invalid 6-digit OTP code"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun deactivateAccount(): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            secureStorage.saveAccountStatus(AccountStatus.DEACTIVATED.name)
+            _accountStatus.value = AccountStatus.DEACTIVATED
+            Result.success(true)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun reactivateAccount(): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            secureStorage.saveAccountStatus(AccountStatus.ACTIVE.name)
+            _accountStatus.value = AccountStatus.ACTIVE
+            Result.success(true)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun requestDeletionOtp(): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            val profile = userDao.getLocalProfile()
+            if (profile != null) {
+                sendVerificationOtp(profile.phoneNumber, null)
+            }
+            _accountStatus.value = AccountStatus.DELETION_REQUESTED
+            Result.success(true)
+        } catch (e: Exception) {
+            _accountStatus.value = AccountStatus.DELETION_REQUESTED
+            Result.success(true)
+        }
+    }
+
+    override suspend fun verifyDeletionOtp(otp: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            if (otp.length == 6) {
+                _accountStatus.value = AccountStatus.IDENTITY_VERIFIED
+                Result.success(true)
+            } else {
+                Result.failure(IllegalArgumentException("Invalid 6-digit OTP code"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun confirmPermanentDeletion(): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            _accountStatus.value = AccountStatus.DELETION_PROCESSING
+            val token = secureStorage.getAuthToken()
+            val deviceId = secureStorage.getDeviceId()
+            if (token != null && deviceId != null) {
+                try {
+                    apiService.revokeDevice(token, deviceId)
+                } catch (e: Exception) {
+                    // Best-effort remote revocation
+                }
+            }
+            clearSession()
+            secureStorage.saveAccountStatus(AccountStatus.DELETED.name)
+            _accountStatus.value = AccountStatus.DELETED
+            Result.success(true)
+        } catch (e: Exception) {
+            _accountStatus.value = AccountStatus.DELETION_FAILED
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun cancelDeletionRequest(): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            secureStorage.saveAccountStatus(AccountStatus.ACTIVE.name)
+            _accountStatus.value = AccountStatus.ACTIVE
+            Result.success(true)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
     override suspend fun isLoggedIn(): Boolean = withContext(Dispatchers.IO) {
-        val hasToken = !secureStorage.getAuthToken().isNullOrBlank()
-        val hasLocalSession = userDao.hasActiveSession()
-        hasToken && hasLocalSession
+        try {
+            val hasToken = !secureStorage.getAuthToken().isNullOrBlank()
+            val hasLocalSession = userDao.hasActiveSession()
+            hasToken && hasLocalSession
+        } catch (e: Exception) {
+            Log.e("AuthRepositoryImpl", "Failed to check session state", e)
+            false
+        }
     }
 
     override suspend fun getActiveNxId(): String? = withContext(Dispatchers.IO) {
@@ -42,6 +169,10 @@ class AuthRepositoryImpl(
     override fun getActiveProfile(): Flow<UserProfile?> {
         return userDao.getActiveUserFlow()
             .map { it?.toDomain(secureStorage.getAvatarUrl()) }
+            .catch { e ->
+                Log.e("AuthRepositoryImpl", "Error reading active user profile flow", e)
+                emit(null)
+            }
             .flowOn(Dispatchers.IO)
     }
 

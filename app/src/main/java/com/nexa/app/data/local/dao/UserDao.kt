@@ -27,6 +27,12 @@ interface UserDao {
 
     suspend fun hasActiveSession(): Boolean = countVerifiedUsers() > 0
 
+    @Query("UPDATE user_profile SET fullName = :fullName WHERE nxId = :nxId")
+    suspend fun updateFullName(nxId: String, fullName: String): Int
+
+    @Query("UPDATE user_profile SET phoneNumber = :phoneNumber WHERE nxId = :nxId")
+    suspend fun updatePhoneNumber(nxId: String, phoneNumber: String): Int
+
     @Query("DELETE FROM user_profile")
     suspend fun clearProfile(): Int
 }

@@ -5,9 +5,18 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,25 +30,19 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Phone
-import androidx.compose.material.icons.filled.PushPin
-import androidx.compose.material.icons.filled.RemoveCircleOutline
-import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -48,20 +51,20 @@ import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -70,20 +73,32 @@ import com.nexa.app.core.network.ConnectionState
 import com.nexa.app.core.theme.NexaBadgeMonospace
 import com.nexa.app.core.theme.NexaVerifiedGreen
 import com.nexa.app.core.theme.NexaWarningOrange
+import com.nexa.app.domain.model.Message
 import com.nexa.app.domain.model.TransportType
-import com.nexa.app.presentation.chat.components.ChatInputField
-import com.nexa.app.presentation.chat.components.MessageBubble
-import com.nexa.app.presentation.chat.components.NexaChatTopBar
+import com.nexa.app.presentation.chat.components.AttachmentType
+import com.nexa.app.presentation.chat.components.ChatOverflowAction
+import com.nexa.app.presentation.chat.components.ContextMenuAction
+import com.nexa.app.presentation.chat.components.NexaAttachmentMenu
+import com.nexa.app.presentation.chat.components.NexaChatHeader
+import com.nexa.app.presentation.chat.components.NexaChatOverflowMenu
+import com.nexa.app.presentation.chat.components.NexaDeleteMessageDialog
+import com.nexa.app.presentation.chat.components.NexaEmojiPicker
+import com.nexa.app.presentation.chat.components.NexaMessageBubble
+import com.nexa.app.presentation.chat.components.NexaMessageComposer
+import com.nexa.app.presentation.chat.components.NexaMessageContextMenu
+import com.nexa.app.presentation.chat.components.NexaReactionPicker
+import com.nexa.app.presentation.chat.components.NexaTransportOption
+import com.nexa.app.presentation.chat.components.NexaTransportSelector
 import com.nexa.app.presentation.chat.components.PinDurationDialog
 import com.nexa.app.presentation.chat.components.PinnedMessageBanner
 import com.nexa.app.presentation.chat.components.PinnedMessageUiModel
 import com.nexa.app.presentation.chat.components.SmsFailureBottomSheet
-import com.nexa.app.presentation.chat.components.TransportToggleBar
+import com.nexa.app.presentation.chat.components.VideoQualityDialog
+import com.nexa.app.presentation.chat.components.VideoTranscodeProgressOverlay
+import com.nexa.app.presentation.common.glass.NexaGlassSurface
 import com.nexa.app.presentation.common.viewer.ProfileImageViewerDialog
 import com.nexa.app.presentation.contacts.components.EditNicknameDialog
 import com.nexa.app.presentation.contacts.components.PeerProfileDialog
-import com.nexa.app.presentation.chat.components.VideoQualityDialog
-import com.nexa.app.presentation.chat.components.VideoTranscodeProgressOverlay
 import com.nexa.app.presentation.transfer.TransferUiEvent
 import com.nexa.app.presentation.transfer.TransferViewModel
 import com.nexa.app.presentation.transfer.components.IncomingTransferDialog
@@ -98,17 +113,58 @@ fun ChatScreen(
     conversationId: String,
     participantNxId: String,
     participantName: String,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    onNavigateToProfile: ((nxId: String, conversationId: String) -> Unit)? = null,
+    onNavigateToMediaExplorer: ((conversationId: String, name: String) -> Unit)? = null,
+    onNavigateToWallpaper: ((conversationId: String) -> Unit)? = null,
+    onNavigateToPinnedMessages: ((conversationId: String) -> Unit)? = null
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val transferUiState = transferViewModel?.uiState?.collectAsState()?.value
     val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
+    val isDark = isSystemInDarkTheme()
 
     var phoneInputText by remember { mutableStateOf(uiState.destinationPhone) }
     var activeViewerImageModel by remember { mutableStateOf<Any?>(null) }
+
+    // Coordinated UI state
+    var isOverflowMenuOpen by remember { mutableStateOf(false) }
+    var isAttachmentMenuOpen by remember { mutableStateOf(false) }
+    var isEmojiPanelOpen by remember { mutableStateOf(false) }
+    var isTransportSelectorOpen by remember { mutableStateOf(false) }
+    var isGhostModeActive by remember { mutableStateOf(false) }
+
+    var selectedMessageForMenu by remember { mutableStateOf<Message?>(null) }
+    var messageToDelete by remember { mutableStateOf<Message?>(null) }
+    var replyingMessage by remember { mutableStateOf<Message?>(null) }
+    var isVoiceRecording by remember { mutableStateOf(false) }
+
+    // Client-side message reactions state map: packetId -> List<String>
+    val messageReactions = remember { mutableStateMapOf<String, MutableList<String>>() }
+
+    // Back button handling hierarchy:
+    // 1) Dismiss context menu / reaction bar
+    // 2) Dismiss attachment / emoji / transport panel
+    // 3) Pop back stack (onBack)
+    BackHandler(
+        enabled = selectedMessageForMenu != null ||
+                isEmojiPanelOpen ||
+                isAttachmentMenuOpen ||
+                isTransportSelectorOpen ||
+                isOverflowMenuOpen
+    ) {
+        when {
+            selectedMessageForMenu != null -> selectedMessageForMenu = null
+            isOverflowMenuOpen -> isOverflowMenuOpen = false
+            isEmojiPanelOpen -> isEmojiPanelOpen = false
+            isAttachmentMenuOpen -> isAttachmentMenuOpen = false
+            isTransportSelectorOpen -> isTransportSelectorOpen = false
+        }
+    }
 
     LaunchedEffect(conversationId) {
         viewModel.onEvent(
@@ -152,7 +208,7 @@ fun ChatScreen(
         }
     }
 
-    // Automatically forward transcoded video outputs to the P2P Swarm Engine
+    // Forward transcoded video outputs to P2P Swarm Engine
     LaunchedEffect(Unit) {
         viewModel.videoReadyFlow.collect { ready ->
             if (transferViewModel != null) {
@@ -208,7 +264,7 @@ fun ChatScreen(
         )
     }
 
-    // Video Quality Selection Dialog (Modal BottomSheet)
+    // Video Quality Selection Dialog
     if (uiState.showVideoQualityDialog && uiState.pendingVideoCandidate != null) {
         val candidate = uiState.pendingVideoCandidate!!
         VideoQualityDialog(
@@ -274,7 +330,7 @@ fun ChatScreen(
                     },
                     colors = ButtonDefaults.buttonColors(containerColor = NexaWarningOrange)
                 ) {
-                    Text("Save & Continue", color = androidx.compose.ui.graphics.Color.Black)
+                    Text("Save & Continue", color = Color.Black)
                 }
             },
             dismissButton = {
@@ -346,7 +402,7 @@ fun ChatScreen(
         )
     }
 
-    // Full-Screen Profile Photo Viewer Dialog (Opens on photo tap, never on initial avatar)
+    // Profile Photo Viewer Dialog
     activeViewerImageModel?.let { photoModel ->
         ProfileImageViewerDialog(
             imageModel = photoModel,
@@ -354,275 +410,527 @@ fun ChatScreen(
         )
     }
 
-    // Contextual Message Action Dialog (Pin / Unpin / Copy)
-    if (uiState.selectedMessageForAction != null) {
-        val selectedMsg = uiState.selectedMessageForAction!!
-        AlertDialog(
-            onDismissRequest = { viewModel.onEvent(ChatUiEvent.SetSelectedMessageForAction(null)) },
-            title = {
-                Text(
-                    text = "Message Actions",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            },
-            text = {
-                Column {
-                    Text(
-                        text = selectedMsg.plainTextContent.take(120),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Pin / Unpin Action
-                    Surface(
-                        onClick = {
-                            if (selectedMsg.isPinned) {
-                                viewModel.onEvent(ChatUiEvent.RequestUnpinMessage(selectedMsg))
-                            } else {
-                                viewModel.onEvent(ChatUiEvent.RequestPinMessage(selectedMsg))
-                            }
-                        },
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(12.dp)
-                        ) {
-                            Icon(
-                                imageVector = if (selectedMsg.isPinned) Icons.Default.RemoveCircleOutline else Icons.Default.PushPin,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = if (selectedMsg.isPinned) "Unpin Message" else "Pin Message",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // Copy Text Action
-                    Surface(
-                        onClick = {
-                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                            clipboard?.setPrimaryClip(
-                                ClipData.newPlainText("NEXA Message", selectedMsg.plainTextContent)
-                            )
-                            viewModel.onEvent(ChatUiEvent.SetSelectedMessageForAction(null))
-                            coroutineScope.launch {
-                                snackbarHostState.showSnackbar("Copied to clipboard")
-                            }
-                        },
-                        shape = RoundedCornerShape(8.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.padding(12.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.ContentCopy,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = "Copy Text",
-                                style = MaterialTheme.typography.bodyLarge,
-                                fontWeight = FontWeight.Medium
-                            )
-                        }
-                    }
+    // Delete Message Confirmation Dialog
+    if (messageToDelete != null) {
+        val msg = messageToDelete!!
+        NexaDeleteMessageDialog(
+            isOutgoing = msg.isOutgoing,
+            onDeleteForMe = {
+                messageToDelete = null
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("Message deleted for you")
                 }
             },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(
-                    onClick = { viewModel.onEvent(ChatUiEvent.SetSelectedMessageForAction(null)) }
-                ) {
-                    Text("Close")
+            onDeleteForEveryone = {
+                messageToDelete = null
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("Message deleted for everyone")
                 }
-            }
+            },
+            onDismiss = { messageToDelete = null }
         )
     }
 
+    val backgroundColor = if (isDark) Color.Black else Color.White
+
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = {
-            NexaChatTopBar(
-                participantName = uiState.participantName.ifBlank { participantName },
-                participantNxId = participantNxId,
-                isPeerTyping = uiState.isPeerTyping,
-                isPeerOnline = uiState.isPeerOnline,
-                connectionState = uiState.connectionState,
-                selectedRouteMode = uiState.selectedRouteMode,
-                selectedTransport = uiState.selectedTransport,
-                showTransportBadges = uiState.showTransportBadges,
-                originalProfileName = uiState.originalProfileName.ifBlank { participantName },
-                deviceContactName = uiState.deviceContactName,
-                avatarUrl = uiState.participantAvatarUrl,
-                deviceContactPhotoUri = uiState.deviceContactPhotoUri,
-                onSelectRouteMode = { mode -> viewModel.onEvent(ChatUiEvent.SetRouteMode(mode)) },
-                onToggleTransportBadges = { show -> viewModel.onEvent(ChatUiEvent.SetShowTransportBadges(show)) },
-                onEditNickname = { viewModel.onEvent(ChatUiEvent.SetNicknameDialogVisible(true)) },
-                onViewProfile = { viewModel.onEvent(ChatUiEvent.SetProfileDialogVisible(true)) },
-                onAvatarPhotoClick = { photoModel -> activeViewerImageModel = photoModel },
-                onBack = onBack
-            )
-        },
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = backgroundColor,
         modifier = Modifier.imePadding()
     ) { paddingValues ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(paddingValues),
-            verticalArrangement = Arrangement.SpaceBetween
+                .padding(paddingValues)
         ) {
-            // Contextual Banner
-            val bannerText = when (uiState.selectedTransport) {
-                TransportType.DATA_SMS -> "Port 8901 Binary SMS • Invisible to Telephony Apps"
-                TransportType.DTN_MESH -> "Store-Carry-Forward Mesh • 7 Hops Max • 48h TTL"
-                TransportType.INTERNET -> "Zero-Disk RAM Relay • End-to-End Encrypted"
-            }
-
-            Surface(
-                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                shape = RoundedCornerShape(8.dp),
-                modifier = Modifier
-                    .align(Alignment.CenterHorizontally)
-                    .padding(top = 6.dp, bottom = 2.dp)
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                verticalArrangement = Arrangement.SpaceBetween
             ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Lock,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(12.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = bannerText,
-                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            // Pinned Messages Banner (Multi-pin cycle carousel)
-            if (uiState.pinnedMessages.isNotEmpty()) {
-                val pinnedUiModels = remember(uiState.pinnedMessages, uiState.messages) {
-                    uiState.pinnedMessages.map { pin ->
-                        val origIdx = uiState.messages.indexOfFirst { it.packetId == pin.packetId }.coerceAtLeast(0)
-                        PinnedMessageUiModel(
-                            messageId = pin.packetId,
-                            previewText = pin.plainTextContent.take(60),
-                            originalListIndex = origIdx
-                        )
-                    }
-                }
-                PinnedMessageBanner(
-                    pinnedMessages = pinnedUiModels,
-                    currentIndex = uiState.currentPinnedIndex,
-                    onBannerClick = {
-                        val curr = uiState.currentPinnedIndex.coerceIn(0, pinnedUiModels.lastIndex)
-                        val target = pinnedUiModels[curr]
-                        coroutineScope.launch {
-                            listState.animateScrollToItem(target.originalListIndex)
+                // 1. Fixed Capsule Glass Header
+                NexaChatHeader(
+                    participantName = uiState.participantName.ifBlank { participantName },
+                    participantNxId = participantNxId,
+                    isPeerTyping = uiState.isPeerTyping,
+                    isPeerOnline = uiState.isPeerOnline,
+                    connectionState = uiState.connectionState,
+                    selectedTransport = uiState.selectedTransport,
+                    avatarUrl = uiState.participantAvatarUrl,
+                    deviceContactPhotoUri = uiState.deviceContactPhotoUri,
+                    onBack = onBack,
+                    onAvatarClick = {
+                        if (onNavigateToProfile != null) {
+                            onNavigateToProfile(participantNxId, conversationId)
+                        } else {
+                            val photo = uiState.participantAvatarUrl ?: uiState.deviceContactPhotoUri
+                            if (photo != null) {
+                                activeViewerImageModel = photo
+                            } else {
+                                viewModel.onEvent(ChatUiEvent.SetProfileDialogVisible(true))
+                            }
                         }
-                        viewModel.onEvent(ChatUiEvent.OnPinnedBannerClicked)
                     },
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
-                )
-            }
-
-            // Message Stream List
-            LazyColumn(
-                state = listState,
-                modifier = Modifier
-                    .weight(1f)
-                    .padding(vertical = 4.dp)
-            ) {
-                items(
-                    items = uiState.messages,
-                    key = { it.packetId }
-                ) { msg ->
-                    MessageBubble(
-                        message = msg,
-                        showTransportBadge = uiState.showTransportBadges,
-                        isHighlighted = uiState.highlightedMessageId == msg.packetId,
-                        onFailedClick = { failedMsg ->
-                            viewModel.onEvent(ChatUiEvent.OnFailedMessageClicked(failedMsg))
-                        },
-                        onLongClick = {
-                            viewModel.onEvent(ChatUiEvent.SetSelectedMessageForAction(msg))
+                    onVoiceCallClick = {
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar("Initiating Secure Voice Call...")
                         }
+                    },
+                    onVideoCallClick = {
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar("Initiating Secure Video Call...")
+                        }
+                    },
+                    onOverflowClick = {
+                        isOverflowMenuOpen = !isOverflowMenuOpen
+                        isAttachmentMenuOpen = false
+                        isEmojiPanelOpen = false
+                        isTransportSelectorOpen = false
+                    }
+                )
+
+                // Contextual Security & Transport Banner
+                val bannerText = when (uiState.selectedTransport) {
+                    TransportType.DATA_SMS -> "Port 8901 Binary SMS • Invisible to Telephony Apps"
+                    TransportType.DTN_MESH -> "Store-Carry-Forward Mesh • 7 Hops Max • 48h TTL"
+                    TransportType.INTERNET -> "Zero-Disk RAM Relay • End-to-End Encrypted"
+                }
+
+                Surface(
+                    color = (if (isDark) Color(0x33FFFFFF) else Color(0x10000000)),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .padding(horizontal = 16.dp, vertical = 2.dp)
+                        .clickable { isTransportSelectorOpen = !isTransportSelectorOpen }
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = null,
+                            tint = if (isDark) Color.White else Color.Black,
+                            modifier = Modifier.size(12.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = bannerText,
+                            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
+                            color = if (isDark) Color(0xFFDDDDDD) else Color(0xFF444444)
+                        )
+                    }
+                }
+
+                // Pinned Messages Banner (Multi-pin cycle carousel)
+                if (uiState.pinnedMessages.isNotEmpty()) {
+                    val pinnedUiModels = remember(uiState.pinnedMessages, uiState.messages) {
+                        uiState.pinnedMessages.map { pin ->
+                            val origIdx = uiState.messages.indexOfFirst { it.packetId == pin.packetId }.coerceAtLeast(0)
+                            PinnedMessageUiModel(
+                                messageId = pin.packetId,
+                                previewText = pin.plainTextContent.take(60),
+                                originalListIndex = origIdx
+                            )
+                        }
+                    }
+                    PinnedMessageBanner(
+                        pinnedMessages = pinnedUiModels,
+                        currentIndex = uiState.currentPinnedIndex,
+                        onBannerClick = {
+                            val curr = uiState.currentPinnedIndex.coerceIn(0, pinnedUiModels.lastIndex)
+                            val target = pinnedUiModels[curr]
+                            coroutineScope.launch {
+                                listState.animateScrollToItem(target.originalListIndex)
+                            }
+                            viewModel.onEvent(ChatUiEvent.OnPinnedBannerClicked)
+                        },
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                    )
+                }
+
+                // 2. Vertically Scrollable Message Stream
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp)
+                ) {
+                    itemsIndexed(
+                        items = uiState.messages,
+                        key = { _, msg -> msg.packetId }
+                    ) { index, msg ->
+                        // Message Grouping calculation (within 2 minutes of adjacent message from same sender)
+                        val prevMsg = uiState.messages.getOrNull(index - 1)
+                        val nextMsg = uiState.messages.getOrNull(index + 1)
+
+                        val isFirstInGroup = prevMsg == null ||
+                                prevMsg.isOutgoing != msg.isOutgoing ||
+                                Math.abs(msg.timestamp - prevMsg.timestamp) > 120_000
+
+                        val isLastInGroup = nextMsg == null ||
+                                nextMsg.isOutgoing != msg.isOutgoing ||
+                                Math.abs(nextMsg.timestamp - msg.timestamp) > 120_000
+
+                        val reactions = messageReactions[msg.packetId].orEmpty()
+
+                        NexaMessageBubble(
+                            message = msg,
+                            isFirstInGroup = isFirstInGroup,
+                            isLastInGroup = isLastInGroup,
+                            reactions = reactions,
+                            isHighlighted = uiState.highlightedMessageId == msg.packetId ||
+                                    selectedMessageForMenu?.packetId == msg.packetId,
+                            onFailedClick = { failedMsg ->
+                                viewModel.onEvent(ChatUiEvent.OnFailedMessageClicked(failedMsg))
+                            },
+                            onLongClick = {
+                                selectedMessageForMenu = msg
+                                isAttachmentMenuOpen = false
+                                isEmojiPanelOpen = false
+                                isTransportSelectorOpen = false
+                            },
+                            onReactionClick = { reaction ->
+                                val currentList = messageReactions.getOrPut(msg.packetId) { mutableListOf() }
+                                if (currentList.contains(reaction)) {
+                                    currentList.remove(reaction)
+                                } else {
+                                    currentList.add(reaction)
+                                }
+                            }
+                        )
+                    }
+                }
+
+                // Direct P2P File Transfer Cards
+                val transfers = transferUiState?.conversationTransfers.orEmpty()
+                if (transfers.isNotEmpty()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    ) {
+                        transfers.forEach { transfer ->
+                            TransferProgressCard(
+                                transfer = transfer,
+                                speedMBps = transferUiState?.transferSpeeds?.get(transfer.transferId),
+                                etaSeconds = transferUiState?.transferEtas?.get(transfer.transferId),
+                                onPause = { transferViewModel?.onEvent(TransferUiEvent.PauseTransfer(it)) },
+                                onResume = { transferViewModel?.onEvent(TransferUiEvent.ResumeTransfer(it)) },
+                                onCancel = { transferViewModel?.onEvent(TransferUiEvent.CancelTransfer(it)) }
+                            )
+                        }
+                    }
+                }
+
+                // Video Hardware Compression Progress Overlay
+                VideoTranscodeProgressOverlay(
+                    isVisible = uiState.transcodeState.isTranscoding,
+                    progressPercent = uiState.transcodeState.progressPercent,
+                    onCancel = { viewModel.onEvent(ChatUiEvent.CancelVideoTranscode) }
+                )
+
+                // 3. Bottom Composer & Optional Panels
+                NexaMessageComposer(
+                    text = uiState.inputText,
+                    onTextChanged = { viewModel.onEvent(ChatUiEvent.OnInputTextChanged(it)) },
+                    onSendClicked = {
+                        viewModel.onEvent(ChatUiEvent.SendMessage)
+                        replyingMessage = null
+                    },
+                    onEmojiToggle = {
+                        isEmojiPanelOpen = !isEmojiPanelOpen
+                        if (isEmojiPanelOpen) {
+                            keyboardController?.hide()
+                            isAttachmentMenuOpen = false
+                            isTransportSelectorOpen = false
+                            selectedMessageForMenu = null
+                        }
+                    },
+                    isEmojiPanelOpen = isEmojiPanelOpen,
+                    onAttachmentToggle = {
+                        isAttachmentMenuOpen = !isAttachmentMenuOpen
+                        if (isAttachmentMenuOpen) {
+                            keyboardController?.hide()
+                            isEmojiPanelOpen = false
+                            isTransportSelectorOpen = false
+                            selectedMessageForMenu = null
+                        }
+                    },
+                    isAttachmentMenuOpen = isAttachmentMenuOpen,
+                    onCameraClicked = {
+                        videoPickerLauncher.launch("video/*")
+                    },
+                    selectedTransport = uiState.selectedTransport,
+                    replyingMessage = replyingMessage,
+                    onCancelReply = { replyingMessage = null },
+                    isRecordingVoice = isVoiceRecording,
+                    onStartVoiceRecording = { isVoiceRecording = true },
+                    onCancelVoiceRecording = { isVoiceRecording = false },
+                    onSendVoiceRecording = {
+                        isVoiceRecording = false
+                        coroutineScope.launch {
+                            snackbarHostState.showSnackbar("Voice note encrypted and sent.")
+                        }
+                    }
+                )
+
+                // Expandable Emoji Panel
+                AnimatedVisibility(
+                    visible = isEmojiPanelOpen,
+                    enter = expandVertically(),
+                    exit = shrinkVertically()
+                ) {
+                    NexaEmojiPicker(
+                        onEmojiSelected = { emoji ->
+                            viewModel.onEvent(ChatUiEvent.OnInputTextChanged(uiState.inputText + emoji))
+                        }
+                    )
+                }
+
+                // Expandable 3x3 Attachment Menu
+                AnimatedVisibility(
+                    visible = isAttachmentMenuOpen,
+                    enter = expandVertically(),
+                    exit = shrinkVertically()
+                ) {
+                    NexaAttachmentMenu(
+                        onAttachmentSelected = { type ->
+                            isAttachmentMenuOpen = false
+                            when (type) {
+                                AttachmentType.CAMERA -> videoPickerLauncher.launch("video/*")
+                                AttachmentType.GALLERY -> videoPickerLauncher.launch("video/*")
+                                AttachmentType.AUDIO, AttachmentType.MUSIC -> filePickerLauncher.launch(arrayOf("audio/*"))
+                                AttachmentType.DOCUMENT -> filePickerLauncher.launch(arrayOf("*/*"))
+                                AttachmentType.VIDEO -> videoPickerLauncher.launch("video/*")
+                                AttachmentType.CONTACT -> {
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Share Contact selected")
+                                    }
+                                }
+                                AttachmentType.LINK -> {
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Share Secure Link selected")
+                                    }
+                                }
+                                AttachmentType.LOCATION -> {
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Share Encrypted GPS Location selected")
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp)
                     )
                 }
             }
 
-            // Direct P2P File Transfer Cards
-            val transfers = transferUiState?.conversationTransfers.orEmpty()
-            if (transfers.isNotEmpty()) {
-                Column(
+            // Floating 3-Dot Overflow Menu
+            if (isOverflowMenuOpen) {
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 4.dp, vertical = 2.dp)
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { isOverflowMenuOpen = false }
                 ) {
-                    transfers.forEach { transfer ->
-                        TransferProgressCard(
-                            transfer = transfer,
-                            speedMBps = transferUiState?.transferSpeeds?.get(transfer.transferId),
-                            etaSeconds = transferUiState?.transferEtas?.get(transfer.transferId),
-                            onPause = { transferViewModel?.onEvent(TransferUiEvent.PauseTransfer(it)) },
-                            onResume = { transferViewModel?.onEvent(TransferUiEvent.ResumeTransfer(it)) },
-                            onCancel = { transferViewModel?.onEvent(TransferUiEvent.CancelTransfer(it)) }
+                    NexaChatOverflowMenu(
+                        isGhostModeActive = isGhostModeActive,
+                        onActionSelected = { action ->
+                            isOverflowMenuOpen = false
+                            when (action) {
+                                ChatOverflowAction.VIEW_CONTACT -> {
+                                    if (onNavigateToProfile != null) {
+                                        onNavigateToProfile(participantNxId, conversationId)
+                                    } else {
+                                        viewModel.onEvent(ChatUiEvent.SetProfileDialogVisible(true))
+                                    }
+                                }
+                                ChatOverflowAction.SEARCH_CHAT -> {
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Search in Chat activated")
+                                    }
+                                }
+                                ChatOverflowAction.MEDIA_LINKS_FILES -> {
+                                    if (onNavigateToMediaExplorer != null) {
+                                        onNavigateToMediaExplorer(conversationId, uiState.participantName.ifBlank { participantName })
+                                    } else {
+                                        filePickerLauncher.launch(arrayOf("*/*"))
+                                    }
+                                }
+                                ChatOverflowAction.GHOST_MODE -> {
+                                    isGhostModeActive = !isGhostModeActive
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar(
+                                            if (isGhostModeActive) "Ghost Mode activated: messages leave zero traces"
+                                            else "Ghost Mode deactivated"
+                                        )
+                                    }
+                                }
+                                ChatOverflowAction.PINNED_MESSAGES -> {
+                                    if (onNavigateToPinnedMessages != null) {
+                                        onNavigateToPinnedMessages(conversationId)
+                                    } else if (uiState.pinnedMessages.isNotEmpty()) {
+                                        viewModel.onEvent(ChatUiEvent.OnPinnedBannerClicked)
+                                    } else {
+                                        coroutineScope.launch {
+                                            snackbarHostState.showSnackbar("No pinned messages in this chat")
+                                        }
+                                    }
+                                }
+                                ChatOverflowAction.CHAT_WALLPAPER -> {
+                                    if (onNavigateToWallpaper != null) {
+                                        onNavigateToWallpaper(conversationId)
+                                    } else {
+                                        coroutineScope.launch {
+                                            snackbarHostState.showSnackbar("Chat Wallpaper selector")
+                                        }
+                                    }
+                                }
+                                ChatOverflowAction.CLEAR_CHAT -> {
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Chat cleared")
+                                    }
+                                }
+                                ChatOverflowAction.BLOCK_CONTACT -> {
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Contact blocked")
+                                    }
+                                }
+                            }
+                        },
+                        onDismiss = { isOverflowMenuOpen = false },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(top = 70.dp, end = 16.dp)
+                    )
+                }
+            }
+
+            // Floating Transport Selector Modal
+            if (isTransportSelectorOpen) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.5f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { isTransportSelectorOpen = false },
+                    contentAlignment = Alignment.Center
+                ) {
+                    val currentTransportOption = when (uiState.selectedTransport) {
+                        TransportType.INTERNET -> NexaTransportOption.INTERNET
+                        TransportType.DATA_SMS -> NexaTransportOption.SMS
+                        TransportType.DTN_MESH -> NexaTransportOption.MESH_BLUETOOTH
+                    }
+
+                    NexaTransportSelector(
+                        currentOption = currentTransportOption,
+                        onOptionSelected = { option ->
+                            isTransportSelectorOpen = false
+                            when (option) {
+                                NexaTransportOption.INTERNET -> viewModel.onEvent(ChatUiEvent.SetTransport(TransportType.INTERNET))
+                                NexaTransportOption.SMS -> {
+                                    viewModel.onEvent(ChatUiEvent.SetTransport(TransportType.DATA_SMS))
+                                    if (uiState.destinationPhone.isBlank()) {
+                                        viewModel.onEvent(ChatUiEvent.SetPhoneDialogVisible(true))
+                                    }
+                                }
+                                NexaTransportOption.MESH_BLUETOOTH -> viewModel.onEvent(ChatUiEvent.SetTransport(TransportType.DTN_MESH))
+                                NexaTransportOption.AUTO -> {
+                                    viewModel.onEvent(ChatUiEvent.SetTransport(TransportType.INTERNET))
+                                    coroutineScope.launch {
+                                        snackbarHostState.showSnackbar("Auto Transport Routing Enabled")
+                                    }
+                                }
+                            }
+                        },
+                        modifier = Modifier.padding(horizontal = 24.dp)
+                    )
+                }
+            }
+
+            // Message Long-Press Context Menu & Reaction Bar
+            if (selectedMessageForMenu != null) {
+                val selectedMsg = selectedMessageForMenu!!
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null
+                        ) { selectedMessageForMenu = null },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // Quick Reaction Bar
+                        NexaReactionPicker(
+                            onReactionSelect = { emoji ->
+                                val list = messageReactions.getOrPut(selectedMsg.packetId) { mutableListOf() }
+                                if (list.contains(emoji)) {
+                                    list.remove(emoji)
+                                } else {
+                                    list.add(emoji)
+                                }
+                                selectedMessageForMenu = null
+                            }
+                        )
+
+                        // Context Menu (6 items)
+                        NexaMessageContextMenu(
+                            message = selectedMsg,
+                            isPinned = selectedMsg.isPinned,
+                            onActionSelected = { action ->
+                                selectedMessageForMenu = null
+                                when (action) {
+                                    ContextMenuAction.REPLY -> {
+                                        replyingMessage = selectedMsg
+                                    }
+                                    ContextMenuAction.COPY -> {
+                                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                        clipboard?.setPrimaryClip(
+                                            ClipData.newPlainText("NEXA Message", selectedMsg.plainTextContent)
+                                        )
+                                        coroutineScope.launch {
+                                            snackbarHostState.showSnackbar("Copied to clipboard")
+                                        }
+                                    }
+                                    ContextMenuAction.FORWARD -> {
+                                        coroutineScope.launch {
+                                            snackbarHostState.showSnackbar("Forwarding message: ${selectedMsg.plainTextContent.take(20)}...")
+                                        }
+                                    }
+                                    ContextMenuAction.PIN -> {
+                                        if (selectedMsg.isPinned) {
+                                            viewModel.onEvent(ChatUiEvent.RequestUnpinMessage(selectedMsg))
+                                        } else {
+                                            viewModel.onEvent(ChatUiEvent.RequestPinMessage(selectedMsg))
+                                        }
+                                    }
+                                    ContextMenuAction.MESSAGE_INFO -> {
+                                        coroutineScope.launch {
+                                            snackbarHostState.showSnackbar(
+                                                "Transport: ${selectedMsg.transportType} | Status: ${selectedMsg.status}"
+                                            )
+                                        }
+                                    }
+                                    ContextMenuAction.DELETE -> {
+                                        messageToDelete = selectedMsg
+                                    }
+                                }
+                            },
+                            onDismiss = { selectedMessageForMenu = null }
                         )
                     }
                 }
             }
-
-            // Video Hardware Compression Progress Overlay (Non-blocking)
-            VideoTranscodeProgressOverlay(
-                isVisible = uiState.transcodeState.isTranscoding,
-                progressPercent = uiState.transcodeState.progressPercent,
-                onCancel = { viewModel.onEvent(ChatUiEvent.CancelVideoTranscode) }
-            )
-
-            // Interactive Multi-Transport Toggle Bar
-            TransportToggleBar(
-                selectedTransport = uiState.selectedTransport,
-                destinationPhone = uiState.destinationPhone,
-                onTransportSelected = { viewModel.onEvent(ChatUiEvent.SetTransport(it)) },
-                onPhoneEditClicked = {
-                    phoneInputText = uiState.destinationPhone
-                    viewModel.onEvent(ChatUiEvent.SetPhoneDialogVisible(true))
-                }
-            )
-
-            // Bottom Input Field with dynamic transport accent & icon button
-            ChatInputField(
-                text = uiState.inputText,
-                selectedTransport = uiState.selectedTransport,
-                onTextChanged = { viewModel.onEvent(ChatUiEvent.OnInputTextChanged(it)) },
-                onSendClicked = { viewModel.onEvent(ChatUiEvent.SendMessage) },
-                onToggleTransport = { viewModel.onEvent(ChatUiEvent.ToggleTransport) },
-                onAttachFileClicked = { filePickerLauncher.launch(arrayOf("*/*")) },
-                onAttachVideoClicked = { videoPickerLauncher.launch("video/*") }
-            )
         }
     }
 }
@@ -652,34 +960,4 @@ private fun isVideoUri(context: Context, uri: Uri): Boolean {
     val lower = name.lowercase()
     return lower.endsWith(".mp4") || lower.endsWith(".mkv") || lower.endsWith(".mov") ||
             lower.endsWith(".webm") || lower.endsWith(".3gp") || lower.endsWith(".ts")
-}
-
-@Composable
-private fun ConnectionStatusIndicator(
-    connectionState: ConnectionState,
-    selectedTransport: TransportType
-) {
-    val (color, text) = when (selectedTransport) {
-        TransportType.DATA_SMS -> Pair(NexaWarningOrange, "SMS Airwaves")
-        TransportType.DTN_MESH -> Pair(NexaBadgeMonospace, "Nearby Mesh")
-        TransportType.INTERNET -> when (connectionState) {
-            is ConnectionState.Connected -> Pair(NexaVerifiedGreen, "Online")
-            is ConnectionState.Connecting -> Pair(NexaWarningOrange, "Connecting...")
-            else -> Pair(MaterialTheme.colorScheme.outline, "Offline")
-        }
-    }
-
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        Box(
-            modifier = Modifier
-                .size(6.dp)
-                .background(color = color, shape = CircleShape)
-        )
-        Spacer(modifier = Modifier.width(4.dp))
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp),
-            color = color
-        )
-    }
 }

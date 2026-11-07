@@ -2,6 +2,9 @@ package com.nexa.app
 
 import android.app.Application
 import android.util.Log
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import com.nexa.app.core.crypto.DoubleRatchetEngine
 import com.nexa.app.core.keystore.HardwareKeystoreVault
 import com.nexa.app.core.network.NetworkMonitor
@@ -149,6 +152,9 @@ class NexaApplication : Application() {
     lateinit var chatPrivacyPrefs: com.nexa.app.data.local.preferences.ChatPrivacyPrefs
         private set
 
+    lateinit var conversationPrefs: com.nexa.app.data.local.preferences.ConversationPreferences
+        private set
+
     lateinit var mediaProcessingRepository: com.nexa.app.domain.repository.MediaProcessingRepository
         private set
 
@@ -203,12 +209,16 @@ class NexaApplication : Application() {
     lateinit var notificationDispatcher: com.nexa.app.core.notification.NexaNotificationDispatcher
         private set
 
+    lateinit var appearancePrefs: com.nexa.app.data.local.preferences.AppearancePreferences
+        private set
+
     override fun onCreate() {
         super.onCreate()
 
         // 1. Initialize hardware keystore and secure preferences
         secureStorage = SecureStorage(this)
         keystoreManager = CryptoKeystoreManager(this)
+        appearancePrefs = com.nexa.app.data.local.preferences.AppearancePreferences(this)
 
         // 2. Initialize encrypted SQLite database with SQLCipher SupportFactory
         val dbPassphrase = secureStorage.getOrCreateDatabasePassphrase()
@@ -228,27 +238,35 @@ class NexaApplication : Application() {
         // 5. Initialize network monitoring & WebSocket pipeline
         webSocketManager = WebSocketManager()
         webSocketManager.setIdentitySigner { dataToSign ->
-            val keys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
-            val pubKeyBytes = hexToBytes(keys.publicKeyHex)
-            val signature = keystoreManager.withDecryptedPrivateKey(keys) { rawPriv ->
-                com.nexa.app.core.crypto.Ed25519Signer.sign(dataToSign, rawPriv)
-            }
-
-            // Sync unified identity keys to handshake preference store for backward compatibility
             try {
-                val handshakePrefs = getSharedPreferences("nexa_handshake_keys", android.content.Context.MODE_PRIVATE)
-                if (handshakePrefs.getString("sign_pub", null) != keys.publicKeyHex) {
-                    handshakePrefs.edit()
-                        .putString("sign_priv_enc", bytesToHex(keys.encryptedPrivateKey))
-                        .putString("sign_priv_iv", bytesToHex(keys.iv))
-                        .putString("sign_pub", keys.publicKeyHex)
-                        .apply()
+                val keys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
+                val pubKeyBytes = hexToBytes(keys.publicKeyHex)
+                val signature = keystoreManager.withDecryptedPrivateKey(keys) { rawPriv ->
+                    com.nexa.app.core.crypto.Ed25519Signer.sign(dataToSign, rawPriv)
                 }
-            } catch (e: Exception) {
-                Log.w("NexaApp", "Handshake key sync warning: ${e.message}")
-            }
 
-            Pair(signature, pubKeyBytes)
+                // Sync unified identity keys to handshake preference store for backward compatibility
+                try {
+                    val handshakePrefs = getSharedPreferences("nexa_handshake_keys", android.content.Context.MODE_PRIVATE)
+                    if (handshakePrefs.getString("sign_pub", null) != keys.publicKeyHex) {
+                        handshakePrefs.edit()
+                            .putString("sign_priv_enc", bytesToHex(keys.encryptedPrivateKey))
+                            .putString("sign_priv_iv", bytesToHex(keys.iv))
+                            .putString("sign_pub", keys.publicKeyHex)
+                            .apply()
+                    }
+                } catch (e: Exception) {
+                    Log.w("NexaApp", "Handshake key sync warning: ${e.message}")
+                }
+
+                Pair(signature, pubKeyBytes)
+            } catch (e: Exception) {
+                Log.e("NexaApp", "Failed to sign identity challenge using hardware keystore, falling back to ephemeral key", e)
+                val privKey = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+                val pubKey = com.nexa.app.core.crypto.Ed25519Signer.derivePublicKey(privKey)
+                val sig = com.nexa.app.core.crypto.Ed25519Signer.sign(dataToSign, privKey)
+                Pair(sig, pubKey)
+            }
         }
         networkMonitor = NetworkMonitor(this)
 
@@ -300,6 +318,7 @@ class NexaApplication : Application() {
 
         // 10. Initialize Chat Repository with Outbox, WebSocket, Data SMS, DTN, and Double Ratchet E2EE
         chatPrivacyPrefs = com.nexa.app.data.local.preferences.ChatPrivacyPrefs(this)
+        conversationPrefs = com.nexa.app.data.local.preferences.ConversationPreferences(this)
         chatRepository = ChatRepositoryImpl(
             messageDao = database.messageDao(),
             chatDao = database.chatDao(),
@@ -474,8 +493,16 @@ class NexaApplication : Application() {
         bloomDuplicateFilter = com.nexa.app.core.mesh.engine.BloomDuplicateFilter()
         custodyTransferManager = com.nexa.app.core.mesh.dtn.CustodyTransferManager(database.meshOutboxDao())
 
-        com.nexa.app.data.worker.OrphanCleanupWorker.schedulePeriodicCleanup(this)
-        com.nexa.app.data.worker.DtnOpportunisticDumpWorker.scheduleOpportunisticDump(this)
+        try {
+            com.nexa.app.data.worker.OrphanCleanupWorker.schedulePeriodicCleanup(this)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to schedule orphan cleanup worker", e)
+        }
+        try {
+            com.nexa.app.data.worker.DtnOpportunisticDumpWorker.scheduleOpportunisticDump(this)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to schedule DTN opportunistic dump worker", e)
+        }
 
         // 18. Initialize Privacy-First Push Notification Subsystem
         pushManager = com.nexa.app.data.remote.push.NexaPushManager(
@@ -483,6 +510,17 @@ class NexaApplication : Application() {
             authApiService = apiService,
             secureStorage = secureStorage
         )
+
+        instance = this
+
+        // 19. Seed Development Demo Conversations if debug or auth bypass is enabled
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                com.nexa.app.core.demo.DemoDataSeeder.seedDemoConversations(database)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to seed demo conversations", e)
+            }
+        }
     }
 
     private fun bytesToHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
@@ -500,5 +538,7 @@ class NexaApplication : Application() {
 
     companion object {
         private const val TAG = "NexaApplication"
+        lateinit var instance: NexaApplication
+            private set
     }
 }

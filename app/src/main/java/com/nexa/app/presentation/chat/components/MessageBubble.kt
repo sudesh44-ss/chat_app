@@ -105,6 +105,24 @@ fun MessageBubble(
                 .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
             Column {
+                if (!isOutgoing && message.conversationId.contains("group")) {
+                    val senderDisplayName = when (message.senderNxId) {
+                        "NX-DEMO-ALEX" -> "Alex"
+                        "NX-DEMO-SAM" -> "Sam"
+                        "NX-DEMO-PRIYA" -> "Priya"
+                        else -> message.senderNxId
+                    }
+                    Text(
+                        text = senderDisplayName,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontSize = 11.sp
+                        ),
+                        modifier = Modifier.padding(bottom = 2.dp)
+                    )
+                }
+
                 val context = LocalContext.current
                 val linkColor = MaterialTheme.colorScheme.primary
                 val codeBg = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f)

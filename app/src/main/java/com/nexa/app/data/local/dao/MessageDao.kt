@@ -72,9 +72,12 @@ interface MessageDao {
         UPDATE messages 
         SET isPinned = 0, pinnedExpiresAt = NULL, pinnedAt = NULL 
         WHERE conversationId = :conversationId 
-          AND isPinned = 1 
-          AND pinnedExpiresAt IS NOT NULL 
-          AND pinnedExpiresAt <= :currentTimeMillis
+        AND isPinned = 1 
+        AND pinnedExpiresAt IS NOT NULL 
+        AND pinnedExpiresAt <= :currentTimeMillis
     """)
     suspend fun clearExpiredPins(conversationId: String, currentTimeMillis: Long): Int
+
+    @Query("DELETE FROM messages WHERE conversationId = :conversationId")
+    suspend fun deleteMessagesForConversation(conversationId: String): Int
 }

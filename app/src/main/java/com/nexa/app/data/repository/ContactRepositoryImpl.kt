@@ -17,6 +17,8 @@ import com.nexa.app.data.remote.dto.DispatchRequestDto
 import com.nexa.app.domain.repository.ContactRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.withContext
 import java.security.SecureRandom
 
@@ -234,14 +236,20 @@ class ContactRepositoryImpl(
 
     override fun getContactsByStatus(status: ContactStatus): Flow<List<ContactEntity>> {
         return contactDao.getContactsByStatus(status)
+            .catch { emit(emptyList()) }
+            .flowOn(Dispatchers.IO)
     }
 
     override fun getPendingCount(): Flow<Int> {
         return contactDao.getPendingReceivedCount()
+            .catch { emit(0) }
+            .flowOn(Dispatchers.IO)
     }
 
     override fun getAllContacts(): Flow<List<ContactEntity>> {
         return contactDao.getAllContacts()
+            .catch { emit(emptyList()) }
+            .flowOn(Dispatchers.IO)
     }
 
     override suspend fun getContact(nxId: String): ContactEntity? {
@@ -272,6 +280,8 @@ class ContactRepositoryImpl(
 
     override fun searchContacts(query: String): Flow<List<ContactEntity>> {
         return contactDao.searchContacts(query.trim())
+            .catch { emit(emptyList()) }
+            .flowOn(Dispatchers.IO)
     }
 
     // --- Keystore-Protected Key Pair Management ---
@@ -330,34 +340,9 @@ class ContactRepositoryImpl(
 
     override suspend fun loadDeviceContacts(): Result<List<com.nexa.app.domain.model.DeviceContact>> = withContext(Dispatchers.IO) {
         try {
-            // 1. Read device contacts locally via ContentResolver
+            // Read device contacts purely locally via ContentResolver (Zero server upload / complete privacy)
             val localContacts = com.nexa.app.core.contacts.ContactsProviderHelper.readDeviceContacts(context)
-            if (localContacts.isEmpty()) {
-                return@withContext Result.success(emptyList())
-            }
-
-            // 2. Perform authenticated backend batch lookup
-            val sessionToken = secureStorage.getSessionToken() ?: ""
-            val phoneNumbers = localContacts.map { it.normalizedNumber }
-
-            val matchResult = authApiService.lookupContacts(sessionToken, phoneNumbers)
-            val matchesMap = matchResult.getOrNull()?.associateBy { it.phoneNumber } ?: emptyMap()
-
-            // 3. Merge matching results locally
-            val augmentedContacts = localContacts.map { contact ->
-                val match = matchesMap[contact.normalizedNumber]
-                if (match != null) {
-                    contact.copy(
-                        isNexaUser = true,
-                        nexaNxId = match.nxId,
-                        nexaPublicKeyHex = match.publicKeyHex
-                    )
-                } else {
-                    contact
-                }
-            }
-
-            Result.success(augmentedContacts)
+            Result.success(localContacts)
         } catch (e: Exception) {
             Result.failure(e)
         }

@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.flowOn
@@ -74,12 +75,20 @@ class ChatRepositoryImpl(
     override fun getMessages(conversationId: String): Flow<List<Message>> {
         return messageDao.getMessagesFlow(conversationId)
             .map { list -> list.map { it.toDomain() } }
+            .catch { e ->
+                Log.e(TAG, "Error collecting messages for $conversationId", e)
+                emit(emptyList())
+            }
             .flowOn(Dispatchers.IO)
     }
 
     override fun getConversations(): Flow<List<ChatConversation>> {
         return chatDao.getChatsFlow()
             .map { list -> list.map { it.toDomain() } }
+            .catch { e ->
+                Log.e(TAG, "Error collecting conversations from local vault", e)
+                emit(emptyList())
+            }
             .flowOn(Dispatchers.IO)
     }
 
@@ -91,9 +100,41 @@ class ChatRepositoryImpl(
     ): Result<Message> = withContext(Dispatchers.IO) {
         try {
             val myNxId = getMyNxId()
-            val conversationId = deriveConversationId(myNxId, recipientNxId)
             val packetId = UUID.randomUUID().toString()
             val timestamp = System.currentTimeMillis()
+
+            // Intercept Demo Conversations for safe local-only development testing
+            if (recipientNxId.startsWith("NX-DEMO")) {
+                val existingChat = chatDao.getChatByParticipant(recipientNxId)
+                val targetConvId = existingChat?.conversationId ?: deriveConversationId(myNxId, recipientNxId)
+                val targetName = existingChat?.participantName ?: recipientNxId
+                val demoMsg = MessageEntity(
+                    packetId = packetId,
+                    conversationId = targetConvId,
+                    senderNxId = myNxId,
+                    recipientNxId = recipientNxId,
+                    plainTextContent = text,
+                    status = MessageStatus.DELIVERED.name,
+                    timestamp = timestamp,
+                    isOutgoing = true,
+                    transportType = transport.name
+                )
+                messageDao.insertMessage(demoMsg)
+                chatDao.upsertChat(
+                    ChatEntity(
+                        conversationId = targetConvId,
+                        participantNxId = recipientNxId,
+                        participantName = targetName,
+                        lastMessageText = text,
+                        lastMessageTimestamp = timestamp,
+                        unreadCount = 0
+                    )
+                )
+                Log.i(TAG, "Demo message $packetId stored locally as DELIVERED without cloud transmission")
+                return@withContext Result.success(demoMsg.toDomain())
+            }
+
+            val conversationId = deriveConversationId(myNxId, recipientNxId)
 
             // 1. Ensure conversation exists in local vault
             createOrGetConversation(recipientNxId)
@@ -370,7 +411,7 @@ class ChatRepositoryImpl(
     ): ChatConversation = withContext(Dispatchers.IO) {
         val myNxId = getMyNxId()
         val conversationId = deriveConversationId(myNxId, participantNxId)
-        val existing = chatDao.getChatById(conversationId)
+        val existing = chatDao.getChatById(conversationId) ?: chatDao.getChatByParticipant(participantNxId)
         if (existing != null) {
             return@withContext existing.toDomain()
         }
@@ -389,9 +430,13 @@ class ChatRepositoryImpl(
     }
 
     override fun startConnection() {
-        val myNxId = secureStorage.getActiveNxId() ?: return
-        val deviceId = secureStorage.getDeviceId()
-        webSocketManager.connect(myNxId, deviceId)
+        try {
+            val myNxId = secureStorage.getActiveNxId() ?: return
+            val deviceId = secureStorage.getDeviceId()
+            webSocketManager.connect(myNxId, deviceId)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start connection", e)
+        }
     }
 
     override fun stopConnection() {
@@ -410,9 +455,13 @@ class ChatRepositoryImpl(
 
     override fun getPinnedMessages(conversationId: String): Flow<List<Message>> {
         val now = System.currentTimeMillis()
-        return messageDao.getPinnedMessagesFlow(conversationId, now).map { entities ->
-            entities.map { it.toDomain() }
-        }
+        return messageDao.getPinnedMessagesFlow(conversationId, now)
+            .map { entities -> entities.map { it.toDomain() } }
+            .catch { e ->
+                Log.e(TAG, "Error collecting pinned messages for $conversationId", e)
+                emit(emptyList())
+            }
+            .flowOn(Dispatchers.IO)
     }
 
     override suspend fun pinMessage(
@@ -722,6 +771,17 @@ class ChatRepositoryImpl(
 
     private fun deriveConversationId(id1: String, id2: String): String {
         return if (id1 < id2) "${id1}_$id2" else "${id2}_$id1"
+    }
+
+    override suspend fun clearChatMessages(conversationId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            messageDao.deleteMessagesForConversation(conversationId)
+            chatDao.clearLastMessageText(conversationId)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error clearing chat messages for $conversationId", e)
+            Result.failure(e)
+        }
     }
 
     private fun getMyNxId(): String {

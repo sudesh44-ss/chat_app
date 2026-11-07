@@ -9,6 +9,7 @@ import com.nexa.app.domain.repository.ContactRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -22,6 +23,7 @@ data class InternalAddressState(
     val searchQuery: String = "",
     val isPermissionGranted: Boolean = false,
     val isPermissionDeniedPermanently: Boolean = false,
+    val permissionChecked: Boolean = false,
     val isLoading: Boolean = false,
     val isNetworkError: Boolean = false,
     val isPoWComputing: Boolean = false,
@@ -56,6 +58,9 @@ class ContactViewModel(
             pendingSent = sent,
             pendingCount = count
         )
+    }.catch { e ->
+        android.util.Log.e("ContactViewModel", "Error loading contacts from database", e)
+        emit(ContactUiState())
     }
 
     val uiState: StateFlow<ContactUiState> = combine(
@@ -89,6 +94,7 @@ class ContactViewModel(
             searchQuery = addr.searchQuery,
             isPermissionGranted = addr.isPermissionGranted,
             isPermissionDeniedPermanently = addr.isPermissionDeniedPermanently,
+            permissionChecked = addr.permissionChecked,
             isLoading = addr.isLoading,
             isNetworkError = addr.isNetworkError,
             isPoWComputing = addr.isPoWComputing,
@@ -100,9 +106,12 @@ class ContactViewModel(
             outgoingRequests = addr.outgoingRequests,
             incomingRequests = addr.incomingRequests
         )
+    }.catch { e ->
+        android.util.Log.e("ContactViewModel", "Error in uiState combine", e)
+        emit(ContactUiState())
     }.stateIn(
         scope = viewModelScope,
-        started = SharingStarted.WhileSubscribed(5000),
+        started = SharingStarted.Eagerly,
         initialValue = ContactUiState()
     )
 
@@ -114,7 +123,8 @@ class ContactViewModel(
         _addressState.update {
             it.copy(
                 isPermissionGranted = granted,
-                isPermissionDeniedPermanently = permanentlyDenied
+                isPermissionDeniedPermanently = permanentlyDenied,
+                permissionChecked = true
             )
         }
         if (granted) {

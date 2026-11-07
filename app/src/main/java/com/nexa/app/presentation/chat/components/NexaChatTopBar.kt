@@ -153,10 +153,15 @@ fun NexaChatTopBar(
                         )
                     } else {
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            val subtitleDisplay = when (participantNxId) {
+                                "NX-DEMO-GROUP" -> "4 members: You, Alex, Sam, Priya"
+                                "NX-DEMO-ALEX" -> "Personal Test Conversation"
+                                else -> participantNxId
+                            }
                             Text(
-                                text = participantNxId,
+                                text = subtitleDisplay,
                                 style = MaterialTheme.typography.labelSmall.copy(
-                                    fontFamily = FontFamily.Monospace,
+                                    fontFamily = if (participantNxId.startsWith("NX-DEMO")) FontFamily.Default else FontFamily.Monospace,
                                     fontSize = 11.sp
                                 ),
                                 color = NexaBadgeMonospace

@@ -1,5 +1,6 @@
 package com.nexa.app.presentation.dashboard.components
 
+import androidx.annotation.DrawableRes
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,12 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.CellTower
-import androidx.compose.material.icons.filled.Contacts
-import androidx.compose.material.icons.filled.GroupAdd
-import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -26,13 +21,14 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import com.nexa.app.R
 
 data class QuickActionItem(
     val title: String,
     val subtitle: String,
-    val icon: ImageVector,
+    @DrawableRes val iconRes: Int,
     val onClick: () -> Unit
 )
 
@@ -51,31 +47,31 @@ fun QuickActionBottomSheet(
         QuickActionItem(
             title = "Nearby Mesh Discovery",
             subtitle = "Discover local Bluetooth & Wi-Fi peers",
-            icon = Icons.Default.CellTower,
+            iconRes = R.drawable.ic_nexa_mesh,
             onClick = { onDismiss(); onNavigateNearbyMesh() }
         ),
         QuickActionItem(
             title = "Connection Requests",
             subtitle = "View/manage incoming connection requests",
-            icon = Icons.Default.PersonAdd,
+            iconRes = R.drawable.ic_nexa_handshake,
             onClick = { onDismiss(); onNavigateConnectionRequests() }
         ),
         QuickActionItem(
             title = "New Conversation",
             subtitle = "Start encrypted direct chat",
-            icon = Icons.AutoMirrored.Filled.Chat,
+            iconRes = R.drawable.ic_nexa_chats,
             onClick = { onDismiss(); onNavigateNewConversation() }
         ),
         QuickActionItem(
             title = "Contacts",
             subtitle = "View and message address book peers",
-            icon = Icons.Default.Contacts,
+            iconRes = R.drawable.ic_nexa_contacts,
             onClick = { onDismiss(); onNavigateContacts() }
         ),
         QuickActionItem(
             title = "Create Group",
             subtitle = "Start encrypted multi-peer mesh group",
-            icon = Icons.Default.GroupAdd,
+            iconRes = R.drawable.ic_nexa_create_group,
             onClick = { onDismiss(); onNavigateCreateGroup() }
         )
     )
@@ -122,7 +118,7 @@ private fun QuickActionRow(item: QuickActionItem) {
         ) {
             Box(contentAlignment = Alignment.Center) {
                 Icon(
-                    imageVector = item.icon,
+                    painter = painterResource(id = item.iconRes),
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(22.dp)

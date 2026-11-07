@@ -31,8 +31,25 @@ import com.nexa.app.presentation.qr.QrScannerScreen
 import com.nexa.app.presentation.qr.QrViewModel
 import com.nexa.app.presentation.radar.VerificationRadarScreen
 import com.nexa.app.presentation.radar.VerificationRadarViewModel
+import com.nexa.app.presentation.search.NexaSearchScreen
 import com.nexa.app.presentation.settings.notifications.NotificationSettingsScreen
 import com.nexa.app.presentation.settings.notifications.NotificationSettingsViewModel
+import com.nexa.app.presentation.settings.SettingsScreen
+import com.nexa.app.presentation.settings.SettingsDestination
+import com.nexa.app.presentation.settings.account.AccountScreen
+import com.nexa.app.presentation.settings.account.ChangePhoneNumberScreen
+import com.nexa.app.presentation.settings.account.SecurityScreen
+import com.nexa.app.presentation.settings.account.AccountStatusScreen
+import com.nexa.app.presentation.settings.account.deactivation.AccountDeactivatedScreen
+import com.nexa.app.presentation.settings.account.deletion.AccountDeletionFlow
+import com.nexa.app.presentation.settings.appearance.AppearanceSettingsScreen
+import com.nexa.app.presentation.profile.ContactProfileScreen
+import com.nexa.app.presentation.profile.ContactProfileViewModel
+import com.nexa.app.presentation.contacts.details.ContactDetailsScreen
+import com.nexa.app.presentation.media_explorer.MediaExplorerScreen
+import com.nexa.app.presentation.media_explorer.MediaExplorerViewModel
+import com.nexa.app.presentation.chat.settings.ChatWallpaperScreen
+import com.nexa.app.presentation.chat.settings.PinnedMessagesScreen
 import com.nexa.app.presentation.setup.ProfileSetupScreen
 import com.nexa.app.presentation.setup.SetupViewModel
 import com.nexa.app.presentation.splash.SplashScreen
@@ -127,6 +144,40 @@ sealed class Screen(val route: String) {
     data object QrScanner : Screen("qr_scanner")
     data object Contacts : Screen("contacts")
     data object NotificationSettings : Screen("notification_settings")
+    data object Search : Screen("search")
+    data object Settings : Screen("settings")
+    data object Account : Screen("account")
+    data object ChangePhoneNumber : Screen("change_phone_number")
+    data object Security : Screen("security")
+    data object AccountStatus : Screen("account_status")
+    data object AccountDeactivated : Screen("account_deactivated")
+    data object AccountDeletion : Screen("account_deletion")
+    data object Appearance : Screen("appearance")
+    data object ContactProfile : Screen("contact_profile/{participantNxId}/{conversationId}") {
+        fun createRoute(participantNxId: String, conversationId: String): String {
+            return "contact_profile/${Uri.encode(participantNxId)}/${Uri.encode(conversationId)}"
+        }
+    }
+    data object ContactDetails : Screen("contact_details/{participantNxId}/{conversationId}") {
+        fun createRoute(participantNxId: String, conversationId: String): String {
+            return "contact_details/${Uri.encode(participantNxId)}/${Uri.encode(conversationId)}"
+        }
+    }
+    data object MediaExplorer : Screen("media_explorer/{conversationId}/{participantName}") {
+        fun createRoute(conversationId: String, participantName: String): String {
+            return "media_explorer/${Uri.encode(conversationId)}/${Uri.encode(participantName)}"
+        }
+    }
+    data object ChatWallpaper : Screen("chat_wallpaper/{conversationId}") {
+        fun createRoute(conversationId: String): String {
+            return "chat_wallpaper/${Uri.encode(conversationId)}"
+        }
+    }
+    data object PinnedMessages : Screen("pinned_messages/{conversationId}") {
+        fun createRoute(conversationId: String): String {
+            return "pinned_messages/${Uri.encode(conversationId)}"
+        }
+    }
     data object ProfileImageViewer : Screen("profile_image_viewer?imageUri={imageUri}") {
         fun createRoute(imageUri: String): String {
             return "profile_image_viewer?imageUri=${Uri.encode(imageUri)}"
@@ -153,13 +204,17 @@ fun AuthNavGraph(
             SplashScreen(
                 viewModel = splashViewModel,
                 onNavigateToDashboard = {
-                    navController.navigate(Screen.Dashboard.route) {
-                        popUpTo(Screen.Splash.route) { inclusive = true }
+                    if (navController.currentDestination?.route == Screen.Splash.route) {
+                        navController.navigate(Screen.Dashboard.route) {
+                            popUpTo(Screen.Splash.route) { inclusive = true }
+                        }
                     }
                 },
                 onNavigateToWelcome = {
-                    navController.navigate(Screen.Welcome.route) {
-                        popUpTo(Screen.Splash.route) { inclusive = true }
+                    if (navController.currentDestination?.route == Screen.Splash.route) {
+                        navController.navigate(Screen.Welcome.route) {
+                            popUpTo(Screen.Splash.route) { inclusive = true }
+                        }
                     }
                 }
             )
@@ -408,6 +463,9 @@ fun AuthNavGraph(
                 onOpenChat = { conversationId, participantNxId, participantName ->
                     navController.navigate(Screen.Chat.createRoute(conversationId, participantNxId, participantName))
                 },
+                onOpenSearch = {
+                    navController.navigate(Screen.Search.route)
+                },
                 onOpenQr = {
                     navController.navigate(Screen.QrDisplay.route)
                 },
@@ -417,10 +475,17 @@ fun AuthNavGraph(
                 onOpenNotificationSettings = {
                     navController.navigate(Screen.NotificationSettings.route)
                 },
+                onOpenProfile = {
+                    navController.navigate(Screen.Settings.route)
+                },
                 onLogout = {
                     coroutineScope.launch {
-                        authRepository.clearSession()
-                        chatRepository.stopConnection()
+                        try {
+                            authRepository.clearSession()
+                            chatRepository.stopConnection()
+                        } catch (e: Exception) {
+                            android.util.Log.e("AuthNavGraph", "Error clearing session during logout", e)
+                        }
                         navController.navigate(Screen.Welcome.route) {
                             popUpTo(0) { inclusive = true }
                         }
@@ -443,7 +508,7 @@ fun AuthNavGraph(
             val participantName = backStackEntry.arguments?.getString("participantName") ?: ""
 
             val app = LocalContext.current.applicationContext as NexaApplication
-            val chatViewModel = remember {
+            val chatViewModel = remember(conversationId) {
                 ChatViewModel(
                     chatRepository = chatRepository,
                     mediaProcessingRepository = app.mediaProcessingRepository,
@@ -452,7 +517,7 @@ fun AuthNavGraph(
                     contactRepository = app.contactRepository
                 )
             }
-            val transferViewModel = remember { TransferViewModel(p2pTransferRepository) }
+            val transferViewModel = remember(conversationId) { TransferViewModel(p2pTransferRepository) }
 
             ChatScreen(
                 viewModel = chatViewModel,
@@ -460,7 +525,19 @@ fun AuthNavGraph(
                 conversationId = conversationId,
                 participantNxId = participantNxId,
                 participantName = participantName,
-                onBack = { navController.popBackStack() }
+                onBack = { navController.popBackStack() },
+                onNavigateToProfile = { nxId, convId ->
+                    navController.navigate(Screen.ContactProfile.createRoute(nxId, convId))
+                },
+                onNavigateToMediaExplorer = { convId, name ->
+                    navController.navigate(Screen.MediaExplorer.createRoute(convId, name))
+                },
+                onNavigateToWallpaper = { convId ->
+                    navController.navigate(Screen.ChatWallpaper.createRoute(convId))
+                },
+                onNavigateToPinnedMessages = { convId ->
+                    navController.navigate(Screen.PinnedMessages.createRoute(convId))
+                }
             )
         }
 
@@ -559,6 +636,259 @@ fun AuthNavGraph(
             ProfileImageViewerScreen(
                 imageModel = imageUri,
                 onCloseClick = { navController.popBackStack() }
+            )
+        }
+
+        // 15. Dedicated Advanced Search Screen
+        composable(route = Screen.Search.route) {
+            val app = LocalContext.current.applicationContext as NexaApplication
+            NexaSearchScreen(
+                chatRepository = chatRepository,
+                contactRepository = app.contactRepository,
+                onNavigateBack = { navController.popBackStack() },
+                onOpenChat = { conversationId, participantNxId, participantName ->
+                    navController.navigate(Screen.Chat.createRoute(conversationId, participantNxId, participantName))
+                }
+            )
+        }
+
+        // 16. Main Settings Screen (13 Options + Fixed Bottom Nav)
+        composable(route = Screen.Settings.route) {
+            SettingsScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateHome = {
+                    navController.navigate(Screen.Dashboard.route) {
+                        popUpTo(Screen.Dashboard.route) { inclusive = true }
+                    }
+                },
+                onNavigateDestination = { destination ->
+                    when (destination) {
+                        SettingsDestination.ACCOUNT -> navController.navigate(Screen.Account.route)
+                        SettingsDestination.PRIVACY_AND_SAFETY -> {
+                            navController.navigate(Screen.NotificationSettings.route)
+                        }
+                        SettingsDestination.SECURITY -> navController.navigate(Screen.Security.route)
+                        SettingsDestination.APPEARANCE -> navController.navigate(Screen.Appearance.route)
+                        SettingsDestination.NOTIFICATIONS -> navController.navigate(Screen.NotificationSettings.route)
+                        SettingsDestination.LANGUAGE -> {}
+                        SettingsDestination.ARCHIVED_CHATS -> {}
+                        SettingsDestination.NETWORK -> {}
+                        SettingsDestination.STORAGE_AND_DATA -> {}
+                        SettingsDestination.DEVICES -> navController.navigate(Screen.Security.route)
+                        SettingsDestination.BACKUP -> {}
+                        SettingsDestination.HELP -> {}
+                        SettingsDestination.ABOUT -> navController.navigate(Screen.Security.route)
+                    }
+                }
+            )
+        }
+
+        // 17. Account Management Screen (3 Sections)
+        composable(route = Screen.Account.route) {
+            AccountScreen(
+                authRepository = authRepository,
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateChangePhone = { navController.navigate(Screen.ChangePhoneNumber.route) },
+                onNavigateSecurity = { navController.navigate(Screen.Security.route) },
+                onNavigateAccountStatus = { navController.navigate(Screen.AccountStatus.route) }
+            )
+        }
+
+        // 18. Change Phone Number Screen
+        composable(route = Screen.ChangePhoneNumber.route) {
+            ChangePhoneNumberScreen(
+                authRepository = authRepository,
+                onNavigateBack = { navController.popBackStack() }
+            )
+        }
+
+        // 19. Security & Encryption Screen
+        composable(route = Screen.Security.route) {
+            SecurityScreen(
+                authRepository = authRepository,
+                onNavigateBack = { navController.popBackStack() }
+            )
+        }
+
+        // 20. Account Status Screen (Deactivation vs Deletion)
+        composable(route = Screen.AccountStatus.route) {
+            AccountStatusScreen(
+                onNavigateBack = { navController.popBackStack() },
+                onStartDeactivation = { navController.navigate(Screen.AccountDeactivated.route) },
+                onStartDeletion = { navController.navigate(Screen.AccountDeletion.route) }
+            )
+        }
+
+        // 21. Deactivated Account Screen (Reversible)
+        composable(route = Screen.AccountDeactivated.route) {
+            AccountDeactivatedScreen(
+                authRepository = authRepository,
+                onKeepDeactivated = { navController.popBackStack() },
+                onReactivatedSuccessfully = {
+                    navController.navigate(Screen.Dashboard.route) {
+                        popUpTo(Screen.Dashboard.route) { inclusive = true }
+                    }
+                }
+            )
+        }
+
+        // 22. Irreversible Permanent Account Deletion Flow (7 Steps)
+        composable(route = Screen.AccountDeletion.route) {
+            AccountDeletionFlow(
+                authRepository = authRepository,
+                onNavigateBack = { navController.popBackStack() },
+                onAccountDeletedDone = {
+                    navController.navigate(Screen.Welcome.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
+            )
+        }
+
+        // 23. Appearance Settings Screen
+        composable(route = Screen.Appearance.route) {
+            val app = LocalContext.current.applicationContext as NexaApplication
+            AppearanceSettingsScreen(
+                appearancePrefs = app.appearancePrefs,
+                onNavigateBack = { navController.popBackStack() }
+            )
+        }
+
+        // 24. Contact Profile Screen
+        composable(
+            route = Screen.ContactProfile.route,
+            arguments = listOf(
+                navArgument("participantNxId") { type = NavType.StringType },
+                navArgument("conversationId") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val participantNxId = backStackEntry.arguments?.getString("participantNxId") ?: ""
+            val conversationId = backStackEntry.arguments?.getString("conversationId") ?: ""
+            val app = LocalContext.current.applicationContext as NexaApplication
+
+            val profileViewModel = remember(participantNxId, conversationId) {
+                ContactProfileViewModel(
+                    participantNxId = participantNxId,
+                    initialConversationId = conversationId,
+                    contactRepository = app.contactRepository,
+                    chatRepository = chatRepository,
+                    contactDao = app.database.contactDao(),
+                    chatDao = app.database.chatDao(),
+                    messageDao = app.database.messageDao(),
+                    fileTransferDao = app.database.fileTransferDao(),
+                    userDao = app.database.userDao(),
+                    chatPrivacyPrefs = app.chatPrivacyPrefs,
+                    conversationPreferences = app.conversationPrefs
+                )
+            }
+
+            ContactProfileScreen(
+                viewModel = profileViewModel,
+                onBack = { navController.popBackStack() },
+                onOpenChat = { _, _, _ ->
+                    navController.popBackStack()
+                },
+                onOpenContactDetails = { nxId, convId ->
+                    navController.navigate(Screen.ContactDetails.createRoute(nxId, convId))
+                },
+                onOpenMediaExplorer = { convId, name ->
+                    navController.navigate(Screen.MediaExplorer.createRoute(convId, name))
+                },
+                onOpenWallpaper = { convId ->
+                    navController.navigate(Screen.ChatWallpaper.createRoute(convId))
+                },
+                onOpenPinnedMessages = { convId ->
+                    navController.navigate(Screen.PinnedMessages.createRoute(convId))
+                }
+            )
+        }
+
+        // 25. Contact Details Screen
+        composable(
+            route = Screen.ContactDetails.route,
+            arguments = listOf(
+                navArgument("participantNxId") { type = NavType.StringType },
+                navArgument("conversationId") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val participantNxId = backStackEntry.arguments?.getString("participantNxId") ?: ""
+            val conversationId = backStackEntry.arguments?.getString("conversationId") ?: ""
+            val app = LocalContext.current.applicationContext as NexaApplication
+
+            ContactDetailsScreen(
+                participantNxId = participantNxId,
+                conversationId = conversationId,
+                contactDao = app.database.contactDao(),
+                userDao = app.database.userDao(),
+                contactRepository = app.contactRepository,
+                onBack = { navController.popBackStack() },
+                onContactRemoved = {
+                    navController.popBackStack(Screen.Dashboard.route, inclusive = false)
+                }
+            )
+        }
+
+        // 26. Media Explorer Screen
+        composable(
+            route = Screen.MediaExplorer.route,
+            arguments = listOf(
+                navArgument("conversationId") { type = NavType.StringType },
+                navArgument("participantName") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val conversationId = backStackEntry.arguments?.getString("conversationId") ?: ""
+            val participantName = backStackEntry.arguments?.getString("participantName") ?: ""
+            val app = LocalContext.current.applicationContext as NexaApplication
+
+            val explorerViewModel = remember(conversationId) {
+                MediaExplorerViewModel(
+                    conversationId = conversationId,
+                    participantName = participantName,
+                    fileTransferDao = app.database.fileTransferDao()
+                )
+            }
+
+            MediaExplorerScreen(
+                viewModel = explorerViewModel,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        // 27. Chat Wallpaper Screen
+        composable(
+            route = Screen.ChatWallpaper.route,
+            arguments = listOf(
+                navArgument("conversationId") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val conversationId = backStackEntry.arguments?.getString("conversationId") ?: ""
+            val app = LocalContext.current.applicationContext as NexaApplication
+
+            ChatWallpaperScreen(
+                conversationId = conversationId,
+                conversationPreferences = app.conversationPrefs,
+                onBack = { navController.popBackStack() }
+            )
+        }
+
+        // 28. Pinned Messages Screen
+        composable(
+            route = Screen.PinnedMessages.route,
+            arguments = listOf(
+                navArgument("conversationId") { type = NavType.StringType }
+            )
+        ) { backStackEntry ->
+            val conversationId = backStackEntry.arguments?.getString("conversationId") ?: ""
+            val app = LocalContext.current.applicationContext as NexaApplication
+
+            PinnedMessagesScreen(
+                conversationId = conversationId,
+                messageDao = app.database.messageDao(),
+                chatRepository = chatRepository,
+                onBack = { navController.popBackStack() },
+                onNavigateToMessage = {
+                    navController.popBackStack()
+                }
             )
         }
     }

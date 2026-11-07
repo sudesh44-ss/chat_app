@@ -334,13 +334,37 @@ abstract class NexaDatabase : RoomDatabase() {
 
         val MIGRATION_16_17 = object : Migration(16, 17) {
             override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE `ratchet_sessions` ADD COLUMN `previousChainLength` INTEGER NOT NULL DEFAULT 0")
-                db.execSQL("ALTER TABLE `ratchet_sessions` ADD COLUMN `sessionId` TEXT NOT NULL DEFAULT ''")
-                db.execSQL("ALTER TABLE `ratchet_sessions` ADD COLUMN `remoteDeviceId` TEXT NOT NULL DEFAULT ''")
+                addColumnIfNotExists(db, "ratchet_sessions", "previousChainLength", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "ratchet_sessions", "sessionId", "TEXT NOT NULL DEFAULT ''")
+                addColumnIfNotExists(db, "ratchet_sessions", "remoteDeviceId", "TEXT NOT NULL DEFAULT ''")
 
-                db.execSQL("ALTER TABLE `skipped_message_keys` ADD COLUMN `ratchetPublicKeyHex` TEXT NOT NULL DEFAULT ''")
-                db.execSQL("ALTER TABLE `skipped_message_keys` ADD COLUMN `messageIndex` INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "skipped_message_keys", "ratchetPublicKeyHex", "TEXT NOT NULL DEFAULT ''")
+                addColumnIfNotExists(db, "skipped_message_keys", "messageIndex", "INTEGER NOT NULL DEFAULT 0")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_skipped_message_keys_contactNxId_ratchetPublicKeyHex_messageIndex` ON `skipped_message_keys` (`contactNxId`, `ratchetPublicKeyHex`, `messageIndex`)")
+            }
+        }
+
+        private fun addColumnIfNotExists(db: SupportSQLiteDatabase, table: String, column: String, typeAndConstraints: String) {
+            var exists = false
+            try {
+                val cursor = db.query("PRAGMA table_info(`$table`)")
+                while (cursor.moveToNext()) {
+                    val nameIndex = cursor.getColumnIndex("name")
+                    if (nameIndex != -1 && cursor.getString(nameIndex).equals(column, ignoreCase = true)) {
+                        exists = true
+                        break
+                    }
+                }
+                cursor.close()
+            } catch (e: Exception) {
+                // If query fails, fall back to direct attempt
+            }
+            if (!exists) {
+                try {
+                    db.execSQL("ALTER TABLE `$table` ADD COLUMN `$column` $typeAndConstraints")
+                } catch (e: Exception) {
+                    android.util.Log.w("NexaDatabase", "Column $column on $table already exists or alter failed: ${e.message}")
+                }
             }
         }
 
@@ -374,6 +398,7 @@ abstract class NexaDatabase : RoomDatabase() {
                 DATABASE_NAME
             )
                 .openHelperFactory(supportFactory)
+                .fallbackToDestructiveMigrationOnDowngrade()
                 .addMigrations(
                     MIGRATION_1_2,
                     MIGRATION_2_3,
