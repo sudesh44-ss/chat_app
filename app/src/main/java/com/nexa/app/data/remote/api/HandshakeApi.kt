@@ -2,6 +2,7 @@ package com.nexa.app.data.remote.api
 
 import com.nexa.app.core.crypto.PrekeyBundle
 import com.nexa.app.core.model.HandshakeEnvelope
+import com.nexa.app.data.remote.dto.ClaimResponseDto
 import com.nexa.app.data.remote.dto.DispatchRequestDto
 import com.nexa.app.data.remote.dto.PrekeyBundleResponse
 import com.nexa.app.core.network.ServerEndpointConfig
@@ -14,10 +15,12 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 interface HandshakeApi {
     suspend fun getUserPrekey(nxId: String): PrekeyBundle
+    suspend fun claimPrekey(targetNxId: String, targetDeviceId: String? = null, claimId: String = UUID.randomUUID().toString()): PrekeyBundle
     suspend fun dispatchHandshake(request: DispatchRequestDto): Boolean
     suspend fun getPendingRequests(nxId: String): List<HandshakeEnvelope>
     suspend fun registerPrekeyBundle(bundle: PrekeyBundle): Boolean
@@ -35,9 +38,32 @@ class HandshakeApiImpl(
     private val jsonMediaType = "application/json; charset=utf-8".toMediaType()
 
     override suspend fun getUserPrekey(nxId: String): PrekeyBundle = withContext(Dispatchers.IO) {
-        val url = "$baseUrl/api/v1/users/$nxId/prekey"
-        val request = Request.Builder().url(url).get().build()
+        // 1. Try Step 3 bundle endpoint first
+        val bundleUrl = "$baseUrl/api/v1/users/$nxId/prekey-bundle"
+        val bundleRequest = Request.Builder().url(bundleUrl).get().build()
+        try {
+            client.newCall(bundleRequest).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string().orEmpty()
+                    val dto = PrekeyBundleResponse.fromJson(body)
+                    return@withContext PrekeyBundle(
+                        nxId = dto.nxId,
+                        deviceId = dto.deviceId,
+                        identityKeyHex = dto.identityKeyHex,
+                        signingKeyHex = dto.signingKeyHex,
+                        signedPrekeyHex = dto.signedPrekeyHex,
+                        signedPrekeyId = dto.signedPrekeyId,
+                        signedPrekeySignatureHex = dto.signedPrekeySignatureHex,
+                        oneTimePrekeyHex = dto.oneTimePrekeyHex,
+                        oneTimePrekeyId = dto.oneTimePrekeyId
+                    )
+                }
+            }
+        } catch (ignored: Exception) {}
 
+        // 2. Fallback to legacy prekey endpoint
+        val legacyUrl = "$baseUrl/api/v1/users/$nxId/prekey"
+        val request = Request.Builder().url(legacyUrl).get().build()
         client.newCall(request).execute().use { response ->
             if (!response.isSuccessful) {
                 throw IOException("Failed to fetch prekey for $nxId: HTTP ${response.code}")
@@ -46,14 +72,57 @@ class HandshakeApiImpl(
             val dto = PrekeyBundleResponse.fromJson(body)
             PrekeyBundle(
                 nxId = dto.nxId,
+                deviceId = dto.deviceId,
                 identityKeyHex = dto.identityKeyHex,
                 signingKeyHex = dto.signingKeyHex,
                 signedPrekeyHex = dto.signedPrekeyHex,
+                signedPrekeyId = dto.signedPrekeyId,
                 signedPrekeySignatureHex = dto.signedPrekeySignatureHex,
                 oneTimePrekeyHex = dto.oneTimePrekeyHex,
                 oneTimePrekeyId = dto.oneTimePrekeyId
             )
         }
+    }
+
+    override suspend fun claimPrekey(
+        targetNxId: String,
+        targetDeviceId: String?,
+        claimId: String
+    ): PrekeyBundle = withContext(Dispatchers.IO) {
+        val url = "$baseUrl/api/v1/prekeys/claim"
+        val json = JSONObject().apply {
+            put("recipient_nx_id", targetNxId)
+            put("target_nx_id", targetNxId)
+            if (!targetDeviceId.isNullOrBlank()) {
+                put("target_device_id", targetDeviceId)
+            }
+            put("claim_id", claimId)
+        }
+        val reqBody = json.toString().toRequestBody(jsonMediaType)
+        val httpRequest = Request.Builder().url(url).post(reqBody).build()
+
+        try {
+            client.newCall(httpRequest).execute().use { response ->
+                if (response.isSuccessful) {
+                    val body = response.body?.string().orEmpty()
+                    val dto = ClaimResponseDto.fromJson(body)
+                    return@withContext PrekeyBundle(
+                        nxId = dto.targetNxId,
+                        deviceId = dto.targetDeviceId,
+                        identityKeyHex = dto.identityKeyHex,
+                        signingKeyHex = dto.signingKeyHex,
+                        signedPrekeyHex = dto.signedPrekeyHex,
+                        signedPrekeyId = dto.signedPrekeyId,
+                        signedPrekeySignatureHex = dto.signedPrekeySignatureHex,
+                        oneTimePrekeyHex = dto.oneTimePrekeyHex,
+                        oneTimePrekeyId = dto.oneTimePrekeyId
+                    )
+                }
+            }
+        } catch (ignored: Exception) {}
+
+        // Fallback to bundle query if claim endpoint fails
+        getUserPrekey(targetNxId)
     }
 
     override suspend fun dispatchHandshake(request: DispatchRequestDto): Boolean = withContext(Dispatchers.IO) {

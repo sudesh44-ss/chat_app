@@ -31,6 +31,7 @@ class ContactRepositoryImpl(
     private val keystoreManager: CryptoKeystoreManager,
     private val doubleRatchetEngine: DoubleRatchetEngine,
     private val authApiService: com.nexa.app.data.remote.api.AuthApiService = com.nexa.app.data.remote.api.AuthApiServiceImpl(),
+    private val connectionApiService: com.nexa.app.data.remote.api.ConnectionApiService = com.nexa.app.data.remote.api.ConnectionApiServiceImpl(),
     private val chatDao: com.nexa.app.data.local.dao.ChatDao? = null
 ) : ContactRepository {
 
@@ -397,6 +398,178 @@ class ContactRepositoryImpl(
         } catch (e: Exception) {
             Result.failure(e)
         }
+    }
+
+    private fun getSessionToken(): String {
+        return secureStorage.getSessionToken() ?: ""
+    }
+
+    override suspend fun discoverUser(nxId: String): Result<com.nexa.app.data.remote.dto.DiscoveredUserDto> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        connectionApiService.discoverUser(token, nxId)
+    }
+
+    override suspend fun getIncomingConnectionRequests(): Result<List<com.nexa.app.data.remote.dto.ConnectionRequestItemDto>> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        val result = connectionApiService.getIncomingRequests(token)
+        result.onSuccess { requests ->
+            for (req in requests) {
+                val profile = req.profile
+                val contact = ContactEntity(
+                    nxId = req.senderNxId,
+                    displayName = profile?.displayName ?: req.senderNxId,
+                    publicKeyHex = profile?.publicKeyHex ?: "",
+                    introMessage = req.introMessage,
+                    status = ContactStatus.REQUEST_RECEIVED,
+                    nexaAvatarUrl = profile?.avatarUrl
+                )
+                contactDao.upsertContact(contact)
+            }
+        }
+        result
+    }
+
+    override suspend fun getOutgoingConnectionRequests(): Result<List<com.nexa.app.data.remote.dto.ConnectionRequestItemDto>> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        val result = connectionApiService.getOutgoingRequests(token)
+        result.onSuccess { requests ->
+            for (req in requests) {
+                val profile = req.profile
+                val contact = ContactEntity(
+                    nxId = req.recipientNxId,
+                    displayName = profile?.displayName ?: req.recipientNxId,
+                    publicKeyHex = profile?.publicKeyHex ?: "",
+                    introMessage = req.introMessage,
+                    status = ContactStatus.REQUEST_SENT,
+                    nexaAvatarUrl = profile?.avatarUrl
+                )
+                contactDao.upsertContact(contact)
+            }
+        }
+        result
+    }
+
+    override suspend fun acceptConnectionRequestById(requestId: String, contact: ContactEntity): Result<Unit> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        val res = connectionApiService.acceptRequest(token, requestId)
+        if (res.isSuccess) {
+            contactDao.updateStatus(contact.nxId, ContactStatus.MUTUAL_FRIEND)
+            Result.success(Unit)
+        } else {
+            Result.failure(res.exceptionOrNull() ?: Exception("Failed to accept connection request"))
+        }
+    }
+
+    override suspend fun rejectConnectionRequestById(requestId: String, nxId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        val res = connectionApiService.rejectRequest(token, requestId)
+        if (res.isSuccess) {
+            contactDao.deleteContact(nxId)
+            Result.success(Unit)
+        } else {
+            Result.failure(res.exceptionOrNull() ?: Exception("Failed to reject connection request"))
+        }
+    }
+
+    override suspend fun cancelConnectionRequestById(requestId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        val res = connectionApiService.cancelRequest(token, requestId)
+        if (res.isSuccess) {
+            Result.success(Unit)
+        } else {
+            Result.failure(res.exceptionOrNull() ?: Exception("Failed to cancel connection request"))
+        }
+    }
+
+    override suspend fun syncConnectionsFromServer(): Result<List<ContactEntity>> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        val res = connectionApiService.getConnections(token)
+        res.map { list ->
+            val entities = list.map { item ->
+                val entity = ContactEntity(
+                    nxId = item.nxId,
+                    displayName = item.displayName,
+                    publicKeyHex = item.publicKeyHex,
+                    status = ContactStatus.MUTUAL_FRIEND,
+                    nexaAvatarUrl = item.avatarUrl,
+                    createdAtTimestamp = item.createdAt
+                )
+                contactDao.upsertContact(entity)
+                entity
+            }
+            entities
+        }
+    }
+
+    override suspend fun removeConnection(targetNxId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        val res = connectionApiService.removeConnection(token, targetNxId)
+        if (res.isSuccess) {
+            contactDao.deleteContact(targetNxId)
+            Result.success(Unit)
+        } else {
+            Result.failure(res.exceptionOrNull() ?: Exception("Failed to remove connection"))
+        }
+    }
+
+    override suspend fun blockUser(targetNxId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        val res = connectionApiService.blockUser(token, targetNxId)
+        if (res.isSuccess) {
+            contactDao.updateStatus(targetNxId, ContactStatus.BLOCKED)
+            Result.success(Unit)
+        } else {
+            Result.failure(res.exceptionOrNull() ?: Exception("Failed to block user"))
+        }
+    }
+
+    override suspend fun unblockUser(targetNxId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        val res = connectionApiService.unblockUser(token, targetNxId)
+        if (res.isSuccess) {
+            contactDao.deleteContact(targetNxId)
+            Result.success(Unit)
+        } else {
+            Result.failure(res.exceptionOrNull() ?: Exception("Failed to unblock user"))
+        }
+    }
+
+    override suspend fun getBlockedUsers(): Result<List<com.nexa.app.data.remote.dto.BlockedUserItemDto>> = withContext(Dispatchers.IO) {
+        val token = getSessionToken()
+        if (token.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        }
+        connectionApiService.getBlockedUsers(token)
     }
 
     private fun toHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }

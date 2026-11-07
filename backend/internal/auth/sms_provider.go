@@ -252,9 +252,9 @@ func GetDefaultSmsProvider() SmsProvider {
 
 	// 3. Strict production safety check: Never permit mock fallback in production
 	if env == "production" {
-		log.Println("[SmsProvider] CRITICAL: Running in production with NO SMS provider configured! Mock fallback is DISABLED.")
+		log.Println("[SmsProvider] Outbound SMS provider is unconfigured (MSG91/Twilio unset). Legacy outbound OTP endpoint is disabled; Client-Initiated Reverse SMS is active as the primary authentication engine.")
 		return &UnavailableSmsProvider{
-			reason: "missing MSG91_AUTH_KEY/MSG91_TEMPLATE_ID or TWILIO credentials in production environment",
+			reason: "outbound SMS provider is unconfigured in production (Client-Initiated Reverse SMS is active as primary)",
 		}
 	}
 

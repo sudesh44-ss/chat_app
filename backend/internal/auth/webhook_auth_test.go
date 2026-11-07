@@ -108,4 +108,34 @@ func TestVerifyGatewaySignature(t *testing.T) {
 			t.Fatalf("expected expired timestamp error, got: %v", err)
 		}
 	})
+
+	t.Run("Valid X-Webhook-Secret header succeeds", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/sms-inbound", strings.NewReader(string(rawPayload)))
+		req.Header.Set("X-Webhook-Secret", testSecret)
+
+		err := VerifyGatewaySignature(req, rawPayload)
+		if err != nil {
+			t.Fatalf("expected valid X-Webhook-Secret token to succeed, got: %v", err)
+		}
+	})
+
+	t.Run("Valid Authorization Bearer token succeeds", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/sms-inbound", strings.NewReader(string(rawPayload)))
+		req.Header.Set("Authorization", "Bearer "+testSecret)
+
+		err := VerifyGatewaySignature(req, rawPayload)
+		if err != nil {
+			t.Fatalf("expected valid Bearer token to succeed, got: %v", err)
+		}
+	})
+
+	t.Run("Invalid X-Webhook-Secret token fails", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks/sms-inbound", strings.NewReader(string(rawPayload)))
+		req.Header.Set("X-Webhook-Secret", "wrong_token_value_xyz")
+
+		err := VerifyGatewaySignature(req, rawPayload)
+		if err == nil || err != ErrInvalidWebhookSignature {
+			t.Fatalf("expected ErrInvalidWebhookSignature for wrong token, got: %v", err)
+		}
+	})
 }

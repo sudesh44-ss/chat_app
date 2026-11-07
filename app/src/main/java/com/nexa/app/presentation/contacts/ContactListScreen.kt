@@ -85,6 +85,7 @@ import com.nexa.app.domain.model.DeviceContact
 import com.nexa.app.presentation.common.avatar.NexaAvatar
 import com.nexa.app.presentation.common.viewer.ProfileImageViewerDialog
 import com.nexa.app.presentation.contacts.components.AddContactByPhoneDialog
+import com.nexa.app.presentation.contacts.components.AddContactDialog
 import com.nexa.app.presentation.contacts.components.EditNicknameDialog
 import com.nexa.app.presentation.contacts.components.PeerProfileDialog
 
@@ -107,6 +108,7 @@ fun ContactListScreen(
     val coroutineScope = rememberCoroutineScope()
     val uiState by viewModel.uiState.collectAsState()
     var showAddPhoneDialog by remember { mutableStateOf(false) }
+    var showAddNxIdDialog by remember { mutableStateOf(false) }
     var contactForNicknameEdit by remember { mutableStateOf<ContactEntity?>(null) }
     var contactForProfileView by remember { mutableStateOf<ContactEntity?>(null) }
     var activeViewerPhoto by remember { mutableStateOf<Any?>(null) }
@@ -195,6 +197,9 @@ fun ContactListScreen(
                     IconButton(onClick = { viewModel.refreshContacts() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh Contacts")
                     }
+                    IconButton(onClick = { showAddNxIdDialog = true }) {
+                        Icon(Icons.Default.Search, contentDescription = "Discover User by NX-ID")
+                    }
                     IconButton(onClick = { showAddPhoneDialog = true }) {
                         Icon(Icons.Default.PersonAdd, contentDescription = "Add Contact by Phone")
                     }
@@ -206,11 +211,11 @@ fun ContactListScreen(
         },
         floatingActionButton = {
             FloatingActionButton(
-                onClick = { showAddPhoneDialog = true },
+                onClick = { showAddNxIdDialog = true },
                 containerColor = MaterialTheme.colorScheme.primary,
                 contentColor = MaterialTheme.colorScheme.onPrimary
             ) {
-                Icon(Icons.Default.PersonAdd, contentDescription = "Add Contact")
+                Icon(Icons.Default.PersonAdd, contentDescription = "Add Contact by NX-ID")
             }
         },
         containerColor = MaterialTheme.colorScheme.background,
@@ -403,6 +408,12 @@ fun ContactListScreen(
                     contactForNicknameEdit = contact
                     contactForProfileView = null
                 },
+                onRemoveConnection = {
+                    viewModel.removeConnection(contact.nxId)
+                },
+                onBlockUser = {
+                    viewModel.blockUser(contact.nxId)
+                },
                 onDismiss = { contactForProfileView = null }
             )
         }
@@ -431,6 +442,28 @@ fun ContactListScreen(
                 onStartChat = { nxId, name ->
                     showAddPhoneDialog = false
                     onStartChat(nxId, name)
+                }
+            )
+        }
+
+        // Phase D: Discover User by NX-ID & Send Connection Request Dialog
+        if (showAddNxIdDialog) {
+            AddContactDialog(
+                isPoWComputing = uiState.isPoWComputing,
+                isSearching = uiState.isSearchingUser,
+                discoveredUser = uiState.discoveredUser,
+                onDismiss = {
+                    showAddNxIdDialog = false
+                    viewModel.clearDiscoveredUser()
+                },
+                onSearch = { queryNxId ->
+                    viewModel.searchUserByNxId(queryNxId)
+                },
+                onSendRequest = { targetNxId, introMsg ->
+                    viewModel.sendFriendRequest(targetNxId, introMsg) {
+                        showAddNxIdDialog = false
+                        viewModel.clearDiscoveredUser()
+                    }
                 }
             )
         }

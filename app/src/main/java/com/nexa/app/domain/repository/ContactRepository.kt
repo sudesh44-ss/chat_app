@@ -72,4 +72,28 @@ interface ContactRepository {
      * Updates the official VEYRA / NEXA avatar URL for [nxId] upon real-time PROFILE_UPDATE.
      */
     suspend fun updateAvatarUrl(nxId: String, avatarUrl: String?): Result<Unit> = Result.success(Unit)
+
+    // Phase D: Connection & Contact Management REST Operations
+    suspend fun discoverUser(nxId: String): Result<com.nexa.app.data.remote.dto.DiscoveredUserDto> =
+        Result.failure(UnsupportedOperationException())
+    suspend fun getIncomingConnectionRequests(): Result<List<com.nexa.app.data.remote.dto.ConnectionRequestItemDto>> =
+        Result.success(emptyList())
+    suspend fun getOutgoingConnectionRequests(): Result<List<com.nexa.app.data.remote.dto.ConnectionRequestItemDto>> =
+        Result.success(emptyList())
+    suspend fun acceptConnectionRequestById(requestId: String, contact: ContactEntity): Result<Unit> =
+        Result.success(Unit)
+    suspend fun rejectConnectionRequestById(requestId: String, nxId: String): Result<Unit> =
+        Result.success(Unit)
+    suspend fun cancelConnectionRequestById(requestId: String): Result<Unit> =
+        Result.success(Unit)
+    suspend fun syncConnectionsFromServer(): Result<List<ContactEntity>> =
+        Result.success(emptyList())
+    suspend fun removeConnection(targetNxId: String): Result<Unit> =
+        Result.success(Unit)
+    suspend fun blockUser(targetNxId: String): Result<Unit> =
+        Result.success(Unit)
+    suspend fun unblockUser(targetNxId: String): Result<Unit> =
+        Result.success(Unit)
+    suspend fun getBlockedUsers(): Result<List<com.nexa.app.data.remote.dto.BlockedUserItemDto>> =
+        Result.success(emptyList())
 }

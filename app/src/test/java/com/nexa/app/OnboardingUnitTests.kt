@@ -54,6 +54,20 @@ class OnboardingUnitTests {
             )
         }
 
+        override suspend fun requestAndVerifyLoginChallenge(
+            nxId: String,
+            deviceId: String
+        ): Result<com.nexa.app.data.remote.dto.LoginVerifyResponseDto> {
+            return Result.success(
+                com.nexa.app.data.remote.dto.LoginVerifyResponseDto(
+                    status = "LOGIN_SUCCESS",
+                    sessionAuthToken = "token_123",
+                    nxId = nxId,
+                    deviceId = deviceId
+                )
+            )
+        }
+
         override suspend fun initiateReverseVerify(
             phone: String,
             name: String,

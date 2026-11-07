@@ -34,12 +34,48 @@ enum class AckStatus(val value: Int) {
     }
 }
 
+data class DoubleRatchetHeader(
+    val ratchetPublicKey: ByteArray = ByteArray(0),     // Exactly 32 bytes: sender's current X25519 ratchet public key (DHR)
+    val previousChainLength: Int = 0,                    // PN: Number of messages in the previous sending chain
+    val messageIndex: Int = 0,                           // N: Message index in the current sending chain
+    val sessionId: String = "",                          // Canonical UUID identifying the pairwise conversation session
+    val oneTimePrekeyId: Long = 0L,                      // Optional: OPK ID if this message initiates a new X3DH session
+    val ephemeralPublicKey: ByteArray = ByteArray(0)     // Optional: 32-byte ephemeral public key (EK) for initial X3DH message
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as DoubleRatchetHeader
+        if (!ratchetPublicKey.contentEquals(other.ratchetPublicKey)) return false
+        if (previousChainLength != other.previousChainLength) return false
+        if (messageIndex != other.messageIndex) return false
+        if (sessionId != other.sessionId) return false
+        if (oneTimePrekeyId != other.oneTimePrekeyId) return false
+        if (!ephemeralPublicKey.contentEquals(other.ephemeralPublicKey)) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = ratchetPublicKey.contentHashCode()
+        result = 31 * result + previousChainLength
+        result = 31 * result + messageIndex
+        result = 31 * result + sessionId.hashCode()
+        result = 31 * result + oneTimePrekeyId.hashCode()
+        result = 31 * result + ephemeralPublicKey.contentHashCode()
+        return result
+    }
+}
+
 data class EncryptedMessagePayload(
     val conversationSeq: Long = 0L,
     val ciphertext: ByteArray = ByteArray(0),
     val nonce: ByteArray = ByteArray(0),
-    val authTag: ByteArray = ByteArray(0)
+    val authTag: ByteArray = ByteArray(0),
+    val header: DoubleRatchetHeader? = null,
+    val aeadNonce: ByteArray = ByteArray(0)
 ) {
+    fun hasHeader(): Boolean = header != null
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (javaClass != other?.javaClass) return false
@@ -48,6 +84,8 @@ data class EncryptedMessagePayload(
         if (!ciphertext.contentEquals(other.ciphertext)) return false
         if (!nonce.contentEquals(other.nonce)) return false
         if (!authTag.contentEquals(other.authTag)) return false
+        if (header != other.header) return false
+        if (!aeadNonce.contentEquals(other.aeadNonce)) return false
         return true
     }
 
@@ -56,6 +94,8 @@ data class EncryptedMessagePayload(
         result = 31 * result + ciphertext.contentHashCode()
         result = 31 * result + nonce.contentHashCode()
         result = 31 * result + authTag.contentHashCode()
+        result = 31 * result + (header?.hashCode() ?: 0)
+        result = 31 * result + aeadNonce.contentHashCode()
         return result
     }
 }
@@ -216,6 +256,39 @@ data class NexaWirePacket(
             if (msg.authTag.isNotEmpty()) {
                 writeTag(msgOut, 4, 2)
                 writeLengthDelimited(msgOut, msg.authTag)
+            }
+            msg.header?.let { h ->
+                val hOut = ByteArrayOutputStream()
+                if (h.ratchetPublicKey.isNotEmpty()) {
+                    writeTag(hOut, 1, 2)
+                    writeLengthDelimited(hOut, h.ratchetPublicKey)
+                }
+                if (h.previousChainLength != 0) {
+                    writeTag(hOut, 2, 0)
+                    writeVarint(hOut, h.previousChainLength.toLong())
+                }
+                if (h.messageIndex != 0) {
+                    writeTag(hOut, 3, 0)
+                    writeVarint(hOut, h.messageIndex.toLong())
+                }
+                if (h.sessionId.isNotEmpty()) {
+                    writeTag(hOut, 4, 2)
+                    writeLengthDelimited(hOut, h.sessionId.toByteArray(Charsets.UTF_8))
+                }
+                if (h.oneTimePrekeyId != 0L) {
+                    writeTag(hOut, 5, 0)
+                    writeVarint(hOut, h.oneTimePrekeyId)
+                }
+                if (h.ephemeralPublicKey.isNotEmpty()) {
+                    writeTag(hOut, 6, 2)
+                    writeLengthDelimited(hOut, h.ephemeralPublicKey)
+                }
+                writeTag(msgOut, 5, 2)
+                writeLengthDelimited(msgOut, hOut.toByteArray())
+            }
+            if (msg.aeadNonce.isNotEmpty()) {
+                writeTag(msgOut, 6, 2)
+                writeLengthDelimited(msgOut, msg.aeadNonce)
             }
 
             writeTag(out, 6, 2)
@@ -408,6 +481,8 @@ data class NexaWirePacket(
             var ct = ByteArray(0)
             var nonce = ByteArray(0)
             var authTag = ByteArray(0)
+            var header: DoubleRatchetHeader? = null
+            var aeadNonce = ByteArray(0)
 
             while (input.available() > 0) {
                 val tag = readVarint(input)
@@ -419,10 +494,39 @@ data class NexaWirePacket(
                     2 -> ct = readLengthDelimited(input)
                     3 -> nonce = readLengthDelimited(input)
                     4 -> authTag = readLengthDelimited(input)
+                    5 -> header = decodeDoubleRatchetHeader(readLengthDelimited(input))
+                    6 -> aeadNonce = readLengthDelimited(input)
                     else -> skipField(input, wireType)
                 }
             }
-            return EncryptedMessagePayload(seq, ct, nonce, authTag)
+            return EncryptedMessagePayload(seq, ct, nonce, authTag, header, aeadNonce)
+        }
+
+        private fun decodeDoubleRatchetHeader(bytes: ByteArray): DoubleRatchetHeader {
+            val input = ByteArrayInputStream(bytes)
+            var ratchetPk = ByteArray(0)
+            var pn = 0
+            var n = 0
+            var sessionId = ""
+            var opkId = 0L
+            var ek = ByteArray(0)
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> ratchetPk = readLengthDelimited(input)
+                    2 -> pn = readVarint(input).toInt()
+                    3 -> n = readVarint(input).toInt()
+                    4 -> sessionId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    5 -> opkId = readVarint(input)
+                    6 -> ek = readLengthDelimited(input)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return DoubleRatchetHeader(ratchetPk, pn, n, sessionId, opkId, ek)
         }
 
         private fun decodeAckPayload(bytes: ByteArray): DeliveryAckPayload {

@@ -228,34 +228,27 @@ class NexaApplication : Application() {
         // 5. Initialize network monitoring & WebSocket pipeline
         webSocketManager = WebSocketManager()
         webSocketManager.setIdentitySigner { dataToSign ->
-            val prefs = getSharedPreferences("nexa_handshake_keys", android.content.Context.MODE_PRIVATE)
-            val privEncHex = prefs.getString("sign_priv_enc", null)
-            val privIvHex = prefs.getString("sign_priv_iv", null)
-            val pubHex = prefs.getString("sign_pub", null)
-            val privKey = if (!privEncHex.isNullOrBlank() && !privIvHex.isNullOrBlank()) {
-                try {
-                    keystoreManager.decryptWithMasterKey(hexToBytes(privIvHex), hexToBytes(privEncHex))
-                } catch (e: Exception) {
-                    ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
+            val keys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
+            val pubKeyBytes = hexToBytes(keys.publicKeyHex)
+            val signature = keystoreManager.withDecryptedPrivateKey(keys) { rawPriv ->
+                com.nexa.app.core.crypto.Ed25519Signer.sign(dataToSign, rawPriv)
+            }
+
+            // Sync unified identity keys to handshake preference store for backward compatibility
+            try {
+                val handshakePrefs = getSharedPreferences("nexa_handshake_keys", android.content.Context.MODE_PRIVATE)
+                if (handshakePrefs.getString("sign_pub", null) != keys.publicKeyHex) {
+                    handshakePrefs.edit()
+                        .putString("sign_priv_enc", bytesToHex(keys.encryptedPrivateKey))
+                        .putString("sign_priv_iv", bytesToHex(keys.iv))
+                        .putString("sign_pub", keys.publicKeyHex)
+                        .apply()
                 }
-            } else {
-                val newPriv = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-                val (iv, enc) = keystoreManager.encryptWithMasterKey(newPriv)
-                val pub = com.nexa.app.core.crypto.Ed25519Signer.derivePublicKey(newPriv)
-                prefs.edit()
-                    .putString("sign_priv_enc", bytesToHex(enc))
-                    .putString("sign_priv_iv", bytesToHex(iv))
-                    .putString("sign_pub", bytesToHex(pub))
-                    .apply()
-                newPriv
+            } catch (e: Exception) {
+                Log.w("NexaApp", "Handshake key sync warning: ${e.message}")
             }
-            val pubKey = if (!pubHex.isNullOrBlank()) {
-                try { hexToBytes(pubHex) } catch (e: Exception) { com.nexa.app.core.crypto.Ed25519Signer.derivePublicKey(privKey) }
-            } else {
-                com.nexa.app.core.crypto.Ed25519Signer.derivePublicKey(privKey)
-            }
-            val signature = com.nexa.app.core.crypto.Ed25519Signer.sign(dataToSign, privKey)
-            Pair(signature, pubKey)
+
+            Pair(signature, pubKeyBytes)
         }
         networkMonitor = NetworkMonitor(this)
 

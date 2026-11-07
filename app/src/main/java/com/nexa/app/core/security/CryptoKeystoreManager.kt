@@ -3,6 +3,7 @@ package com.nexa.app.core.security
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import com.google.crypto.tink.subtle.X25519
 import java.security.KeyStore
 import java.security.SecureRandom
 import java.util.Arrays
@@ -99,6 +100,8 @@ class CryptoKeystoreManager(private val context: Context) {
 
     /**
      * Retrieves an existing identity keypair from secure storage, or creates a new one.
+     * Automatically performs seamless legacy migration if a previously stored public key was derived
+     * using the flawed legacy SHA-256 bit-clamping rather than RFC 8032 Ed25519 point multiplication.
      */
     fun getOrCreateIdentityKeyPair(secureStorage: SecureStorage): IdentityKeyPair {
         val pub = secureStorage.getIdentityPublicKey()
@@ -106,10 +109,37 @@ class CryptoKeystoreManager(private val context: Context) {
         val iv = secureStorage.getIdentityIv()
 
         if (!pub.isNullOrBlank() && !enc.isNullOrBlank() && !iv.isNullOrBlank()) {
+            val encBytes = enc.hexToByteArray()
+            val ivBytes = iv.hexToByteArray()
+
+            // Validate and migrate flawed legacy public keys while preserving the private key seed
+            val truePubKeyHex = try {
+                val rawPriv = decryptWithMasterKey(ivBytes, encBytes)
+                val derived = derivePublicKeyBytes(rawPriv).toHex()
+                Arrays.fill(rawPriv, 0.toByte())
+                derived
+            } catch (e: Exception) {
+                pub
+            }
+
+            if (truePubKeyHex != pub) {
+                // Update persistent storage with authoritative RFC 8032 Ed25519 public key
+                secureStorage.saveIdentityKeyPair(
+                    publicKeyHex = truePubKeyHex,
+                    encryptedPrivKeyHex = enc,
+                    ivHex = iv
+                )
+                return IdentityKeyPair(
+                    publicKeyHex = truePubKeyHex,
+                    encryptedPrivateKey = encBytes,
+                    iv = ivBytes
+                )
+            }
+
             return IdentityKeyPair(
                 publicKeyHex = pub,
-                encryptedPrivateKey = enc.hexToByteArray(),
-                iv = iv.hexToByteArray()
+                encryptedPrivateKey = encBytes,
+                iv = ivBytes
             )
         }
 
@@ -123,18 +153,71 @@ class CryptoKeystoreManager(private val context: Context) {
     }
 
     /**
-     * Derives a 32-byte public key from a 32-byte private key seed using SHA-256 / Edwards curve point compression.
+     * Generates an independent high-entropy 32-byte X25519 identity DH keypair.
+     * Encrypts the raw private key at rest using the KeyStore Master Key.
      */
-    private fun derivePublicKeyBytes(privateSeed: ByteArray): ByteArray {
-        val digest = java.security.MessageDigest.getInstance("SHA-256")
-        val hash = digest.digest(privateSeed)
-        val publicKey = ByteArray(32)
-        System.arraycopy(hash, 0, publicKey, 0, 32)
-        // Clamp top/bottom bits per Curve25519 specification
-        publicKey[0] = (publicKey[0].toInt() and 248).toByte()
-        publicKey[31] = (publicKey[31].toInt() and 127).toByte()
-        publicKey[31] = (publicKey[31].toInt() or 64).toByte()
-        return publicKey
+    fun generateDhIdentityKeyPair(): IdentityKeyPair {
+        val rawPrivateKey = X25519.generatePrivateKey()
+        val rawPublicKey = X25519.publicFromPrivate(rawPrivateKey)
+        val publicKeyHex = rawPublicKey.toHex()
+
+        val (iv, encryptedPrivateKey) = encryptWithMasterKey(rawPrivateKey)
+        Arrays.fill(rawPrivateKey, 0.toByte())
+
+        return IdentityKeyPair(
+            publicKeyHex = publicKeyHex,
+            encryptedPrivateKey = encryptedPrivateKey,
+            iv = iv
+        )
+    }
+
+    /**
+     * Retrieves an existing X25519 DH identity keypair or generates a new one.
+     */
+    fun getOrCreateDhIdentityKeyPair(secureStorage: SecureStorage): IdentityKeyPair {
+        val pub = secureStorage.getDhIdentityPublicKey()
+        val enc = secureStorage.getDhIdentityEncryptedPrivKey()
+        val iv = secureStorage.getDhIdentityIv()
+
+        if (!pub.isNullOrBlank() && !enc.isNullOrBlank() && !iv.isNullOrBlank()) {
+            return IdentityKeyPair(
+                publicKeyHex = pub,
+                encryptedPrivateKey = enc.hexToByteArray(),
+                iv = iv.hexToByteArray()
+            )
+        }
+
+        val generated = generateDhIdentityKeyPair()
+        secureStorage.saveDhIdentityKeyPair(
+            publicKeyHex = generated.publicKeyHex,
+            encryptedPrivKeyHex = generated.encryptedPrivateKey.toHex(),
+            ivHex = generated.iv.toHex()
+        )
+        return generated
+    }
+
+    /**
+     * Executes a cryptographic signing or verification operation with the decrypted Ed25519 private key seed,
+     * immediately wiping the plaintext seed from memory upon completion to minimize memory exposure.
+     */
+    fun <T> withDecryptedPrivateKey(
+        identityKeyPair: IdentityKeyPair,
+        block: (rawPrivateKey: ByteArray) -> T
+    ): T {
+        val raw = decryptWithMasterKey(identityKeyPair.iv, identityKeyPair.encryptedPrivateKey)
+        return try {
+            block(raw)
+        } finally {
+            Arrays.fill(raw, 0.toByte())
+        }
+    }
+
+    /**
+     * Derives a 32-byte Ed25519 public key from a 32-byte private key seed using standard RFC 8032
+     * Edwards curve point multiplication (BouncyCastle Ed25519).
+     */
+    fun derivePublicKeyBytes(privateSeed: ByteArray): ByteArray {
+        return com.nexa.app.core.crypto.Ed25519Signer.derivePublicKey(privateSeed)
     }
 
     companion object {

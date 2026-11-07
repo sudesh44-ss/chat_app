@@ -3,6 +3,7 @@ package auth
 import (
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -24,23 +25,38 @@ var (
 //
 // Security guarantees:
 // 1. Fail-closed: Rejects immediately if GATEWAY_WEBHOOK_SECRET is unset or empty.
-// 2. Constant-time comparison: Uses hmac.Equal to protect against timing attacks.
+// 2. Constant-time comparison: Uses hmac.Equal and subtle.ConstantTimeCompare to protect against timing attacks.
 // 3. Raw payload integrity: Verifies the exact raw byte slice before any JSON or form parsing.
 // 4. Timestamp & replay defense: Rejects requests older than 5 minutes or in the future by > 60s if timestamp header present.
-// 5. Header compatibility: Supports X-Gateway-Signature, X-Signature, and X-Hub-Signature-256.
+// 5. Header compatibility: Supports X-Gateway-Signature, X-Signature, X-Hub-Signature-256, X-Twilio-Signature, X-Webhook-Secret, and Authorization Bearer.
 func VerifyGatewaySignature(r *http.Request, rawBody []byte) error {
 	secret := strings.TrimSpace(os.Getenv("GATEWAY_WEBHOOK_SECRET"))
 	if secret == "" {
 		return ErrMissingWebhookSecret
 	}
 
-	// 1. Locate signature header
+	// 1. Check for token-based authentication header (e.g., X-Webhook-Secret or Authorization: Bearer <secret>)
+	headerToken := strings.TrimSpace(r.Header.Get("X-Webhook-Secret"))
+	if headerToken == "" && strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		headerToken = strings.TrimSpace(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+	}
+	if headerToken != "" {
+		if subtle.ConstantTimeCompare([]byte(headerToken), []byte(secret)) == 1 {
+			return nil
+		}
+		return ErrInvalidWebhookSignature
+	}
+
+	// 2. Locate HMAC signature header
 	sigHeader := r.Header.Get("X-Gateway-Signature")
 	if sigHeader == "" {
 		sigHeader = r.Header.Get("X-Signature")
 	}
 	if sigHeader == "" {
 		sigHeader = r.Header.Get("X-Hub-Signature-256")
+	}
+	if sigHeader == "" {
+		sigHeader = r.Header.Get("X-Twilio-Signature")
 	}
 	if strings.TrimSpace(sigHeader) == "" {
 		return ErrMissingWebhookSignature
@@ -49,7 +65,7 @@ func VerifyGatewaySignature(r *http.Request, rawBody []byte) error {
 	// Normalize signature (strip optional "sha256=" prefix)
 	sigHex := strings.TrimSpace(strings.TrimPrefix(sigHeader, "sha256="))
 
-	// 2. Check timestamp for replay protection if supplied
+	// 3. Check timestamp for replay protection if supplied
 	tsHeader := r.Header.Get("X-Gateway-Timestamp")
 	if tsHeader == "" {
 		tsHeader = r.Header.Get("X-Timestamp")
@@ -74,12 +90,12 @@ func VerifyGatewaySignature(r *http.Request, rawBody []byte) error {
 		}
 	}
 
-	// 3. Compute expected HMAC-SHA256 over raw body
+	// 4. Compute expected HMAC-SHA256 over raw body
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write(rawBody)
 	expectedSigHex := hex.EncodeToString(mac.Sum(nil))
 
-	// 4. Constant-time verification
+	// 5. Constant-time verification
 	if !hmac.Equal([]byte(strings.ToLower(sigHex)), []byte(strings.ToLower(expectedSigHex))) {
 		return ErrInvalidWebhookSignature
 	}

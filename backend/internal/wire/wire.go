@@ -32,7 +32,18 @@ const (
 	AckStatus_ACK_DEVICE_READ      AckStatus = 3
 )
 
+type DoubleRatchetHeader struct {
+	RatchetPublicKey    []byte `json:"ratchet_public_key"`
+	PreviousChainLength uint32 `json:"previous_chain_length"`
+	MessageIndex        uint32 `json:"message_index"`
+	SessionId           string `json:"session_id"`
+	OneTimePrekeyId     int64  `json:"one_time_prekey_id,omitempty"`
+	EphemeralPublicKey  []byte `json:"ephemeral_public_key,omitempty"`
+}
+
 type EncryptedMessagePayload struct {
+	Header          *DoubleRatchetHeader `json:"header,omitempty"`
+	AeadNonce       []byte               `json:"aead_nonce,omitempty"`
 	ConversationSeq int64  `json:"conversation_seq"`
 	Ciphertext      []byte `json:"ciphertext"`
 	Nonce           []byte `json:"nonce"`
@@ -141,6 +152,39 @@ func (p *NexaWirePacket) Encode() ([]byte, error) {
 		if len(p.Message.AuthTag) > 0 {
 			writeTag(msgBuf, 4, 2)
 			writeLengthDelimited(msgBuf, p.Message.AuthTag)
+		}
+		if p.Message.Header != nil {
+			hBuf := new(bytes.Buffer)
+			if len(p.Message.Header.RatchetPublicKey) > 0 {
+				writeTag(hBuf, 1, 2)
+				writeLengthDelimited(hBuf, p.Message.Header.RatchetPublicKey)
+			}
+			if p.Message.Header.PreviousChainLength != 0 {
+				writeTag(hBuf, 2, 0)
+				writeVarint(hBuf, uint64(p.Message.Header.PreviousChainLength))
+			}
+			if p.Message.Header.MessageIndex != 0 {
+				writeTag(hBuf, 3, 0)
+				writeVarint(hBuf, uint64(p.Message.Header.MessageIndex))
+			}
+			if len(p.Message.Header.SessionId) > 0 {
+				writeTag(hBuf, 4, 2)
+				writeLengthDelimited(hBuf, []byte(p.Message.Header.SessionId))
+			}
+			if p.Message.Header.OneTimePrekeyId != 0 {
+				writeTag(hBuf, 5, 0)
+				writeVarint(hBuf, uint64(p.Message.Header.OneTimePrekeyId))
+			}
+			if len(p.Message.Header.EphemeralPublicKey) > 0 {
+				writeTag(hBuf, 6, 2)
+				writeLengthDelimited(hBuf, p.Message.Header.EphemeralPublicKey)
+			}
+			writeTag(msgBuf, 5, 2)
+			writeLengthDelimited(msgBuf, hBuf.Bytes())
+		}
+		if len(p.Message.AeadNonce) > 0 {
+			writeTag(msgBuf, 6, 2)
+			writeLengthDelimited(msgBuf, p.Message.AeadNonce)
 		}
 
 		writeTag(buf, 6, 2)
@@ -439,6 +483,22 @@ func decodeMessagePayload(data []byte) (*EncryptedMessagePayload, error) {
 				return nil, err
 			}
 			payload.AuthTag = b
+		case 5:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			h, err := decodeDoubleRatchetHeader(b)
+			if err != nil {
+				return nil, err
+			}
+			payload.Header = h
+		case 6:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.AeadNonce = b
 		default:
 			if err := skipField(r, wireType); err != nil {
 				return nil, err
@@ -446,6 +506,65 @@ func decodeMessagePayload(data []byte) (*EncryptedMessagePayload, error) {
 		}
 	}
 	return payload, nil
+}
+
+func decodeDoubleRatchetHeader(data []byte) (*DoubleRatchetHeader, error) {
+	r := bytes.NewReader(data)
+	h := &DoubleRatchetHeader{}
+	for {
+		tag, err := binary.ReadUvarint(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		switch fieldNum {
+		case 1:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			h.RatchetPublicKey = b
+		case 2:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			h.PreviousChainLength = uint32(v)
+		case 3:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			h.MessageIndex = uint32(v)
+		case 4:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			h.SessionId = string(b)
+		case 5:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			h.OneTimePrekeyId = int64(v)
+		case 6:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			h.EphemeralPublicKey = b
+		default:
+			if err := skipField(r, wireType); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return h, nil
 }
 
 func decodeAckPayload(data []byte) (*DeliveryAckPayload, error) {

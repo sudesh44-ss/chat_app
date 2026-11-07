@@ -420,8 +420,19 @@ class Phase1SecurityAndMessagingTests {
             return sessions[contactNxId]
         }
 
+        override suspend fun getSessionById(sessionId: String): RatchetStateEntity? {
+            return sessions.values.find { it.sessionId == sessionId }
+        }
+
+        override suspend fun deleteSession(contactNxId: String): Int {
+            return if (sessions.remove(contactNxId) != null) 1 else 0
+        }
+
         override suspend fun insertSkippedKey(key: SkippedKeyEntity): Long {
             skippedKeys["${key.contactNxId}_${key.sequenceNumber}"] = key
+            if (key.ratchetPublicKeyHex.isNotBlank()) {
+                skippedKeys["${key.contactNxId}_${key.ratchetPublicKeyHex}_${key.messageIndex}"] = key
+            }
             return 1L
         }
 
@@ -429,14 +440,28 @@ class Phase1SecurityAndMessagingTests {
             return skippedKeys["${contactNxId}_${seq}"]
         }
 
+        override suspend fun getSkippedKeyByHeader(contactNxId: String, ratchetPubHex: String, msgIdx: Int): SkippedKeyEntity? {
+            return skippedKeys["${contactNxId}_${ratchetPubHex}_${msgIdx}"] ?: skippedKeys["${contactNxId}_${msgIdx}"]
+        }
+
         override suspend fun deleteSkippedKey(contactNxId: String, seq: Int): Int {
             return if (skippedKeys.remove("${contactNxId}_${seq}") != null) 1 else 0
+        }
+
+        override suspend fun deleteSkippedKeyByHeader(contactNxId: String, ratchetPubHex: String, msgIdx: Int): Int {
+            val r1 = skippedKeys.remove("${contactNxId}_${ratchetPubHex}_${msgIdx}") != null
+            val r2 = skippedKeys.remove("${contactNxId}_${msgIdx}") != null
+            return if (r1 || r2) 1 else 0
         }
 
         override suspend fun purgeOldSkippedKeys(thresholdTimestamp: Long): Int {
             val count = skippedKeys.count { it.value.createdAtTimestamp < thresholdTimestamp }
             skippedKeys.entries.removeIf { it.value.createdAtTimestamp < thresholdTimestamp }
             return count
+        }
+
+        override suspend fun countSkippedKeys(contactNxId: String): Int {
+            return skippedKeys.values.count { it.contactNxId == contactNxId }
         }
     }
 }

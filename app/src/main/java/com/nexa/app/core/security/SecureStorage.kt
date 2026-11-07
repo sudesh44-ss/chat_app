@@ -102,6 +102,18 @@ class SecureStorage(context: Context) {
     fun getIdentityEncryptedPrivKey(): String? = prefs.getString(KEY_IDENTITY_ENCRYPTED_PRIVKEY, null)
     fun getIdentityIv(): String? = prefs.getString(KEY_IDENTITY_IV, null)
 
+    fun saveDhIdentityKeyPair(publicKeyHex: String, encryptedPrivKeyHex: String, ivHex: String) {
+        prefs.edit()
+            .putString(KEY_DH_IDENTITY_PUBLIC_KEY, publicKeyHex)
+            .putString(KEY_DH_IDENTITY_ENCRYPTED_PRIVKEY, encryptedPrivKeyHex)
+            .putString(KEY_DH_IDENTITY_IV, ivHex)
+            .apply()
+    }
+
+    fun getDhIdentityPublicKey(): String? = prefs.getString(KEY_DH_IDENTITY_PUBLIC_KEY, null)
+    fun getDhIdentityEncryptedPrivKey(): String? = prefs.getString(KEY_DH_IDENTITY_ENCRYPTED_PRIVKEY, null)
+    fun getDhIdentityIv(): String? = prefs.getString(KEY_DH_IDENTITY_IV, null)
+
     fun clearAll() {
         prefs.edit().clear().apply()
     }
@@ -118,5 +130,8 @@ class SecureStorage(context: Context) {
         private const val KEY_IDENTITY_PUBLIC_KEY = "key_identity_public_key"
         private const val KEY_IDENTITY_ENCRYPTED_PRIVKEY = "key_identity_encrypted_privkey"
         private const val KEY_IDENTITY_IV = "key_identity_iv"
+        private const val KEY_DH_IDENTITY_PUBLIC_KEY = "key_dh_identity_public_key"
+        private const val KEY_DH_IDENTITY_ENCRYPTED_PRIVKEY = "key_dh_identity_encrypted_privkey"
+        private const val KEY_DH_IDENTITY_IV = "key_dh_identity_iv"
     }
 }

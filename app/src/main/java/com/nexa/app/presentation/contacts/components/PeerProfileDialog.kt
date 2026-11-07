@@ -83,6 +83,8 @@ fun PeerProfileDialog(
     avatarUrl: String? = null,
     deviceContactPhotoUri: String? = null,
     onEditNickname: () -> Unit,
+    onRemoveConnection: (() -> Unit)? = null,
+    onBlockUser: (() -> Unit)? = null,
     onDismiss: () -> Unit
 ) {
     val context = LocalContext.current
@@ -278,6 +280,41 @@ fun PeerProfileDialog(
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier.size(16.dp)
                             )
+                        }
+                    }
+                }
+
+                // Phase D: Connection Management Actions
+                if (onRemoveConnection != null || onBlockUser != null) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (onRemoveConnection != null) {
+                            OutlinedButton(
+                                onClick = {
+                                    onRemoveConnection()
+                                    onDismiss()
+                                },
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Remove", color = MaterialTheme.colorScheme.error)
+                            }
+                        }
+                        if (onBlockUser != null) {
+                            Button(
+                                onClick = {
+                                    onBlockUser()
+                                    onDismiss()
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Block")
+                            }
                         }
                     }
                 }

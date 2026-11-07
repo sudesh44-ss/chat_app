@@ -553,3 +553,21 @@ func (s *Store) RegisterDeviceWithParams(nxID string, deviceID string, deviceNam
 func (s *Store) RevokeDeviceForUser(nxID string, deviceID string) error {
 	return s.RevokeDevice(deviceID)
 }
+
+// CountAccounts returns the total count of registered accounts.
+func (s *Store) CountAccounts() (int, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.accounts), nil
+}
+
+// Close flushes any pending writes and closes the store.
+func (s *Store) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.save()
+}
+
+// Compile-time check to verify Store satisfies IdentityRepository interface
+var _ IdentityRepository = (*Store)(nil)
+

@@ -2,6 +2,7 @@ package connection
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -11,6 +12,8 @@ import (
 	"nexa/wire/internal/identity"
 	"nexa/wire/internal/queue"
 	"nexa/wire/internal/wire"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type Hub struct {
@@ -25,11 +28,16 @@ type Hub struct {
 	// Ephemeral Redis buffer (TTL: 24h)
 	buffer queue.Buffer
 
+	// Redis client for Pub/Sub and cluster distribution
+	redisClient  *redis.Client
+	instanceID   string
+	pubsubCancel context.CancelFunc
+
 	// FCM Service for background wake-up pings
 	fcmService *fcm.FcmService
 
 	// Identity store to lookup registered device FCM tokens
-	identityStore *identity.Store
+	identityStore identity.IdentityRepository
 
 	// In-memory telemetry & traffic police metrics (Zero DB write IOPS)
 	relayedMessagesCount     uint64
@@ -37,22 +45,40 @@ type Hub struct {
 	offlineBufferedCount     uint64
 	offlineFlushedCount      uint64
 	ingestedTelemetryBatches uint64
+
+	// Connection & blocklist validator for wire authorization
+	connValidator ConnectionValidator
+}
+
+// ConnectionValidator validates relationship and block status before routing packets.
+type ConnectionValidator interface {
+	IsBlocked(ctx context.Context, userA, userB string) (bool, error)
+	IsConnected(ctx context.Context, userA, userB string) (bool, error)
 }
 
 func NewHub(buffer queue.Buffer) *Hub {
-	return &Hub{
+	h := &Hub{
 		sessions:    make(map[string]map[string]*ClientSession),
 		blindTokens: make(map[string]*ClientSession),
 		buffer:      buffer,
+		instanceID:  generateID("inst"),
 	}
+	if buffer != nil {
+		h.redisClient = buffer.GetClient()
+	}
+	return h
 }
 
 func (h *Hub) SetFcmService(fcmService *fcm.FcmService) {
 	h.fcmService = fcmService
 }
 
-func (h *Hub) SetIdentityStore(identityStore *identity.Store) {
+func (h *Hub) SetIdentityStore(identityStore identity.IdentityRepository) {
 	h.identityStore = identityStore
+}
+
+func (h *Hub) SetConnectionValidator(validator ConnectionValidator) {
+	h.connValidator = validator
 }
 
 func (h *Hub) Register(session *ClientSession) {
@@ -81,7 +107,10 @@ func (h *Hub) Unregister(session *ClientSession) {
 	if devices, ok := h.sessions[session.NxId]; ok {
 		if existing, found := devices[session.DeviceId]; found && existing == session {
 			delete(devices, session.DeviceId)
-			close(session.Send)
+			func() {
+				defer func() { _ = recover() }()
+				close(session.Send)
+			}()
 			log.Printf("[Hub] Unregistered session for NX-ID: %s (Device: %s)", session.NxId, session.DeviceId)
 		}
 		if len(devices) == 0 {
@@ -128,6 +157,28 @@ func (h *Hub) RouteDecodedPacket(sender *ClientSession, packet *wire.NexaWirePac
 			sender.SafeSend(encoded)
 		}
 		return
+	}
+
+	// Wire-level Connection & Blocklist Authorization (Phase E)
+	if h.connValidator != nil && packet.RecipientNxId != "" && packet.RecipientNxId != "SERVER" && packet.RecipientNxId != sender.NxId {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		// A. Blocklist Check: Drop packet if communication is blocked in either direction
+		blocked, err := h.connValidator.IsBlocked(ctx, sender.NxId, packet.RecipientNxId)
+		if err == nil && blocked {
+			log.Printf("[Hub] Wire Policy: Packet %s dropped (communication blocked between %s and %s)", packet.PacketId, sender.NxId, packet.RecipientNxId)
+			return
+		}
+
+		// B. Mutual Connection Check: Reject messages or typing between unverified strangers
+		if packet.Type == wire.PacketType_PACKET_MESSAGE || packet.Type == wire.PacketType_PACKET_TYPING {
+			connected, err := h.connValidator.IsConnected(ctx, sender.NxId, packet.RecipientNxId)
+			if err != nil || !connected {
+				log.Printf("[Hub] Wire Policy: Packet %s dropped (%s is not actively connected with %s)", packet.PacketId, sender.NxId, packet.RecipientNxId)
+				return
+			}
+		}
 	}
 
 	// 2. Immediate Server Acknowledgment (ACK_SERVER_RECEIVED) back to sender
@@ -260,6 +311,9 @@ func (h *Hub) RouteDtnEnvelope(blindTokenHex string, rawBytes []byte) {
 }
 
 func (h *Hub) bufferOffline(recipientId string, rawBytes []byte) {
+	if h.buffer == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -274,6 +328,9 @@ func (h *Hub) bufferOffline(recipientId string, rawBytes []byte) {
 }
 
 func (h *Hub) bufferOfflineDtn(blindTokenHex string, rawBytes []byte) {
+	if h.buffer == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 
@@ -288,6 +345,9 @@ func (h *Hub) bufferOfflineDtn(blindTokenHex string, rawBytes []byte) {
 }
 
 func (h *Hub) flushPendingQueue(recipientId string, session *ClientSession) {
+	if h.buffer == nil {
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -371,4 +431,65 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// BroadcastEventToNxID dispatches a real-time JSON notification to all active authenticated sessions of a user,
+// delivering to local sessions and broadcasting across the Redis cluster.
+func (h *Hub) BroadcastEventToNxID(nxId string, eventType string, payload interface{}) {
+	if h == nil || nxId == "" {
+		return
+	}
+
+	// 1. Deliver to local active sessions on this instance
+	h.broadcastLocal(nxId, eventType, payload)
+
+	// 2. Broadcast to cluster if Redis is configured
+	if h.redisClient != nil {
+		event := ClusterEvent{
+			EventID:          generateID("evt_bcast"),
+			Type:             eventType,
+			OriginInstanceID: h.instanceID,
+			NxID:             nxId,
+			Payload:          payload,
+			Timestamp:        time.Now().UnixMilli(),
+		}
+		if data, err := json.Marshal(event); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			_ = h.redisClient.Publish(ctx, ClusterEventsChannel, data).Err()
+		}
+	}
+}
+
+func (h *Hub) broadcastLocal(nxId string, eventType string, payload interface{}) {
+	if h == nil || nxId == "" {
+		return
+	}
+
+	eventData, err := json.Marshal(map[string]interface{}{
+		"type":      eventType,
+		"payload":   payload,
+		"timestamp": time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return
+	}
+
+	h.sessionsMu.RLock()
+	defer h.sessionsMu.RUnlock()
+
+	devices, ok := h.sessions[nxId]
+	if !ok || len(devices) == 0 {
+		return
+	}
+
+	for _, session := range devices {
+		if session.Authenticated {
+			select {
+			case session.Send <- eventData:
+			default:
+				log.Printf("[Hub] Warning: session buffer full for %s, dropped event %s", nxId, eventType)
+			}
+		}
+	}
 }

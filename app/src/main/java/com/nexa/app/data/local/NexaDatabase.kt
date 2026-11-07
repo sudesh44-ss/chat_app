@@ -49,7 +49,7 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         MeshEnvelopeEntity::class,
         DeviceSyncEntity::class
     ],
-    version = 16,
+    version = 17,
     exportSchema = false
 )
 abstract class NexaDatabase : RoomDatabase() {
@@ -332,6 +332,18 @@ abstract class NexaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_16_17 = object : Migration(16, 17) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `ratchet_sessions` ADD COLUMN `previousChainLength` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE `ratchet_sessions` ADD COLUMN `sessionId` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `ratchet_sessions` ADD COLUMN `remoteDeviceId` TEXT NOT NULL DEFAULT ''")
+
+                db.execSQL("ALTER TABLE `skipped_message_keys` ADD COLUMN `ratchetPublicKeyHex` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `skipped_message_keys` ADD COLUMN `messageIndex` INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_skipped_message_keys_contactNxId_ratchetPublicKeyHex_messageIndex` ON `skipped_message_keys` (`contactNxId`, `ratchetPublicKeyHex`, `messageIndex`)")
+            }
+        }
+
         fun getInstance(context: Context, passphrase: ByteArray): NexaDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: buildDatabase(context.applicationContext, passphrase).also {
@@ -377,7 +389,8 @@ abstract class NexaDatabase : RoomDatabase() {
                     MIGRATION_12_13,
                     MIGRATION_13_14,
                     MIGRATION_14_15,
-                    MIGRATION_15_16
+                    MIGRATION_15_16,
+                    MIGRATION_16_17
                 )
                 .build()
         }

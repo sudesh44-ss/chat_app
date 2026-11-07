@@ -1,6 +1,9 @@
 package com.nexa.app.presentation.contacts
 
 import com.nexa.app.data.local.entity.ContactEntity
+import com.nexa.app.data.remote.dto.BlockedUserItemDto
+import com.nexa.app.data.remote.dto.ConnectionRequestItemDto
+import com.nexa.app.data.remote.dto.DiscoveredUserDto
 import com.nexa.app.domain.model.DeviceContact
 
 data class ContactUiState(
@@ -16,5 +19,11 @@ data class ContactUiState(
     val isNetworkError: Boolean = false,
     val isPoWComputing: Boolean = false,
     val error: String? = null,
-    val successMessage: String? = null
+    val successMessage: String? = null,
+    // Phase D fields
+    val discoveredUser: DiscoveredUserDto? = null,
+    val isSearchingUser: Boolean = false,
+    val blockedUsers: List<BlockedUserItemDto> = emptyList(),
+    val outgoingRequests: List<ConnectionRequestItemDto> = emptyList(),
+    val incomingRequests: List<ConnectionRequestItemDto> = emptyList()
 )

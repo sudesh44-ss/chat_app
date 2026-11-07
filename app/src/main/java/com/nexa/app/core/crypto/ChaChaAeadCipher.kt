@@ -11,10 +11,19 @@ import org.bouncycastle.crypto.params.ParametersWithIV
  */
 object ChaChaAeadCipher {
 
-    fun encrypt(key: ByteArray, nonce: ByteArray, plaintext: ByteArray): Pair<ByteArray, ByteArray> {
+    fun encrypt(
+        key: ByteArray,
+        nonce: ByteArray,
+        plaintext: ByteArray,
+        associatedData: ByteArray? = null
+    ): Pair<ByteArray, ByteArray> {
         val cipher = ChaCha20Poly1305()
         val params = ParametersWithIV(KeyParameter(key), nonce)
         cipher.init(true, params)
+
+        if (associatedData != null && associatedData.isNotEmpty()) {
+            cipher.processAADBytes(associatedData, 0, associatedData.size)
+        }
 
         val out = ByteArray(cipher.getOutputSize(plaintext.size))
         val len = cipher.processBytes(plaintext, 0, plaintext.size, out, 0)
@@ -25,11 +34,21 @@ object ChaChaAeadCipher {
         return Pair(ciphertext, tag)
     }
 
-    fun decrypt(key: ByteArray, nonce: ByteArray, ciphertext: ByteArray, tag: ByteArray): ByteArray? {
+    fun decrypt(
+        key: ByteArray,
+        nonce: ByteArray,
+        ciphertext: ByteArray,
+        tag: ByteArray,
+        associatedData: ByteArray? = null
+    ): ByteArray? {
         return try {
             val cipher = ChaCha20Poly1305()
             val params = ParametersWithIV(KeyParameter(key), nonce)
             cipher.init(false, params)
+
+            if (associatedData != null && associatedData.isNotEmpty()) {
+                cipher.processAADBytes(associatedData, 0, associatedData.size)
+            }
 
             val combined = ciphertext + tag
             val out = ByteArray(cipher.getOutputSize(combined.size))

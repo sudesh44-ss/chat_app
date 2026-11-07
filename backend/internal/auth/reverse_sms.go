@@ -1,8 +1,10 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -13,7 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"nexa/wire/internal/identity"
+	"nexa/wire/internal/ratelimit"
 )
 
 var (
@@ -129,7 +133,9 @@ type UserResolveResponse struct {
 
 type ReverseSmsService struct {
 	mu                 sync.RWMutex
-	store              *identity.Store
+	store              identity.IdentityRepository
+	redisClient        *redis.Client
+	limiter            ratelimit.Limiter
 	pending            map[string]*PendingVerification // nonce -> record
 	bySession          map[string]string               // sessionId -> nonce
 	byPhone            map[string]string               // phone -> active nonce
@@ -138,15 +144,28 @@ type ReverseSmsService struct {
 	inboundReceiverNum string
 }
 
-func NewReverseSmsService(store *identity.Store) *ReverseSmsService {
-	inbound := os.Getenv("INBOUND_SMS_RECEIVER_NUMBER")
+func NewReverseSmsService(store identity.IdentityRepository) *ReverseSmsService {
+	inbound := strings.TrimSpace(os.Getenv("INBOUND_SMS_RECEIVER_NUMBER"))
+	env := strings.ToLower(os.Getenv("APP_ENV"))
+	if env == "" {
+		env = strings.ToLower(os.Getenv("ENV"))
+	}
+	isProduction := env == "production"
+
 	if inbound == "" {
-		// Default automated inbound virtual receiver / GSM gateway number
-		inbound = "+919800000000"
+		if isProduction {
+			log.Println("[ReverseSMS] CRITICAL: INBOUND_SMS_RECEIVER_NUMBER is not configured in production!")
+		} else {
+			// Default automated inbound virtual receiver / GSM gateway number for local dev/testing
+			inbound = "+919800000000"
+		}
+	} else if isProduction && (inbound == "+919800000000" || inbound == "+910000000000") {
+		log.Printf("[ReverseSMS] CRITICAL: Dummy or placeholder INBOUND_SMS_RECEIVER_NUMBER (%s) detected in production!", inbound)
 	}
 
 	return &ReverseSmsService{
 		store:              store,
+		limiter:            ratelimit.NewDistributedLimiter(nil, isProduction),
 		pending:            make(map[string]*PendingVerification),
 		bySession:          make(map[string]string),
 		byPhone:            make(map[string]string),
@@ -154,6 +173,29 @@ func NewReverseSmsService(store *identity.Store) *ReverseSmsService {
 		userRate:           make(map[string][]int64),
 		inboundReceiverNum: inbound,
 	}
+}
+
+// SetRedisClient attaches a Redis client for cluster-wide nonce distribution, persistence, and distributed rate limiting.
+func (s *ReverseSmsService) SetRedisClient(client *redis.Client) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.redisClient = client
+	env := strings.ToLower(os.Getenv("APP_ENV"))
+	if env == "" {
+		env = strings.ToLower(os.Getenv("ENV"))
+	}
+	isProduction := env == "production"
+	if client != nil {
+		s.limiter = ratelimit.NewDistributedLimiter(client, isProduction)
+		log.Println("[ReverseSMS] Distributed Redis nonce caching and rate limiting enabled.")
+	}
+}
+
+// SetRateLimiter allows injection of a custom or mocked rate limiter (e.g. for testing).
+func (s *ReverseSmsService) SetRateLimiter(l ratelimit.Limiter) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.limiter = l
 }
 
 func (s *ReverseSmsService) checkRateLimit(key string, tracker map[string][]int64, windowMs int64, maxAttempts int) bool {
@@ -201,12 +243,31 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 		return nil, err
 	}
 
+	env := strings.ToLower(os.Getenv("APP_ENV"))
+	if env == "" {
+		env = strings.ToLower(os.Getenv("ENV"))
+	}
+	isProduction := env == "production"
+	if isProduction && (s.inboundReceiverNum == "" || s.inboundReceiverNum == "+919800000000" || s.inboundReceiverNum == "+910000000000") {
+		return nil, fmt.Errorf("reverse verification unavailable: real INBOUND_SMS_RECEIVER_NUMBER is required in production environment (dummy placeholder rejected)")
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	// Rate Limiting: Max 5 attempts / 15 minutes per IP
-	if clientIP != "" && !s.checkRateLimit(clientIP, s.ipRate, 15*60*1000, 5) {
-		return nil, fmt.Errorf("%w: maximum 5 attempts per 15 minutes per IP", ErrReverseRateLimited)
+	if clientIP != "" {
+		if s.limiter != nil {
+			allowed, rErr := s.limiter.Allow(context.Background(), "ratelimit:reversesms:ip:"+clientIP, 5, 15*time.Minute)
+			if rErr != nil {
+				return nil, fmt.Errorf("rate limiter error: %w", rErr)
+			}
+			if !allowed {
+				return nil, fmt.Errorf("%w: maximum 5 attempts per 15 minutes per IP", ErrReverseRateLimited)
+			}
+		} else if !s.checkRateLimit(clientIP, s.ipRate, 15*60*1000, 5) {
+			return nil, fmt.Errorf("%w: maximum 5 attempts per 15 minutes per IP", ErrReverseRateLimited)
+		}
 	}
 
 	// Rate Limiting: Max 3 attempts / 24 hours per Google UID / Device
@@ -214,8 +275,18 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 	if rateKey == "" {
 		rateKey = req.DeviceID
 	}
-	if rateKey != "" && !s.checkRateLimit(rateKey, s.userRate, 24*60*60*1000, 3) {
-		return nil, fmt.Errorf("%w: maximum 3 verification attempts per 24 hours", ErrReverseRateLimited)
+	if rateKey != "" {
+		if s.limiter != nil {
+			allowed, rErr := s.limiter.Allow(context.Background(), "ratelimit:reversesms:user:"+rateKey, 3, 24*time.Hour)
+			if rErr != nil {
+				return nil, fmt.Errorf("rate limiter error: %w", rErr)
+			}
+			if !allowed {
+				return nil, fmt.Errorf("%w: maximum 3 verification attempts per 24 hours", ErrReverseRateLimited)
+			}
+		} else if !s.checkRateLimit(rateKey, s.userRate, 24*60*60*1000, 3) {
+			return nil, fmt.Errorf("%w: maximum 3 verification attempts per 24 hours", ErrReverseRateLimited)
+		}
 	}
 
 	nonce, err := s.generateCryptoNonce()
@@ -252,6 +323,19 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 	s.pending[nonce] = record
 	s.byPhone[canonicalPhone] = nonce
 	s.bySession[sessionID] = nonce
+
+	if s.redisClient != nil {
+		if recordJSON, err := json.Marshal(record); err == nil {
+			ttl := 95 * time.Second
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			pipe := s.redisClient.Pipeline()
+			pipe.Set(ctx, "reverse_sms:nonce:"+nonce, recordJSON, ttl)
+			pipe.Set(ctx, "reverse_sms:session:"+sessionID, nonce, ttl)
+			pipe.Set(ctx, "reverse_sms:phone:"+canonicalPhone, nonce, ttl)
+			_, _ = pipe.Exec(ctx)
+			cancel()
+		}
+	}
 
 	log.Printf("[ReverseSMS] Initiated reverse verification for %s (Nonce: %s, Inbound: %s, TTL: 90s)",
 		maskPhone(canonicalPhone), nonce, s.inboundReceiverNum)
@@ -306,8 +390,26 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 	defer s.mu.Unlock()
 
 	record, exists := s.pending[nonce]
+	if !exists && s.redisClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		data, err := s.redisClient.Get(ctx, "reverse_sms:nonce:"+nonce).Bytes()
+		cancel()
+		if err == nil {
+			var r PendingVerification
+			if json.Unmarshal(data, &r) == nil {
+				record = &r
+				exists = true
+				s.pending[nonce] = record
+			}
+		}
+	}
 	if !exists {
 		return nil, fmt.Errorf("%w: %s", ErrNonceNotFound, nonce)
+	}
+
+	// Single-use anti-replay defense: Replay attack rejected if already verified
+	if record.Status == "VERIFIED" {
+		return nil, fmt.Errorf("inbound webhook: nonce %s has already been verified (replay attack rejected)", nonce)
 	}
 
 	now := time.Now().UnixMilli()
@@ -467,6 +569,19 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 	record.AllocatedNxID = finalNxID
 	record.SessionAuthToken = sessionToken
 
+	if s.redisClient != nil {
+		if recordJSON, err := json.Marshal(record); err == nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			pipe := s.redisClient.Pipeline()
+			pipe.Set(ctx, "reverse_sms:nonce:"+nonce, recordJSON, 5*time.Minute)
+			if record.SessionID != "" {
+				pipe.Set(ctx, "reverse_sms:session:"+record.SessionID, nonce, 5*time.Minute)
+			}
+			_, _ = pipe.Exec(ctx)
+			cancel()
+		}
+	}
+
 	log.Printf("[ReverseSMS] Inbound SMS verified successfully: Sender=%s, Nonce=%s, NxID=%s",
 		maskPhone(canonicalSender), nonce, finalNxID)
 
@@ -475,8 +590,8 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 
 // GetVerificationStatus queries the state of a pending verification nonce or sessionId.
 func (s *ReverseSmsService) GetVerificationStatus(key string) (*VerificationStatusResponse, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	nonce := key
 	if n, found := s.bySession[key]; found {
@@ -484,12 +599,31 @@ func (s *ReverseSmsService) GetVerificationStatus(key string) (*VerificationStat
 	}
 
 	record, exists := s.pending[nonce]
+	if !exists && s.redisClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		// Check if key is a session ID in Redis
+		if resolvedNonce, err := s.redisClient.Get(ctx, "reverse_sms:session:"+key).Result(); err == nil && resolvedNonce != "" {
+			nonce = resolvedNonce
+		}
+		data, err := s.redisClient.Get(ctx, "reverse_sms:nonce:"+nonce).Bytes()
+		cancel()
+		if err == nil {
+			var r PendingVerification
+			if json.Unmarshal(data, &r) == nil {
+				record = &r
+				exists = true
+				s.pending[nonce] = record
+			}
+		}
+	}
+
 	if !exists {
 		return nil, ErrNonceNotFound
 	}
 
 	now := time.Now().UnixMilli()
 	if record.Status == "PENDING" && now > record.ExpiresAt {
+		record.Status = "EXPIRED"
 		return &VerificationStatusResponse{
 			Status:     "EXPIRED",
 			IsVerified: false,
@@ -498,7 +632,7 @@ func (s *ReverseSmsService) GetVerificationStatus(key string) (*VerificationStat
 
 	if record.Status == "VERIFIED" {
 		account, _ := s.store.GetAccountByNxID(record.AllocatedNxID)
-		return &VerificationStatusResponse{
+		resp := &VerificationStatusResponse{
 			Status:           "VERIFIED",
 			IsVerified:       true,
 			NxID:             record.AllocatedNxID,
@@ -508,6 +642,25 @@ func (s *ReverseSmsService) GetVerificationStatus(key string) (*VerificationStat
 			Phone:            record.PhoneNumber,
 			AvatarURL:        record.AvatarURL,
 			User:             account,
+		}
+
+		// Single-use token consumption: transition to CONSUMED so subsequent queries cannot leak token
+		record.Status = "CONSUMED"
+		if s.redisClient != nil {
+			if recordJSON, err := json.Marshal(record); err == nil {
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				_ = s.redisClient.Set(ctx, "reverse_sms:nonce:"+nonce, recordJSON, 2*time.Minute).Err()
+				cancel()
+			}
+		}
+
+		return resp, nil
+	}
+
+	if record.Status == "CONSUMED" {
+		return &VerificationStatusResponse{
+			Status:     "CONSUMED",
+			IsVerified: false,
 		}, nil
 	}
 

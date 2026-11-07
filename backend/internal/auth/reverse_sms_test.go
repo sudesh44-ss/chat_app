@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -243,4 +244,148 @@ func TestReverseSmsZeroPermissionPayloadsAndSessionLookup(t *testing.T) {
 		t.Fatalf("NX-ID mismatch: expected %s, got %s", record.AllocatedNxID, statusVerifiedBySession.NxID)
 	}
 }
+
+func TestReverseSmsProductionDummyRejection(t *testing.T) {
+	tmpDir, _ := os.MkdirTemp("", "nexa_test_prod_dummy_*")
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "identity.json")
+	store, _ := identity.NewStore(dbPath)
+	svc := NewReverseSmsService(store)
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pubHex := hex.EncodeToString(pub)
+
+	initReq := &InitiateReverseVerifyRequest{
+		GoogleUID:    "google_sub_dan_101",
+		PhoneNumber:  "+919822233344",
+		Name:         "Dan Smith",
+		PublicKeyHex: pubHex,
+		DeviceID:     "dev_pixel_dummy_test",
+	}
+
+	// 1. In production, unconfigured or dummy receiver number MUST be rejected
+	os.Setenv("APP_ENV", "production")
+	os.Unsetenv("INBOUND_SMS_RECEIVER_NUMBER")
+	os.Unsetenv("SMS_RECEIVER_NUMBER")
+	defer func() {
+		os.Unsetenv("APP_ENV")
+		os.Unsetenv("INBOUND_SMS_RECEIVER_NUMBER")
+		os.Unsetenv("SMS_RECEIVER_NUMBER")
+	}()
+
+	_, err := svc.InitiateVerification(initReq, "10.0.0.3")
+	if err == nil {
+		t.Fatalf("expected InitiateVerification to fail in production when receiver number is unset")
+	}
+
+	// 2. In production, explicit dummy number MUST also be rejected
+	os.Setenv("INBOUND_SMS_RECEIVER_NUMBER", "+919800000000")
+	_, err = svc.InitiateVerification(initReq, "10.0.0.3")
+	if err == nil {
+		t.Fatalf("expected InitiateVerification to fail in production when receiver number is dummy +919800000000")
+	}
+
+	// 3. In non-production (dev/test), dummy number is allowed as fallback
+	os.Setenv("APP_ENV", "development")
+	resp, err := svc.InitiateVerification(initReq, "10.0.0.3")
+	if err != nil {
+		t.Fatalf("expected InitiateVerification to succeed in dev mode with fallback, got error: %v", err)
+	}
+	if resp.InboundNumber != "+919800000000" {
+		t.Errorf("expected dev fallback inbound number +919800000000, got: %s", resp.InboundNumber)
+	}
+}
+
+func TestReverseSmsAntiReplayProtection(t *testing.T) {
+	tmpDir, _ := os.MkdirTemp("", "nexa_test_antireplay_*")
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "identity.json")
+	store, _ := identity.NewStore(dbPath)
+	svc := NewReverseSmsService(store)
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pubHex := hex.EncodeToString(pub)
+
+	initReq := &InitiateReverseVerifyRequest{
+		GoogleUID:    "google_sub_replay_102",
+		PhoneNumber:  "+919833344455",
+		Name:         "Eve Replay",
+		PublicKeyHex: pubHex,
+		DeviceID:     "dev_pixel_replay_test",
+	}
+
+	resp, err := svc.InitiateVerification(initReq, "10.0.0.4")
+	if err != nil {
+		t.Fatalf("InitiateVerification failed: %v", err)
+	}
+
+	// First verification should succeed
+	record, err := svc.ProcessInboundWebhook("+919833344455", resp.SmsPayload)
+	if err != nil {
+		t.Fatalf("first ProcessInboundWebhook failed: %v", err)
+	}
+	if record.Status != "VERIFIED" {
+		t.Fatalf("expected VERIFIED, got: %s", record.Status)
+	}
+
+	// Replay attempt with same payload MUST be rejected
+	_, err = svc.ProcessInboundWebhook("+919833344455", resp.SmsPayload)
+	if err == nil {
+		t.Fatalf("expected error on replay of already VERIFIED challenge, got nil")
+	}
+	if !strings.Contains(err.Error(), "replay attack rejected") {
+		t.Errorf("expected 'replay attack rejected' error message, got: %v", err)
+	}
+}
+
+func TestReverseSmsSingleUseTokenConsumption(t *testing.T) {
+	tmpDir, _ := os.MkdirTemp("", "nexa_test_singleuse_*")
+	defer os.RemoveAll(tmpDir)
+
+	dbPath := filepath.Join(tmpDir, "identity.json")
+	store, _ := identity.NewStore(dbPath)
+	svc := NewReverseSmsService(store)
+
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pubHex := hex.EncodeToString(pub)
+
+	initReq := &InitiateReverseVerifyRequest{
+		GoogleUID:    "google_sub_single_use_1",
+		PhoneNumber:  "+919844455566",
+		Name:         "Single Use User",
+		PublicKeyHex: pubHex,
+		DeviceID:     "dev_pixel_singleuse",
+	}
+
+	resp, err := svc.InitiateVerification(initReq, "10.0.0.5")
+	if err != nil {
+		t.Fatalf("InitiateVerification failed: %v", err)
+	}
+
+	_, err = svc.ProcessInboundWebhook("+919844455566", resp.SmsPayload)
+	if err != nil {
+		t.Fatalf("ProcessInboundWebhook failed: %v", err)
+	}
+
+	// First fetch: should return VERIFIED with SessionAuthToken
+	firstFetch, err := svc.GetVerificationStatus(resp.Nonce)
+	if err != nil || firstFetch.Status != "VERIFIED" || firstFetch.SessionAuthToken == "" {
+		t.Fatalf("expected first fetch to return VERIFIED with token, got %+v (err: %v)", firstFetch, err)
+	}
+
+	// Second fetch: MUST return CONSUMED without token (single-use protection)
+	secondFetch, err := svc.GetVerificationStatus(resp.Nonce)
+	if err != nil {
+		t.Fatalf("second fetch failed: %v", err)
+	}
+	if secondFetch.Status != "CONSUMED" || secondFetch.IsVerified {
+		t.Fatalf("expected CONSUMED status on second fetch, got %+v", secondFetch)
+	}
+	if secondFetch.SessionAuthToken != "" {
+		t.Fatalf("expected empty SessionAuthToken on second fetch, got %s", secondFetch.SessionAuthToken)
+	}
+}
+
 

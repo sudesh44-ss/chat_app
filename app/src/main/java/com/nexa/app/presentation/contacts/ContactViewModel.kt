@@ -26,7 +26,12 @@ data class InternalAddressState(
     val isNetworkError: Boolean = false,
     val isPoWComputing: Boolean = false,
     val error: String? = null,
-    val successMessage: String? = null
+    val successMessage: String? = null,
+    val discoveredUser: com.nexa.app.data.remote.dto.DiscoveredUserDto? = null,
+    val isSearchingUser: Boolean = false,
+    val blockedUsers: List<com.nexa.app.data.remote.dto.BlockedUserItemDto> = emptyList(),
+    val outgoingRequests: List<com.nexa.app.data.remote.dto.ConnectionRequestItemDto> = emptyList(),
+    val incomingRequests: List<com.nexa.app.data.remote.dto.ConnectionRequestItemDto> = emptyList()
 )
 
 /**
@@ -88,7 +93,12 @@ class ContactViewModel(
             isNetworkError = addr.isNetworkError,
             isPoWComputing = addr.isPoWComputing,
             error = addr.error,
-            successMessage = addr.successMessage
+            successMessage = addr.successMessage,
+            discoveredUser = addr.discoveredUser,
+            isSearchingUser = addr.isSearchingUser,
+            blockedUsers = addr.blockedUsers,
+            outgoingRequests = addr.outgoingRequests,
+            incomingRequests = addr.incomingRequests
         )
     }.stateIn(
         scope = viewModelScope,
@@ -215,6 +225,152 @@ class ContactViewModel(
     fun setContactNickname(nxId: String, customNickname: String?) {
         viewModelScope.launch {
             contactRepository.setContactNickname(nxId, customNickname)
+        }
+    }
+
+    // Phase D: Connection & Contact Management Methods
+
+    fun searchUserByNxId(nxId: String) {
+        val cleanNxId = nxId.trim().uppercase()
+        if (cleanNxId.isBlank()) return
+
+        viewModelScope.launch {
+            _addressState.update { it.copy(isSearchingUser = true, error = null, discoveredUser = null) }
+            val result = contactRepository.discoverUser(cleanNxId)
+            result.onSuccess { user ->
+                _addressState.update { it.copy(isSearchingUser = false, discoveredUser = user) }
+            }.onFailure { err ->
+                _addressState.update {
+                    it.copy(
+                        isSearchingUser = false,
+                        error = err.localizedMessage ?: "User not found or unavailable"
+                    )
+                }
+            }
+        }
+    }
+
+    fun clearDiscoveredUser() {
+        _addressState.update { it.copy(discoveredUser = null, isSearchingUser = false) }
+    }
+
+    fun loadIncomingRequests() {
+        viewModelScope.launch {
+            val result = contactRepository.getIncomingConnectionRequests()
+            result.onSuccess { requests ->
+                _addressState.update { it.copy(incomingRequests = requests) }
+            }
+        }
+    }
+
+    fun loadOutgoingRequests() {
+        viewModelScope.launch {
+            val result = contactRepository.getOutgoingConnectionRequests()
+            result.onSuccess { requests ->
+                _addressState.update { it.copy(outgoingRequests = requests) }
+            }
+        }
+    }
+
+    fun acceptConnectionRequest(requestId: String, contact: ContactEntity) {
+        viewModelScope.launch {
+            _addressState.update { it.copy(error = null) }
+            val result = contactRepository.acceptConnectionRequestById(requestId, contact)
+            result.onSuccess {
+                _addressState.update {
+                    it.copy(successMessage = "Connected with ${contact.displayName}")
+                }
+                loadIncomingRequests()
+            }.onFailure { err ->
+                _addressState.update {
+                    it.copy(error = err.localizedMessage ?: "Failed to accept connection request")
+                }
+            }
+        }
+    }
+
+    fun rejectConnectionRequest(requestId: String, nxId: String) {
+        viewModelScope.launch {
+            val result = contactRepository.rejectConnectionRequestById(requestId, nxId)
+            result.onSuccess {
+                loadIncomingRequests()
+            }.onFailure { err ->
+                _addressState.update {
+                    it.copy(error = err.localizedMessage ?: "Failed to reject connection request")
+                }
+            }
+        }
+    }
+
+    fun cancelConnectionRequest(requestId: String) {
+        viewModelScope.launch {
+            val result = contactRepository.cancelConnectionRequestById(requestId)
+            result.onSuccess {
+                _addressState.update { it.copy(successMessage = "Request cancelled") }
+                loadOutgoingRequests()
+            }.onFailure { err ->
+                _addressState.update {
+                    it.copy(error = err.localizedMessage ?: "Failed to cancel connection request")
+                }
+            }
+        }
+    }
+
+    fun removeConnection(targetNxId: String) {
+        viewModelScope.launch {
+            val result = contactRepository.removeConnection(targetNxId)
+            result.onSuccess {
+                _addressState.update { it.copy(successMessage = "Connection removed") }
+            }.onFailure { err ->
+                _addressState.update {
+                    it.copy(error = err.localizedMessage ?: "Failed to remove connection")
+                }
+            }
+        }
+    }
+
+    fun blockUser(targetNxId: String) {
+        viewModelScope.launch {
+            val result = contactRepository.blockUser(targetNxId)
+            result.onSuccess {
+                _addressState.update { it.copy(successMessage = "User blocked") }
+                loadBlockedUsers()
+            }.onFailure { err ->
+                _addressState.update {
+                    it.copy(error = err.localizedMessage ?: "Failed to block user")
+                }
+            }
+        }
+    }
+
+    fun unblockUser(targetNxId: String) {
+        viewModelScope.launch {
+            val result = contactRepository.unblockUser(targetNxId)
+            result.onSuccess {
+                _addressState.update { it.copy(successMessage = "User unblocked") }
+                loadBlockedUsers()
+            }.onFailure { err ->
+                _addressState.update {
+                    it.copy(error = err.localizedMessage ?: "Failed to unblock user")
+                }
+            }
+        }
+    }
+
+    fun loadBlockedUsers() {
+        viewModelScope.launch {
+            val result = contactRepository.getBlockedUsers()
+            result.onSuccess { list ->
+                _addressState.update { it.copy(blockedUsers = list) }
+            }
+        }
+    }
+
+    fun syncConnections() {
+        viewModelScope.launch {
+            contactRepository.syncConnectionsFromServer()
+            loadIncomingRequests()
+            loadOutgoingRequests()
         }
     }
 

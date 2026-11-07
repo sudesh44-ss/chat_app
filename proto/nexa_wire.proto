@@ -42,11 +42,22 @@ message NexaWirePacket {
   }
 }
 
+message DoubleRatchetHeader {
+  bytes ratchet_public_key = 1;     // Exactly 32 bytes: sender's current X25519 ratchet public key (DHR)
+  uint32 previous_chain_length = 2; // PN: Number of messages in the previous sending chain
+  uint32 message_index = 3;         // N: Message index in the current sending chain
+  string session_id = 4;            // Canonical UUID identifying the pairwise conversation session
+  int64 one_time_prekey_id = 5;     // Optional: OPK ID if this message initiates a new X3DH session
+  bytes ephemeral_public_key = 6;   // Optional: 32-byte ephemeral public key (EK) for initial X3DH message
+}
+
 message EncryptedMessagePayload {
-  int64 conversation_seq = 1;
+  int64 conversation_seq = 1 [deprecated = true];
   bytes ciphertext = 2;
-  bytes nonce = 3;       // 32-byte Ephemeral Public Key in Double Ratchet
-  bytes auth_tag = 4;    // 16-byte Poly1305 MAC tag
+  bytes nonce = 3 [deprecated = true];       // 32-byte Ephemeral Public Key in Double Ratchet (legacy shim)
+  bytes auth_tag = 4;                        // 16-byte Poly1305 MAC tag
+  DoubleRatchetHeader header = 5;            // Full Signal-compliant Double Ratchet header
+  bytes aead_nonce = 6;                      // Exactly 12 bytes: ChaCha20-Poly1305 AEAD nonce
 }
 
 message DeliveryAckPayload {

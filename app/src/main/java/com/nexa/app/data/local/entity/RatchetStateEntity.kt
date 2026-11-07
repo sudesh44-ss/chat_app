@@ -14,5 +14,8 @@ data class RatchetStateEntity(
     val localDhPrivateKeyHex: String,
     val localDhPublicKeyHex: String,
     val remoteDhPublicKeyHex: String,
+    val previousChainLength: Int = 0,
+    val sessionId: String = "",
+    val remoteDeviceId: String = "",
     val lastUpdatedTimestamp: Long = System.currentTimeMillis()
 )

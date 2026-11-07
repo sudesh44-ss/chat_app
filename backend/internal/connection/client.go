@@ -153,40 +153,86 @@ func (c *ClientSession) VerifyAuthResponse(packet *wire.NexaWirePacket) bool {
 		return false
 	}
 
-	// Verify against registered public key in identityStore when available (anti-spoofing)
-	pubKeyToVerify := resp.PublicKey
-	if c.Hub != nil && c.Hub.identityStore != nil {
-		account, found := c.Hub.identityStore.GetAccountByNxID(c.NxId)
-		if !found {
-			log.Printf("[Session %s] Auth failed: NX-ID %s not found in identity store", c.NxId, c.NxId)
-			c.ChallengeNonce = nil
-			return false
-		}
-
-		expectedPubBytes, err := hex.DecodeString(strings.TrimSpace(account.PublicKeyHex))
-		if err != nil || len(expectedPubBytes) != ed25519.PublicKeySize {
-			log.Printf("[Session %s] Auth failed: invalid registered public key for NX-ID %s in store", c.NxId, c.NxId)
-			c.ChallengeNonce = nil
-			return false
-		}
-
-		if !bytes.Equal(resp.PublicKey, expectedPubBytes) {
-			log.Printf("[Session %s] Auth failed: packet public key does not match registered account public key", c.NxId)
-			c.ChallengeNonce = nil
-			return false
-		}
-		pubKeyToVerify = expectedPubBytes
+	// Fail-closed check: authoritative identity store MUST be available (no arbitrary client key trust)
+	if c.Hub == nil || c.Hub.identityStore == nil {
+		log.Printf("[Session %s] Auth failed: identity store unavailable (fail-closed, untrusted public key)", c.NxId)
+		c.ChallengeNonce = nil
+		return false
 	}
 
-	// Data to sign: challengeNonce + ":" + nxId + ":" + challengeTime
-	dataToSign := append(append(c.ChallengeNonce, []byte(":"+c.NxId+":")...), []byte(fmt.Sprintf("%d", c.ChallengeTime))...)
-	altDataToSign := []byte(fmt.Sprintf("%s:%s:%d", hex.EncodeToString(c.ChallengeNonce), c.NxId, c.ChallengeTime))
+	account, found := c.Hub.identityStore.GetAccountByNxID(c.NxId)
+	if !found {
+		log.Printf("[Session %s] Auth failed: NX-ID %s not found in authoritative identity store", c.NxId, c.NxId)
+		c.ChallengeNonce = nil
+		return false
+	}
 
-	// Invalidate challenge immediately (anti-replay single use)
+	// Device and session authorization validation (Task 5)
+	if c.DeviceId != "" && c.DeviceId != "default" {
+		device, devFound := c.Hub.identityStore.GetDevice(c.DeviceId)
+		if devFound {
+			// 1. Verify device-to-account association
+			if device.NxID != c.NxId {
+				log.Printf("[Session %s] Auth failed: device %s belongs to %s, not %s (impersonation rejected)", c.NxId, c.DeviceId, device.NxID, c.NxId)
+				c.ChallengeNonce = nil
+				return false
+			}
+			// 2. Reject revoked device
+			if device.IsRevoked {
+				log.Printf("[Session %s] Auth failed: device %s is revoked", c.NxId, c.DeviceId)
+				c.ChallengeNonce = nil
+				return false
+			}
+		} else {
+			// If account has registered devices, an unknown device ID must be rejected
+			accountDevices := c.Hub.identityStore.GetDevicesForAccount(c.NxId)
+			if len(accountDevices) > 0 {
+				log.Printf("[Session %s] Auth failed: unknown device %s for registered NX-ID %s", c.NxId, c.DeviceId, c.NxId)
+				c.ChallengeNonce = nil
+				return false
+			}
+		}
+	}
+
+	// Verify against registered public key in authoritative identityStore (anti-spoofing)
+	expectedPubBytes, err := hex.DecodeString(strings.TrimSpace(account.PublicKeyHex))
+	if err != nil || len(expectedPubBytes) != ed25519.PublicKeySize {
+		log.Printf("[Session %s] Auth failed: invalid registered public key for NX-ID %s in store", c.NxId, c.NxId)
+		c.ChallengeNonce = nil
+		return false
+	}
+
+	var pubKeyToVerify ed25519.PublicKey = expectedPubBytes
+	if !bytes.Equal(resp.PublicKey, expectedPubBytes) {
+		matchedDeviceKey := false
+		if c.DeviceId != "" {
+			if dev, ok := c.Hub.identityStore.GetDevice(c.DeviceId); ok && !dev.IsRevoked && dev.NxID == c.NxId {
+				if devPub, devErr := hex.DecodeString(strings.TrimSpace(dev.PublicKeyHex)); devErr == nil && bytes.Equal(resp.PublicKey, devPub) {
+					pubKeyToVerify = devPub
+					matchedDeviceKey = true
+				}
+			}
+		}
+		if !matchedDeviceKey {
+			log.Printf("[Session %s] Auth failed: packet public key does not match registered account or device public key", c.NxId)
+			c.ChallengeNonce = nil
+			return false
+		}
+	}
+
+	// Save challenge nonce for verification and consume challenge immediately (anti-replay single use)
+	nonceCopy := make([]byte, len(c.ChallengeNonce))
+	copy(nonceCopy, c.ChallengeNonce)
 	c.ChallengeNonce = nil
 
+	// Canonical data to sign formats
+	dataToSign := append(append(nonceCopy, []byte(":"+c.NxId+":")...), []byte(fmt.Sprintf("%d", c.ChallengeTime))...)
+	altDataToSign := []byte(fmt.Sprintf("%s:%s:%d", hex.EncodeToString(nonceCopy), c.NxId, c.ChallengeTime))
+	deviceDataToSign := append(append(nonceCopy, []byte(":"+c.NxId+":"+c.DeviceId+":")...), []byte(fmt.Sprintf("%d", c.ChallengeTime))...)
+
 	valid := ed25519.Verify(pubKeyToVerify, dataToSign, resp.Signature) ||
-		ed25519.Verify(pubKeyToVerify, altDataToSign, resp.Signature)
+		ed25519.Verify(pubKeyToVerify, altDataToSign, resp.Signature) ||
+		ed25519.Verify(pubKeyToVerify, deviceDataToSign, resp.Signature)
 
 	if !valid {
 		log.Printf("[Session %s] Auth failed: cryptographic Ed25519 signature verification failed", c.NxId)
@@ -198,13 +244,26 @@ func (c *ClientSession) VerifyAuthResponse(packet *wire.NexaWirePacket) bool {
 		c.AuthTimer.Stop()
 	}
 
+	// Update device last active timestamp if device exists
+	if c.DeviceId != "" {
+		if dev, ok := c.Hub.identityStore.GetDevice(c.DeviceId); ok {
+			dev.LastActiveAt = time.Now().UnixMilli()
+		}
+	}
+
 	return true
 }
 
 func (c *ClientSession) CloseWithUnauthorized(reason string) {
+	if c.Conn == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
 	closeMsg := websocket.FormatCloseMessage(4001, reason)
-	c.Conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(time.Second))
-	c.Conn.Close()
+	_ = c.Conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(time.Second))
+	_ = c.Conn.Close()
 }
 
 // ReadPump pumps messages from the websocket connection to the Hub.

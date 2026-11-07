@@ -165,12 +165,7 @@ class ChatRepositoryImpl(
                         senderNxId = myNxId,
                         recipientNxId = recipientNxId,
                         timestamp = timestamp,
-                        message = EncryptedMessagePayload(
-                            conversationSeq = timestamp,
-                            ciphertext = envelope.ciphertext,
-                            nonce = envelope.ephemeralPublicKey,
-                            authTag = envelope.authTag
-                        )
+                        message = envelope.toProtobufPayload()
                     )
 
                     val encodedBytes = wirePacket.encode()
@@ -212,12 +207,7 @@ class ChatRepositoryImpl(
                         senderNxId = myNxId,
                         recipientNxId = recipientNxId,
                         timestamp = timestamp,
-                        message = EncryptedMessagePayload(
-                            conversationSeq = timestamp,
-                            ciphertext = envelope.ciphertext,
-                            nonce = envelope.ephemeralPublicKey,
-                            authTag = envelope.authTag
-                        )
+                        message = envelope.toProtobufPayload()
                     )
 
                     pendingWirePackets[packetId] = wirePacket
@@ -727,21 +717,7 @@ class ChatRepositoryImpl(
     }
 
     private fun parseEnvelopeFromPayload(payload: EncryptedMessagePayload): EncryptedEnvelope {
-        return if (payload.nonce.size == 32 && payload.authTag.size == 16) {
-            EncryptedEnvelope(
-                version = EncryptedEnvelope.CURRENT_VERSION,
-                ephemeralPublicKey = payload.nonce,
-                authTag = payload.authTag,
-                ciphertext = payload.ciphertext
-            )
-        } else {
-            EncryptedEnvelope.deserialize(payload.ciphertext) ?: EncryptedEnvelope(
-                version = EncryptedEnvelope.CURRENT_VERSION,
-                ephemeralPublicKey = payload.nonce,
-                authTag = payload.authTag,
-                ciphertext = payload.ciphertext
-            )
-        }
+        return EncryptedEnvelope.fromProtobufPayload(payload)
     }
 
     private fun deriveConversationId(id1: String, id2: String): String {

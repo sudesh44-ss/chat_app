@@ -16,9 +16,11 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"nexa/wire/internal/identity"
 )
 
@@ -75,16 +77,22 @@ type ProfileUpdateRequest struct {
 	IsDiscoverableByPhone *bool  `json:"is_discoverable_by_phone,omitempty"`
 }
 
+// SessionRevoker defines the contract for actively closing WebSocket sessions upon logout or device revocation.
+type SessionRevoker interface {
+	RevokeDeviceSession(nxId string, deviceId string, reason string) error
+}
+
 type AuthHandler struct {
-	store             *identity.Store
+	store             identity.IdentityRepository
 	otpService        *OtpService
 	reverseSmsService *ReverseSmsService
 	googleVerifier    *GoogleVerifier
 	supabaseVerifier  *SupabaseVerifier
 	challengeStore    ChallengeStore
+	revoker           SessionRevoker
 }
 
-func NewAuthHandler(store *identity.Store, otpService *OtpService, googleVerifier *GoogleVerifier) *AuthHandler {
+func NewAuthHandler(store identity.IdentityRepository, otpService *OtpService, googleVerifier *GoogleVerifier) *AuthHandler {
 	return &AuthHandler{
 		store:             store,
 		otpService:        otpService,
@@ -99,6 +107,16 @@ func (h *AuthHandler) SetChallengeStore(cs ChallengeStore) {
 	if cs != nil {
 		h.challengeStore = cs
 	}
+}
+
+func (h *AuthHandler) SetRedisClient(client *redis.Client) {
+	if h.reverseSmsService != nil {
+		h.reverseSmsService.SetRedisClient(client)
+	}
+}
+
+func (h *AuthHandler) SetSessionRevoker(revoker SessionRevoker) {
+	h.revoker = revoker
 }
 
 func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
@@ -411,15 +429,28 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Verify Signature if provided (Cryptographic proof of possession)
+	// 3. Verify Signature (Cryptographic proof of possession)
 	if req.SignatureHex != "" {
-		sigBytes, err := hex.DecodeString(req.SignatureHex)
-		if err == nil && len(sigBytes) == 64 {
-			dataToVerify := []byte(fmt.Sprintf("%s:%s", req.PublicKeyHex, req.DeviceID))
-			if !ed25519.Verify(pubBytes, dataToVerify, sigBytes) {
-				http.Error(w, "Cryptographic proof of possession signature invalid", http.StatusUnauthorized)
-				return
-			}
+		sigBytes, err := hex.DecodeString(strings.TrimSpace(req.SignatureHex))
+		if err != nil || len(sigBytes) != ed25519.SignatureSize {
+			http.Error(w, "Cryptographic proof of possession signature invalid format", http.StatusBadRequest)
+			return
+		}
+		boundData := []byte(fmt.Sprintf("NEXA_REGISTER:%s:%s:%s", req.AuthProofTicket, req.PublicKeyHex, req.DeviceID))
+		legacyData := []byte(fmt.Sprintf("%s:%s", req.PublicKeyHex, req.DeviceID))
+
+		if !ed25519.Verify(pubBytes, boundData, sigBytes) && !ed25519.Verify(pubBytes, legacyData, sigBytes) {
+			http.Error(w, "Cryptographic proof of possession signature invalid", http.StatusUnauthorized)
+			return
+		}
+	} else {
+		env := strings.ToLower(os.Getenv("APP_ENV"))
+		if env == "" {
+			env = strings.ToLower(os.Getenv("ENV"))
+		}
+		if env == "production" {
+			http.Error(w, "Cryptographic proof of possession signature (signature_hex) is mandatory in production", http.StatusBadRequest)
+			return
 		}
 	}
 
@@ -712,6 +743,11 @@ func (h *AuthHandler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	sessionToken := strings.TrimPrefix(authHeader, "Bearer ")
 	if sessionToken != "" {
+		if session, ok := h.store.GetSession(sessionToken); ok && session != nil {
+			if h.revoker != nil {
+				_ = h.revoker.RevokeDeviceSession(session.NxID, session.DeviceID, "Session logged out")
+			}
+		}
 		h.store.RevokeSession(sessionToken)
 	}
 
@@ -759,6 +795,10 @@ func (h *AuthHandler) handleDeviceAction(w http.ResponseWriter, r *http.Request)
 		if err := h.store.RevokeDevice(deviceID); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
+		}
+
+		if h.revoker != nil {
+			_ = h.revoker.RevokeDeviceSession(targetDev.NxID, deviceID, "Device revoked by user")
 		}
 
 		w.Header().Set("Content-Type", "application/json")

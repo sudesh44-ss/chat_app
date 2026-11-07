@@ -274,7 +274,7 @@ class AuthRepositoryImpl(
         bio: String?
     ): Result<UserProfile> = withContext(Dispatchers.IO) {
         try {
-            val identityKeys = keystoreManager.generateIdentityKeyPair()
+            val identityKeys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
 
             val response = apiService.verifyOtpAndRegister(
                 VerifyOtpRequest(
