@@ -32,6 +32,8 @@ interface AuthApiService {
     suspend fun updateFcmToken(sessionToken: String, deviceId: String, fcmToken: String): Result<Boolean>
     suspend fun revokeDevice(sessionToken: String, deviceId: String): Result<Boolean>
     suspend fun lookupContacts(sessionToken: String, phoneNumbers: List<String>): Result<List<com.nexa.app.data.remote.dto.ContactMatchDto>>
+    suspend fun fetchProfile(sessionToken: String): Result<com.nexa.app.data.remote.dto.RemoteUserProfileDto>
+    suspend fun updateProfile(sessionToken: String, name: String? = null, bio: String? = null, gender: String? = null, age: Int? = null, avatarUrl: String? = null): Result<Boolean>
 }
 
 /**
@@ -595,12 +597,19 @@ class AuthApiServiceImpl(
 
             val result = com.nexa.app.data.remote.dto.InitiateReverseVerifyResponseDto(
                 status = respJson.optString("status", "PENDING"),
-                nonce = respJson.getString("nonce"),
+                nonce = respJson.optString("nonce", ""),
                 inboundReceiverNumber = inbound,
                 inboundNumber = inbound,
                 smsPayload = respJson.optString("sms_payload", "NX-VERIFY " + respJson.optString("nonce")),
                 expiresInSeconds = respJson.optInt("expires_in_seconds", 90),
-                sessionId = sessionId
+                sessionId = sessionId,
+                verificationMethod = respJson.optString("verification_method").takeIf { it.isNotEmpty() },
+                nxId = respJson.optString("nx_id").takeIf { it.isNotEmpty() },
+                sessionAuthToken = respJson.optString("session_auth_token").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("session_token").takeIf { it.isNotEmpty() },
+                sessionToken = respJson.optString("session_token").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("session_auth_token").takeIf { it.isNotEmpty() },
+                verifiedAt = respJson.optLong("verified_at").takeIf { it > 0 }
             )
             Result.success(result)
         } catch (e: Exception) {
@@ -691,6 +700,99 @@ class AuthApiServiceImpl(
             )
             Result.success(dto)
         } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun fetchProfile(
+        sessionToken: String
+    ): Result<com.nexa.app.data.remote.dto.RemoteUserProfileDto> = withContext(Dispatchers.IO) {
+        if (isTestMode) {
+            return@withContext Result.success(
+                com.nexa.app.data.remote.dto.RemoteUserProfileDto(
+                    nxId = "NX-TESTUSER",
+                    profileName = "Demo User",
+                    email = "demo@nexa.app"
+                )
+            )
+        }
+
+        try {
+            val url = "$baseUrl/api/v1/profile"
+            val req = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $sessionToken")
+                .get()
+                .build()
+
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+
+            if (!resp.isSuccessful) {
+                return@withContext Result.failure(IOException("Profile fetch failed (HTTP ${resp.code}): $body"))
+            }
+
+            val json = JSONObject(body)
+            val dto = com.nexa.app.data.remote.dto.RemoteUserProfileDto(
+                id = json.optString("id").takeIf { it.isNotEmpty() },
+                nxId = json.getString("nx_id"),
+                publicKeyHex = json.optString("public_key_hex").takeIf { it.isNotEmpty() },
+                phoneNumber = json.optString("phone_number").takeIf { it.isNotEmpty() },
+                phoneVerified = json.optBoolean("phone_verified", false),
+                isDiscoverableByPhone = json.optBoolean("is_discoverable_by_phone", true),
+                googleId = json.optString("google_id").takeIf { it.isNotEmpty() },
+                email = json.optString("email").takeIf { it.isNotEmpty() },
+                profileName = json.optString("profile_name").takeIf { it.isNotEmpty() },
+                avatarUrl = json.optString("avatar_url").takeIf { it.isNotEmpty() },
+                bio = json.optString("bio").takeIf { it.isNotEmpty() },
+                gender = json.optString("gender").takeIf { it.isNotEmpty() },
+                age = json.optInt("age").takeIf { it > 0 },
+                createdAt = json.optLong("created_at", 0L),
+                updatedAt = json.optLong("updated_at", 0L)
+            )
+            Result.success(dto)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to fetch remote profile from backend: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun updateProfile(
+        sessionToken: String,
+        name: String?,
+        bio: String?,
+        gender: String?,
+        age: Int?,
+        avatarUrl: String?
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        if (isTestMode) return@withContext Result.success(true)
+
+        try {
+            val url = "$baseUrl/api/v1/profile"
+            val json = JSONObject().apply {
+                if (!name.isNullOrBlank()) put("profile_name", name)
+                if (!bio.isNullOrBlank()) put("bio", bio)
+                if (!gender.isNullOrBlank()) put("gender", gender)
+                if (age != null) put("age", age)
+                if (!avatarUrl.isNullOrBlank()) put("avatar_url", avatarUrl)
+            }
+
+            val req = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $sessionToken")
+                .put(json.toString().toRequestBody(JSON_MEDIA))
+                .build()
+
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+
+            if (!resp.isSuccessful) {
+                return@withContext Result.failure(IOException("Profile update failed (HTTP ${resp.code}): $body"))
+            }
+
+            Result.success(true)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update profile on backend: ${e.message}", e)
             Result.failure(e)
         }
     }

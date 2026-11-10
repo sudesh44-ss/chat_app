@@ -182,3 +182,148 @@ func TestNexaWirePacket_Signaling_EncodeDecode(t *testing.T) {
 	}
 }
 
+func TestNexaWirePacket_RegisterRoutingTokens_EncodeDecode(t *testing.T) {
+	orig := &NexaWirePacket{
+		PacketId:      "reg_tokens_1",
+		Type:          PacketType_PACKET_REGISTER_ROUTING_TOKENS,
+		SenderNxId:    "NX-ALICE",
+		RecipientNxId: "SERVER",
+		Timestamp:     1731568200000,
+		RoutingTokens: &RoutingTokenRegistrationPayload{
+			Tokens: []string{
+				"4d434cacd96a31d95db3d8305e5ac679",
+				"a355822d9171cea964df4d1564d4ebea",
+			},
+		},
+	}
+
+	encoded, err := orig.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Type != PacketType_PACKET_REGISTER_ROUTING_TOKENS {
+		t.Errorf("Type mismatch: got %v, want %v", decoded.Type, PacketType_PACKET_REGISTER_ROUTING_TOKENS)
+	}
+	if decoded.RoutingTokens == nil {
+		t.Fatal("Decoded RoutingTokens is nil")
+	}
+	if len(decoded.RoutingTokens.Tokens) != 2 {
+		t.Fatalf("Expected 2 tokens, got %d", len(decoded.RoutingTokens.Tokens))
+	}
+	if decoded.RoutingTokens.Tokens[0] != "4d434cacd96a31d95db3d8305e5ac679" {
+		t.Errorf("Token 0 mismatch: got %s", decoded.RoutingTokens.Tokens[0])
+	}
+	if decoded.RoutingTokens.Tokens[1] != "a355822d9171cea964df4d1564d4ebea" {
+		t.Errorf("Token 1 mismatch: got %s", decoded.RoutingTokens.Tokens[1])
+	}
+}
+
+func TestNexaWirePacket_DeliveryAck_Extended_EncodeDecode(t *testing.T) {
+	sig := bytes.Repeat([]byte{0xEE}, 64)
+	orig := &NexaWirePacket{
+		PacketId:      "ack_pkt_100",
+		Type:          PacketType_PACKET_ACK,
+		SenderNxId:    "NX-BOB",
+		RecipientNxId: "NX-ALICE",
+		Timestamp:     1729483000000,
+		Ack: &DeliveryAckPayload{
+			OriginalPacketId: "msg_original_001",
+			Status:           AckStatus_ACK_DEVICE_DELIVERED,
+			RecipientNxId:    "NX-BOB",
+			DeviceId:         "DEV-BOB-PIXEL-9",
+			Timestamp:        1729483000000,
+			Signature:        sig,
+		},
+	}
+
+	encoded, err := orig.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Type != PacketType_PACKET_ACK {
+		t.Errorf("Type mismatch: got %v, want %v", decoded.Type, PacketType_PACKET_ACK)
+	}
+	if decoded.Ack == nil {
+		t.Fatal("Ack payload is nil")
+	}
+	if decoded.Ack.OriginalPacketId != "msg_original_001" {
+		t.Errorf("OriginalPacketId mismatch: got %s", decoded.Ack.OriginalPacketId)
+	}
+	if decoded.Ack.Status != AckStatus_ACK_DEVICE_DELIVERED {
+		t.Errorf("Status mismatch: got %v", decoded.Ack.Status)
+	}
+	if decoded.Ack.RecipientNxId != "NX-BOB" {
+		t.Errorf("RecipientNxId mismatch: got %s", decoded.Ack.RecipientNxId)
+	}
+	if decoded.Ack.DeviceId != "DEV-BOB-PIXEL-9" {
+		t.Errorf("DeviceId mismatch: got %s", decoded.Ack.DeviceId)
+	}
+	if decoded.Ack.Timestamp != 1729483000000 {
+		t.Errorf("Timestamp mismatch: got %d", decoded.Ack.Timestamp)
+	}
+	if !bytes.Equal(decoded.Ack.Signature, sig) {
+		t.Errorf("Signature mismatch")
+	}
+}
+
+func TestNexaWirePacket_CustodyAck_EncodeDecode(t *testing.T) {
+	sig := bytes.Repeat([]byte{0xCC}, 64)
+	orig := &NexaWirePacket{
+		PacketId:      "custody_ack_001",
+		Type:          PacketType_PACKET_CUSTODY_ACK,
+		SenderNxId:    "NX-RELAY-NODE-A",
+		RecipientNxId: "NX-ALICE",
+		Timestamp:     1729483500000,
+		CustodyAck: &CustodyAckPayload{
+			OriginalPacketId: "env_dtn_deadbeef",
+			CustodianNxId:    "NX-RELAY-NODE-A",
+			Status:           CustodyStatus_CUSTODY_ACCEPTED,
+			Timestamp:        1729483500000,
+			Signature:        sig,
+		},
+	}
+
+	encoded, err := orig.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Type != PacketType_PACKET_CUSTODY_ACK {
+		t.Errorf("Type mismatch: got %v, want %v", decoded.Type, PacketType_PACKET_CUSTODY_ACK)
+	}
+	if decoded.CustodyAck == nil {
+		t.Fatal("CustodyAck payload is nil")
+	}
+	if decoded.CustodyAck.OriginalPacketId != "env_dtn_deadbeef" {
+		t.Errorf("OriginalPacketId mismatch: got %s", decoded.CustodyAck.OriginalPacketId)
+	}
+	if decoded.CustodyAck.CustodianNxId != "NX-RELAY-NODE-A" {
+		t.Errorf("CustodianNxId mismatch: got %s", decoded.CustodyAck.CustodianNxId)
+	}
+	if decoded.CustodyAck.Status != CustodyStatus_CUSTODY_ACCEPTED {
+		t.Errorf("Status mismatch: got %v", decoded.CustodyAck.Status)
+	}
+	if decoded.CustodyAck.Timestamp != 1729483500000 {
+		t.Errorf("Timestamp mismatch: got %d", decoded.CustodyAck.Timestamp)
+	}
+	if !bytes.Equal(decoded.CustodyAck.Signature, sig) {
+		t.Errorf("Signature mismatch")
+	}
+}

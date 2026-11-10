@@ -684,4 +684,3 @@ func TestWireMessageRoutingAuthorization(t *testing.T) {
 		// Passed: dropped
 	}
 }
-

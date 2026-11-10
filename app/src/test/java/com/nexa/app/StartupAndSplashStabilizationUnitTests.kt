@@ -80,8 +80,19 @@ class StartupAndSplashStabilizationUnitTests {
             avatarUrl: String?,
             age: Int?,
             gender: String?,
-            bio: String?
+            bio: String?,
+            email: String?
         ): Result<UserProfile> =
+            Result.failure(NotImplementedError())
+        override suspend fun fetchRemoteProfile(): Result<UserProfile> =
+            Result.failure(NotImplementedError())
+        override suspend fun updateRemoteProfile(
+            name: String?,
+            bio: String?,
+            gender: String?,
+            age: Int?,
+            avatarUrl: String?
+        ): Result<Boolean> =
             Result.failure(NotImplementedError())
         override suspend fun resolveUser(target: String): Result<com.nexa.app.data.remote.dto.UserResolveDto> =
             Result.failure(NotImplementedError())

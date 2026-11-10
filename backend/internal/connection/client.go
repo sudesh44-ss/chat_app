@@ -272,9 +272,7 @@ func (c *ClientSession) ReadPump() {
 		if c.AuthTimer != nil {
 			c.AuthTimer.Stop()
 		}
-		if c.Authenticated {
-			c.Hub.Unregister(c)
-		}
+		c.Hub.Unregister(c)
 		c.Conn.Close()
 	}()
 
@@ -344,6 +342,14 @@ func (c *ClientSession) ReadPump() {
 			log.Printf("[Session %s] Security violation: received packet type %v before authentication. Dropping connection.", c.NxId, packet.Type)
 			c.CloseWithUnauthorized("Authentication required")
 			break
+		}
+
+		// Handle Authenticated Pairwise Routing Token Registration (Phase C)
+		if packet.Type == wire.PacketType_PACKET_REGISTER_ROUTING_TOKENS {
+			if packet.RoutingTokens != nil && len(packet.RoutingTokens.Tokens) > 0 {
+				c.Hub.RegisterRoutingTokens(packet.RoutingTokens.Tokens, c)
+			}
+			continue
 		}
 
 		// Route authenticated packet

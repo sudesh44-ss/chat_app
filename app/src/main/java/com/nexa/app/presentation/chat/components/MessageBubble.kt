@@ -213,6 +213,7 @@ private fun StatusIndicator(
 ) {
     val modifier = if (onClick != null) Modifier.clickable { onClick() } else Modifier
     when (status) {
+        MessageStatus.CREATED,
         MessageStatus.PENDING -> {
             Icon(
                 imageVector = Icons.Default.Schedule,
@@ -221,10 +222,19 @@ private fun StatusIndicator(
                 modifier = modifier.size(13.dp)
             )
         }
+        MessageStatus.QUEUED,
         MessageStatus.SENT -> {
             Icon(
                 imageVector = Icons.Default.Check,
-                contentDescription = "Sent to Carrier/Mesh",
+                contentDescription = "Accepted by Cloud Queue",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = modifier.size(13.dp)
+            )
+        }
+        MessageStatus.RELAYED -> {
+            Icon(
+                imageVector = Icons.Default.Check,
+                contentDescription = "Relayed via Mesh / Custody Node",
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = modifier.size(13.dp)
             )
@@ -245,10 +255,11 @@ private fun StatusIndicator(
                 modifier = modifier.size(14.dp)
             )
         }
-        MessageStatus.FAILED -> {
+        MessageStatus.FAILED,
+        MessageStatus.EXPIRED -> {
             Icon(
                 imageVector = Icons.Default.ErrorOutline,
-                contentDescription = "Failed Delivery",
+                contentDescription = if (status == MessageStatus.EXPIRED) "Message Expired" else "Failed Delivery",
                 tint = MaterialTheme.colorScheme.error,
                 modifier = modifier.size(13.dp)
             )

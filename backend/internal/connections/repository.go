@@ -65,4 +65,19 @@ type ConnectionRepository interface {
 
 	// IsConnected checks if an active bilateral connection exists between two users.
 	IsConnected(ctx context.Context, userA, userB string) (bool, error)
+
+	// SyncQrHandshake creates or confirms an instant mutual connection established via QR scan.
+	SyncQrHandshake(ctx context.Context, scannerNxID, scannedNxID string) (*Connection, error)
+
+	// SetPhoneVisibility creates or updates an explicit directional phone-sharing grant.
+	SetPhoneVisibility(ctx context.Context, granterNxID, granteeNxID string, isActive bool) error
+
+	// HasPhoneVisibility returns true if granterNxID has granted phone visibility to granteeNxID.
+	HasPhoneVisibility(ctx context.Context, granterNxID, granteeNxID string) (bool, error)
+
+	// ListPhoneVisibilityGrants returns all target NX-IDs to which user has granted phone visibility.
+	ListPhoneVisibilityGrants(ctx context.Context, granterNxID string) ([]string, error)
+
+	// GetMutualConnections returns mutual connections shared between userA and userB.
+	GetMutualConnections(ctx context.Context, userA, userB string, limit, offset int) ([]*PublicProfile, int, error)
 }

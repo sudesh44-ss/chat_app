@@ -13,6 +13,9 @@ import com.nexa.app.data.local.dao.DtnEnvelopeDao
 import com.nexa.app.data.local.dao.FileTransferDao
 import com.nexa.app.data.local.dao.MeshOutboxDao
 import com.nexa.app.data.local.dao.MessageDao
+import com.nexa.app.data.local.dao.MessageDedupDao
+import com.nexa.app.data.local.dao.MessageTransportDao
+import com.nexa.app.data.local.dao.PeerSyncCursorDao
 import com.nexa.app.data.local.dao.QuarantineDao
 import com.nexa.app.data.local.dao.RatchetDao
 import com.nexa.app.data.local.dao.SwarmCacheDao
@@ -24,7 +27,10 @@ import com.nexa.app.data.local.entity.DeviceSyncEntity
 import com.nexa.app.data.local.entity.DtnEnvelopeEntity
 import com.nexa.app.data.local.entity.FileMetadataEntity
 import com.nexa.app.data.local.entity.MeshEnvelopeEntity
+import com.nexa.app.data.local.entity.MessageDedupEntity
 import com.nexa.app.data.local.entity.MessageEntity
+import com.nexa.app.data.local.entity.MessageTransportEntity
+import com.nexa.app.data.local.entity.PeerSyncCursorEntity
 import com.nexa.app.data.local.entity.QuarantineEntity
 import com.nexa.app.data.local.entity.RatchetStateEntity
 import com.nexa.app.data.local.entity.SkippedKeyEntity
@@ -47,15 +53,21 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         QuarantineEntity::class,
         TransferSessionEntity::class,
         MeshEnvelopeEntity::class,
-        DeviceSyncEntity::class
+        DeviceSyncEntity::class,
+        MessageDedupEntity::class,
+        MessageTransportEntity::class,
+        PeerSyncCursorEntity::class
     ],
-    version = 17,
+    version = 20,
     exportSchema = false
 )
 abstract class NexaDatabase : RoomDatabase() {
 
     abstract fun userDao(): UserDao
     abstract fun messageDao(): MessageDao
+    abstract fun messageDedupDao(): MessageDedupDao
+    abstract fun messageTransportDao(): MessageTransportDao
+    abstract fun peerSyncCursorDao(): PeerSyncCursorDao
     abstract fun chatDao(): ChatDao
     abstract fun dtnEnvelopeDao(): DtnEnvelopeDao
     abstract fun fileTransferDao(): FileTransferDao
@@ -344,6 +356,92 @@ abstract class NexaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_17_18 = object : Migration(17, 18) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfNotExists(db, "user_profile", "email", "TEXT DEFAULT NULL")
+                addColumnIfNotExists(db, "user_profile", "avatarUrl", "TEXT DEFAULT NULL")
+            }
+        }
+
+        val MIGRATION_18_19 = object : Migration(18, 19) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `message_dedup_index` (
+                        `packetId` TEXT NOT NULL PRIMARY KEY,
+                        `senderNxId` TEXT NOT NULL,
+                        `recipientNxId` TEXT NOT NULL,
+                        `conversationId` TEXT NOT NULL,
+                        `payloadHashHex` TEXT NOT NULL,
+                        `firstObservedAt` INTEGER NOT NULL,
+                        `firstTransport` TEXT NOT NULL,
+                        `status` TEXT NOT NULL DEFAULT 'PROCESSED'
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_dedup_index_conversationId` ON `message_dedup_index` (`conversationId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_dedup_index_senderNxId` ON `message_dedup_index` (`senderNxId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_dedup_index_firstObservedAt` ON `message_dedup_index` (`firstObservedAt`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `message_transport_observations` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `packetId` TEXT NOT NULL,
+                        `transportMedium` TEXT NOT NULL,
+                        `observedAt` INTEGER NOT NULL,
+                        `sourcePeerId` TEXT,
+                        FOREIGN KEY (`packetId`) REFERENCES `message_dedup_index`(`packetId`) ON DELETE CASCADE
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_message_transport_observations_packetId_transportMedium` ON `message_transport_observations` (`packetId`, `transportMedium`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_transport_observations_packetId` ON `message_transport_observations` (`packetId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_transport_observations_observedAt` ON `message_transport_observations` (`observedAt`)")
+
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `peer_sync_cursors` (
+                        `conversationId` TEXT NOT NULL PRIMARY KEY,
+                        `peerNxId` TEXT NOT NULL,
+                        `lastSyncTimestamp` INTEGER NOT NULL DEFAULT 0,
+                        `lastSyncSequence` INTEGER NOT NULL DEFAULT 0,
+                        `lastSyncedPacketId` TEXT DEFAULT NULL,
+                        `updatedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_peer_sync_cursors_peerNxId` ON `peer_sync_cursors` (`peerNxId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_peer_sync_cursors_lastSyncTimestamp` ON `peer_sync_cursors` (`lastSyncTimestamp`)")
+
+                // Backfill from existing messages
+                try {
+                    db.execSQL(
+                        """
+                        INSERT OR IGNORE INTO `message_dedup_index` (`packetId`, `senderNxId`, `recipientNxId`, `conversationId`, `payloadHashHex`, `firstObservedAt`, `firstTransport`, `status`)
+                        SELECT `packetId`, `senderNxId`, `recipientNxId`, `conversationId`, '', `timestamp`, `transportType`, 'PROCESSED' FROM `messages`
+                        """.trimIndent()
+                    )
+                    db.execSQL(
+                        """
+                        INSERT OR IGNORE INTO `message_transport_observations` (`packetId`, `transportMedium`, `observedAt`)
+                        SELECT `packetId`, `transportType`, `timestamp` FROM `messages`
+                        """.trimIndent()
+                    )
+                } catch (ignored: Exception) {}
+            }
+        }
+
+        val MIGRATION_19_20 = object : Migration(19, 20) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `dtn_envelopes` ADD COLUMN `custodyState` TEXT NOT NULL DEFAULT 'CUSTODY_ACCEPTED'")
+                db.execSQL("ALTER TABLE `dtn_envelopes` ADD COLUMN `custodianNodeId` TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE `dtn_envelopes` ADD COLUMN `nextHopNodeId` TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE `dtn_envelopes` ADD COLUMN `transferredAtTimestamp` INTEGER DEFAULT NULL")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_dtn_envelopes_custodyState` ON `dtn_envelopes` (`custodyState`)")
+            }
+        }
+
         private fun addColumnIfNotExists(db: SupportSQLiteDatabase, table: String, column: String, typeAndConstraints: String) {
             var exists = false
             try {
@@ -379,13 +477,41 @@ abstract class NexaDatabase : RoomDatabase() {
         fun closeAndResetInstance() {
             synchronized(this) {
                 try {
+                    if (INSTANCE?.isOpen == true) {
+                        try {
+                            INSTANCE?.getRawDatabase()?.execSQL("PRAGMA wal_checkpoint(FULL)")
+                        } catch (ignored: Exception) {}
+                    }
                     INSTANCE?.close()
                 } catch (ignored: Exception) {}
                 INSTANCE = null
             }
         }
 
+        private fun checkAndRecoverFromRollbackJournal(context: Context) {
+            try {
+                val dbFile = context.getDatabasePath(DATABASE_NAME)
+                val parent = dbFile.parentFile ?: return
+                val rollbackFile = java.io.File(parent, "$DATABASE_NAME.rollback_bak")
+                val rollbackWal = java.io.File(parent, "$DATABASE_NAME-wal.rollback_bak")
+                if (rollbackFile.exists()) {
+                    // If live db is missing or smaller than SQLite header, recover from journal
+                    if (!dbFile.exists() || dbFile.length() < 4096L) {
+                        android.util.Log.w("NexaDatabase", "Interrupted restore detected! Automatically recovering live database from rollback journal...")
+                        rollbackFile.copyTo(dbFile, overwrite = true)
+                        if (rollbackWal.exists()) {
+                            val walFile = java.io.File(dbFile.path + "-wal")
+                            rollbackWal.copyTo(walFile, overwrite = true)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("NexaDatabase", "Failed to check rollback journal during startup", e)
+            }
+        }
+
         private fun buildDatabase(context: Context, passphrase: ByteArray): NexaDatabase {
+            checkAndRecoverFromRollbackJournal(context)
             try {
                 System.loadLibrary("sqlcipher")
             } catch (ignored: Throwable) {}
@@ -415,7 +541,10 @@ abstract class NexaDatabase : RoomDatabase() {
                     MIGRATION_13_14,
                     MIGRATION_14_15,
                     MIGRATION_15_16,
-                    MIGRATION_16_17
+                    MIGRATION_16_17,
+                    MIGRATION_17_18,
+                    MIGRATION_18_19,
+                    MIGRATION_19_20
                 )
                 .build()
         }

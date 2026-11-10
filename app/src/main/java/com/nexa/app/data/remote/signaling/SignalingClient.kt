@@ -32,12 +32,17 @@ class SignalingClient(
     private var activeWebSocket: WebSocket? = null
     private var myNxId: String? = null
 
-    fun connect(nxId: String) {
+    fun connect(nxId: String, sessionToken: String? = null) {
         myNxId = nxId
         disconnect()
 
-        val fullUrl = "$serverUrl/ws/signaling?nx_id=$nxId"
-        val request = Request.Builder().url(fullUrl).build()
+        val baseUrl = "$serverUrl/ws/signaling?nx_id=$nxId"
+        val fullUrl = if (!sessionToken.isNullOrBlank()) "$baseUrl&token=$sessionToken" else baseUrl
+        val requestBuilder = Request.Builder().url(fullUrl)
+        if (!sessionToken.isNullOrBlank()) {
+            requestBuilder.addHeader("Authorization", "Bearer $sessionToken")
+        }
+        val request = requestBuilder.build()
 
         activeWebSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {

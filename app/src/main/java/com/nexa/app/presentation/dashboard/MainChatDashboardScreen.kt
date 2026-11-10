@@ -97,6 +97,7 @@ fun MainChatDashboardScreen(
     onOpenSearch: () -> Unit = {},
     onOpenQr: () -> Unit = {},
     onOpenContacts: () -> Unit = {},
+    onOpenPendingRequests: () -> Unit = {},
     onOpenNotificationSettings: () -> Unit = {},
     onOpenProfile: () -> Unit = onOpenQr,
     onLogout: () -> Unit
@@ -414,7 +415,7 @@ fun MainChatDashboardScreen(
                 },
                 onNavigateConnectionRequests = {
                     isPlusMenuOpen = false
-                    onOpenContacts()
+                    onOpenPendingRequests()
                 },
                 onNavigateNewConversation = {
                     isPlusMenuOpen = false

@@ -263,9 +263,12 @@ class NearbyMeshManager(
             Log.i(TAG, "FIFO Storage quota exceeded ($currentCount items). Pruned $pruned oldest envelopes")
         }
 
-        // Decrement hop limit for forward custody
-        val decrementedHop = (envelope.hopLimit - 1).toByte()
-        val decrementedEnvelope = envelope.copy(hopLimit = decrementedHop)
+        // Decrement hop limit for forward custody using NXDT mutable metadata update
+        val decrementedEnvelope = envelope.withDecrementedHop(nowSec)
+        if (decrementedEnvelope == null) {
+            Log.d(TAG, "Dropped envelope ${envelope.envelopeIdHex}: Hop limit reached zero or exceeded bounds")
+            return
+        }
 
         val entity = DtnEnvelopeEntity(
             envelopeIdHex = decrementedEnvelope.envelopeIdHex,
@@ -278,7 +281,7 @@ class NearbyMeshManager(
         envelopeDao.insertEnvelope(entity)
         Log.i(
             TAG,
-            "Stored DTN envelope [${decrementedEnvelope.envelopeIdHex.take(8)}...] with blind token [${decrementedEnvelope.blindTokenHex.take(8)}...], remaining hops: $decrementedHop"
+            "Stored DTN envelope [${decrementedEnvelope.envelopeIdHex.take(8)}...] with blind token [${decrementedEnvelope.blindTokenHex.take(8)}...], remaining hops: ${decrementedEnvelope.hopLimit}"
         )
 
         // Trigger local recipient callback if registered

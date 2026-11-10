@@ -391,3 +391,287 @@ func TestCancelRequestBySender(t *testing.T) {
 		t.Fatalf("expected 200 OK for sender cancellation, got %d", wAliceCancel.Code)
 	}
 }
+
+func TestCanonicalPairOrdering(t *testing.T) {
+	uA, uB := CanonicalPair("NX-ZZZZ9999", "NX-AAAA1111")
+	if uA != "NX-AAAA1111" || uB != "NX-ZZZZ9999" {
+		t.Fatalf("expected canonical pair NX-AAAA1111, NX-ZZZZ9999, got %s, %s", uA, uB)
+	}
+
+	uA2, uB2 := CanonicalPair("NX-AAAA1111", "NX-ZZZZ9999")
+	if uA2 != "NX-AAAA1111" || uB2 != "NX-ZZZZ9999" {
+		t.Fatalf("expected canonical pair NX-AAAA1111, NX-ZZZZ9999, got %s, %s", uA2, uB2)
+	}
+}
+
+func TestQrConnectionSync(t *testing.T) {
+	store, repo, handler, hub := setupTestEnvironment(t)
+	_, tokenAlice := createTestUser(t, store, "NX-29AB731Q", "Alice")
+	_, _ = createTestUser(t, store, "NX-A7K92B4M", "Bob")
+
+	body, _ := json.Marshal(map[string]string{
+		"scanner_nx_id": "NX-29AB731Q",
+		"scanned_nx_id": "NX-A7K92B4M",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/contacts/sync-qr", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tokenAlice)
+	w := httptest.NewRecorder()
+	handler.handleSyncQr(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var res struct {
+		Status     string      `json:"status"`
+		Connection *Connection `json:"connection"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if res.Status != "SUCCESS" || res.Connection == nil {
+		t.Fatalf("expected SUCCESS and valid connection, got %+v", res)
+	}
+	if res.Connection.Source != ConnectionSourceQrScan {
+		t.Fatalf("expected source %s, got %s", ConnectionSourceQrScan, res.Connection.Source)
+	}
+
+	// Verify bilateral connection is active
+	connected, err := repo.IsConnected(context.Background(), "NX-29AB731Q", "NX-A7K92B4M")
+	if err != nil || !connected {
+		t.Fatalf("expected users to be connected, err: %v", err)
+	}
+
+	// Verify broadcast event sent
+	if len(hub.dispatched) < 2 {
+		t.Fatalf("expected 2 broadcast events for QR connect, got %d", len(hub.dispatched))
+	}
+}
+
+func TestQrConnectionSelfScan(t *testing.T) {
+	store, _, handler, _ := setupTestEnvironment(t)
+	_, tokenAlice := createTestUser(t, store, "NX-29AB731Q", "Alice")
+
+	body, _ := json.Marshal(map[string]string{
+		"scanner_nx_id": "NX-29AB731Q",
+		"scanned_nx_id": "NX-29AB731Q",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/contacts/sync-qr", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tokenAlice)
+	w := httptest.NewRecorder()
+	handler.handleSyncQr(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for self scan, got %d", w.Code)
+	}
+}
+
+func TestQrConnectionBlockedUser(t *testing.T) {
+	store, repo, handler, _ := setupTestEnvironment(t)
+	_, _ = createTestUser(t, store, "NX-29AB731Q", "Alice")
+	_, tokenBob := createTestUser(t, store, "NX-A7K92B4M", "Bob")
+
+	// Alice blocks Bob
+	_ = repo.BlockUser(context.Background(), "NX-29AB731Q", "NX-A7K92B4M")
+
+	body, _ := json.Marshal(map[string]string{
+		"scanner_nx_id": "NX-A7K92B4M",
+		"scanned_nx_id": "NX-29AB731Q",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/contacts/sync-qr", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+tokenBob)
+	w := httptest.NewRecorder()
+	handler.handleSyncQr(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden when connecting with blocker, got %d", w.Code)
+	}
+}
+
+func TestPhoneVisibilityGrants(t *testing.T) {
+	store, _, handler, _ := setupTestEnvironment(t)
+	_, tokenAlice := createTestUser(t, store, "NX-29AB731Q", "Alice")
+	_, tokenBob := createTestUser(t, store, "NX-A7K92B4M", "Bob")
+
+	// Alice grants Bob phone visibility
+	grantBody, _ := json.Marshal(map[string]interface{}{
+		"grantee_nx_id": "NX-A7K92B4M",
+		"is_active":     true,
+	})
+	reqGrant := httptest.NewRequest(http.MethodPost, "/api/v1/users/phone-visibility", bytes.NewReader(grantBody))
+	reqGrant.Header.Set("Authorization", "Bearer "+tokenAlice)
+	wGrant := httptest.NewRecorder()
+	handler.handlePhoneVisibility(wGrant, reqGrant)
+
+	if wGrant.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for grant, got %d: %s", wGrant.Code, wGrant.Body.String())
+	}
+
+	// Verify Alice granted Bob
+	reqCheck := httptest.NewRequest(http.MethodGet, "/api/v1/users/phone-visibility?target_nx_id=NX-A7K92B4M", nil)
+	reqCheck.Header.Set("Authorization", "Bearer "+tokenAlice)
+	wCheck := httptest.NewRecorder()
+	handler.handlePhoneVisibility(wCheck, reqCheck)
+
+	var checkRes struct {
+		IsActive bool `json:"is_active"`
+	}
+	_ = json.Unmarshal(wCheck.Body.Bytes(), &checkRes)
+	if !checkRes.IsActive {
+		t.Fatalf("expected phone visibility is_active = true")
+	}
+
+	// Verify Bob has not granted Alice (directional grant)
+	reqCheckBob := httptest.NewRequest(http.MethodGet, "/api/v1/users/phone-visibility?target_nx_id=NX-29AB731Q", nil)
+	reqCheckBob.Header.Set("Authorization", "Bearer "+tokenBob)
+	wCheckBob := httptest.NewRecorder()
+	handler.handlePhoneVisibility(wCheckBob, reqCheckBob)
+
+	var checkResBob struct {
+		IsActive bool `json:"is_active"`
+	}
+	_ = json.Unmarshal(wCheckBob.Body.Bytes(), &checkResBob)
+	if checkResBob.IsActive {
+		t.Fatalf("expected Bob's phone visibility grant to Alice to be false")
+	}
+
+	// Revoke grant
+	revokeBody, _ := json.Marshal(map[string]interface{}{
+		"grantee_nx_id": "NX-A7K92B4M",
+		"is_active":     false,
+	})
+	reqRevoke := httptest.NewRequest(http.MethodPost, "/api/v1/users/phone-visibility", bytes.NewReader(revokeBody))
+	reqRevoke.Header.Set("Authorization", "Bearer "+tokenAlice)
+	wRevoke := httptest.NewRecorder()
+	handler.handlePhoneVisibility(wRevoke, reqRevoke)
+
+	if wRevoke.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for revoke, got %d", wRevoke.Code)
+	}
+
+	// Recheck grant is inactive
+	wCheckAfter := httptest.NewRecorder()
+	handler.handlePhoneVisibility(wCheckAfter, reqCheck)
+	_ = json.Unmarshal(wCheckAfter.Body.Bytes(), &checkRes)
+	if checkRes.IsActive {
+		t.Fatalf("expected phone visibility to be false after revocation")
+	}
+}
+
+func TestMutualConnections(t *testing.T) {
+	store, repo, handler, _ := setupTestEnvironment(t)
+	_, tokenAlice := createTestUser(t, store, "NX-29AB731Q", "Alice")
+	_, _ = createTestUser(t, store, "NX-A7K92B4M", "Bob")
+	_, _ = createTestUser(t, store, "NX-C9K12B4M", "Charlie")
+	_, _ = createTestUser(t, store, "NX-D8M33L2P", "Dave")
+
+	// Alice connects with Charlie
+	_, _ = repo.SyncQrHandshake(context.Background(), "NX-29AB731Q", "NX-C9K12B4M")
+	// Bob connects with Charlie
+	_, _ = repo.SyncQrHandshake(context.Background(), "NX-A7K92B4M", "NX-C9K12B4M")
+
+	// Alice only connects with Dave
+	_, _ = repo.SyncQrHandshake(context.Background(), "NX-29AB731Q", "NX-D8M33L2P")
+
+	// Alice queries mutual with Bob
+	reqMutual := httptest.NewRequest(http.MethodGet, "/api/v1/connections/mutual?target_nx_id=NX-A7K92B4M", nil)
+	reqMutual.Header.Set("Authorization", "Bearer "+tokenAlice)
+	wMutual := httptest.NewRecorder()
+	handler.handleMutualConnections(wMutual, reqMutual)
+
+	if wMutual.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d: %s", wMutual.Code, wMutual.Body.String())
+	}
+
+	var res struct {
+		Total              int              `json:"total"`
+		MutualConnections []*PublicProfile `json:"mutual_connections"`
+	}
+	if err := json.Unmarshal(wMutual.Body.Bytes(), &res); err != nil {
+		t.Fatalf("failed to decode mutual connections: %v", err)
+	}
+
+	if res.Total != 1 || len(res.MutualConnections) != 1 {
+		t.Fatalf("expected 1 mutual connection (Charlie), got %d (%+v)", res.Total, res.MutualConnections)
+	}
+	if res.MutualConnections[0].NxID != "NX-C9K12B4M" {
+		t.Fatalf("expected Charlie NX-C9K12B4M, got %s", res.MutualConnections[0].NxID)
+	}
+}
+
+func TestPhoneDiscoveryPrivacyGate(t *testing.T) {
+	store, _, _, _ := setupTestEnvironment(t)
+	now := time.Now().UnixMilli()
+
+	// Create user with phone verified but discoverability FALSE
+	eve := &identity.UserAccount{
+		ID:                    "usr_eve",
+		NxID:                  "NX-EVE12345",
+		ProfileName:           "Eve",
+		PhoneNumber:           "+15550001111",
+		PhoneVerified:         true,
+		IsDiscoverableByPhone: false, // Strict privacy setting
+		PublicKeyHex:          "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}
+	_ = store.CreateAccount(eve)
+
+	// Lookup phone number
+	results := store.LookupVerifiedPhoneNumbers([]string{"+15550001111"})
+	if len(results) != 0 {
+		t.Fatalf("privacy violation: user with IsDiscoverableByPhone=false was discovered: %+v", results)
+	}
+
+	// Update discoverability to TRUE
+	eve.IsDiscoverableByPhone = true
+	_ = store.UpdateAccount(eve)
+
+	results2 := store.LookupVerifiedPhoneNumbers([]string{"+15550001111"})
+	if len(results2) != 1 {
+		t.Fatalf("expected user to be discovered after enabling discoverability, got %d", len(results2))
+	}
+	if results2[0].NxID != "NX-EVE12345" {
+		t.Fatalf("expected NX-EVE12345, got %s", results2[0].NxID)
+	}
+}
+
+func TestHandleSendRequest_IntroMessageLengthLimit(t *testing.T) {
+	store, _, handler, _ := setupTestEnvironment(t)
+	_, aliceToken := createTestUser(t, store, "NX-ALICE111", "Alice")
+	createTestUser(t, store, "NX-BOB22222", "Bob")
+
+	// 1. Intro message > 256 characters should be rejected with 400 Bad Request
+	longIntro := string(bytes.Repeat([]byte("A"), 257))
+	reqBody := map[string]string{
+		"recipient_nx_id": "NX-BOB22222",
+		"intro_message":  longIntro,
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/connections/request", bytes.NewReader(bodyBytes))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	rec := httptest.NewRecorder()
+
+	handler.handleSendRequest(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 Bad Request for intro message > 256 chars, got %d", rec.Code)
+	}
+
+	// 2. Intro message within limit (<= 256 characters) should succeed (200 OK)
+	validIntro := string(bytes.Repeat([]byte("B"), 256))
+	reqBodyValid := map[string]string{
+		"recipient_nx_id": "NX-BOB22222",
+		"intro_message":  validIntro,
+	}
+	validBytes, _ := json.Marshal(reqBodyValid)
+	reqValid := httptest.NewRequest(http.MethodPost, "/api/v1/connections/request", bytes.NewReader(validBytes))
+	reqValid.Header.Set("Authorization", "Bearer "+aliceToken)
+	recValid := httptest.NewRecorder()
+
+	handler.handleSendRequest(recValid, reqValid)
+
+	if recValid.Code != http.StatusCreated && recValid.Code != http.StatusOK {
+		t.Fatalf("expected 201 Created or 200 OK for intro message <= 256 chars, got %d", recValid.Code)
+	}
+}

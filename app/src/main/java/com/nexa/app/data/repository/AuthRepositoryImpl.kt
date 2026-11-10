@@ -48,6 +48,11 @@ class AuthRepositoryImpl(
         try {
             val nxId = getActiveNxId() ?: return@withContext Result.failure(IllegalStateException("No active account"))
             userDao.updateFullName(nxId, name)
+            // Best-effort remote sync
+            val token = secureStorage.getAuthToken()
+            if (!token.isNullOrBlank()) {
+                apiService.updateProfile(sessionToken = token, name = name)
+            }
             Result.success(true)
         } catch (e: Exception) {
             Result.failure(e)
@@ -230,6 +235,8 @@ class AuthRepositoryImpl(
                     nxId = finalResponse.nxId,
                     fullName = finalResponse.prefillName ?: "NEXA User",
                     phoneNumber = finalResponse.phoneNumber ?: "",
+                    email = finalResponse.email,
+                    avatarUrl = finalResponse.prefillAvatar,
                     age = null,
                     gender = null,
                     bio = null,
@@ -345,7 +352,8 @@ class AuthRepositoryImpl(
         avatarUrl: String?,
         age: Int?,
         gender: String?,
-        bio: String?
+        bio: String?,
+        email: String?
     ): Result<UserProfile> = withContext(Dispatchers.IO) {
         try {
             val keys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
@@ -360,6 +368,8 @@ class AuthRepositoryImpl(
                 nxId = nxId,
                 fullName = name,
                 phoneNumber = phone,
+                email = email,
+                avatarUrl = avatarUrl,
                 age = age,
                 gender = gender,
                 bio = bio,
@@ -371,6 +381,87 @@ class AuthRepositoryImpl(
 
             Result.success(userEntity.toDomain(avatarUrl))
         } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun fetchRemoteProfile(): Result<UserProfile> = withContext(Dispatchers.IO) {
+        try {
+            val token = secureStorage.getAuthToken()
+                ?: return@withContext Result.failure(IllegalStateException("No active authentication token"))
+            val remoteDto = apiService.fetchProfile(token).getOrThrow()
+
+            secureStorage.saveActiveNxId(remoteDto.nxId)
+            if (!remoteDto.avatarUrl.isNullOrBlank()) {
+                secureStorage.saveAvatarUrl(remoteDto.avatarUrl)
+            }
+
+            val keys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
+            val userEntity = UserEntity(
+                nxId = remoteDto.nxId,
+                fullName = remoteDto.profileName ?: "NEXA User",
+                phoneNumber = remoteDto.phoneNumber ?: "",
+                email = remoteDto.email,
+                avatarUrl = remoteDto.avatarUrl,
+                age = remoteDto.age,
+                gender = remoteDto.gender,
+                bio = remoteDto.bio,
+                publicKeyHex = remoteDto.publicKeyHex ?: keys.publicKeyHex,
+                isVerified = remoteDto.phoneVerified,
+                createdAt = if (remoteDto.createdAt > 0) remoteDto.createdAt else System.currentTimeMillis()
+            )
+            userDao.saveUserProfile(userEntity)
+            Result.success(userEntity.toDomain(remoteDto.avatarUrl))
+        } catch (e: Exception) {
+            Log.w("AuthRepositoryImpl", "Failed to sync remote profile: ${e.message}")
+            val local = userDao.getLocalProfile()
+            if (local != null) {
+                Result.success(local.toDomain(secureStorage.getAvatarUrl()))
+            } else {
+                Result.failure(e)
+            }
+        }
+    }
+
+    override suspend fun updateRemoteProfile(
+        name: String?,
+        bio: String?,
+        gender: String?,
+        age: Int?,
+        avatarUrl: String?
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            val token = secureStorage.getAuthToken()
+                ?: return@withContext Result.failure(IllegalStateException("No active authentication token"))
+
+            // 1. Update on remote backend
+            apiService.updateProfile(
+                sessionToken = token,
+                name = name,
+                bio = bio,
+                gender = gender,
+                age = age,
+                avatarUrl = avatarUrl
+            ).getOrThrow()
+
+            // 2. Update local DB
+            val local = userDao.getLocalProfile()
+            if (local != null) {
+                val updated = local.copy(
+                    fullName = name ?: local.fullName,
+                    bio = bio ?: local.bio,
+                    gender = gender ?: local.gender,
+                    age = age ?: local.age,
+                    avatarUrl = avatarUrl ?: local.avatarUrl
+                )
+                userDao.saveUserProfile(updated)
+            }
+            if (!avatarUrl.isNullOrBlank()) {
+                secureStorage.saveAvatarUrl(avatarUrl)
+            }
+            Result.success(true)
+        } catch (e: Exception) {
+            Log.e("AuthRepositoryImpl", "Failed to update profile: ${e.message}", e)
             Result.failure(e)
         }
     }

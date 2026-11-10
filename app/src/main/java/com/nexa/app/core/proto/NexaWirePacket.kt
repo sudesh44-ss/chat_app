@@ -16,7 +16,10 @@ enum class PacketType(val value: Int) {
     PACKET_AUTH_FAILURE(7),
     PACKET_TYPING(10),
     PACKET_DEVICE_SYNC(11),
-    PACKET_SIGNALING(12);
+    PACKET_SIGNALING(12),
+    PACKET_REGISTER_ROUTING_TOKENS(13),
+    PACKET_PEER_SYNC(14),
+    PACKET_CUSTODY_ACK(15);
 
     companion object {
         fun fromValue(v: Int): PacketType = entries.find { it.value == v } ?: PACKET_UNKNOWN
@@ -31,6 +34,18 @@ enum class AckStatus(val value: Int) {
 
     companion object {
         fun fromValue(v: Int): AckStatus = entries.find { it.value == v } ?: ACK_UNKNOWN
+    }
+}
+
+enum class CustodyStatus(val value: Int) {
+    CUSTODY_STATUS_UNSPECIFIED(0),
+    CUSTODY_ACCEPTED(1),
+    CUSTODY_TRANSFERRED(2),
+    CUSTODY_REJECTED(3),
+    CUSTODY_EXPIRED(4);
+
+    companion object {
+        fun fromValue(v: Int): CustodyStatus = entries.find { it.value == v } ?: CUSTODY_STATUS_UNSPECIFIED
     }
 }
 
@@ -102,8 +117,64 @@ data class EncryptedMessagePayload(
 
 data class DeliveryAckPayload(
     val originalPacketId: String = "",
-    val status: AckStatus = AckStatus.ACK_UNKNOWN
-)
+    val status: AckStatus = AckStatus.ACK_UNKNOWN,
+    val recipientNxId: String = "",
+    val deviceId: String = "",
+    val timestamp: Long = 0L,
+    val signature: ByteArray = ByteArray(0)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as DeliveryAckPayload
+        if (originalPacketId != other.originalPacketId) return false
+        if (status != other.status) return false
+        if (recipientNxId != other.recipientNxId) return false
+        if (deviceId != other.deviceId) return false
+        if (timestamp != other.timestamp) return false
+        if (!signature.contentEquals(other.signature)) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = originalPacketId.hashCode()
+        result = 31 * result + status.hashCode()
+        result = 31 * result + recipientNxId.hashCode()
+        result = 31 * result + deviceId.hashCode()
+        result = 31 * result + timestamp.hashCode()
+        result = 31 * result + signature.contentHashCode()
+        return result
+    }
+}
+
+data class CustodyAckPayload(
+    val originalPacketId: String = "",
+    val custodianNxId: String = "",
+    val status: CustodyStatus = CustodyStatus.CUSTODY_STATUS_UNSPECIFIED,
+    val timestamp: Long = 0L,
+    val signature: ByteArray = ByteArray(0)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as CustodyAckPayload
+        if (originalPacketId != other.originalPacketId) return false
+        if (custodianNxId != other.custodianNxId) return false
+        if (status != other.status) return false
+        if (timestamp != other.timestamp) return false
+        if (!signature.contentEquals(other.signature)) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = originalPacketId.hashCode()
+        result = 31 * result + custodianNxId.hashCode()
+        result = 31 * result + status.hashCode()
+        result = 31 * result + timestamp.hashCode()
+        result = 31 * result + signature.contentHashCode()
+        return result
+    }
+}
 
 data class AuthChallengePayload(
     val challengeNonce: ByteArray = ByteArray(0),
@@ -188,6 +259,37 @@ data class SignalingPayload(
     val data: String = ""
 )
 
+data class RoutingTokenRegistrationPayload(
+    val tokens: List<String> = emptyList()
+)
+
+enum class PeerSyncAction(val value: Int) {
+    SYNC_UNKNOWN(0),
+    SYNC_HELLO(1),
+    SYNC_HELLO_ACK(2),
+    SYNC_INVENTORY_REQ(3),
+    SYNC_INVENTORY_RESP(4),
+    SYNC_PULL_REQ(5),
+    SYNC_PULL_RESP(6),
+    SYNC_ACK(7);
+
+    companion object {
+        fun fromValue(v: Int): PeerSyncAction = entries.find { it.value == v } ?: SYNC_UNKNOWN
+    }
+}
+
+data class PeerSyncPayload(
+    val action: PeerSyncAction = PeerSyncAction.SYNC_UNKNOWN,
+    val sessionId: String = "",
+    val conversationId: String = "",
+    val cursorTimestamp: Long = 0L,
+    val cursorSequence: Long = 0L,
+    val messageIds: List<String> = emptyList(),
+    val envelopes: List<ByteArray> = emptyList(),
+    val syncTimestamp: Long = 0L,
+    val errorMessage: String = ""
+)
+
 data class NexaWirePacket(
     val packetId: String = "",
     val type: PacketType = PacketType.PACKET_UNKNOWN,
@@ -200,7 +302,10 @@ data class NexaWirePacket(
     val authResponse: AuthResponsePayload? = null,
     val typing: TypingPayload? = null,
     val deviceSync: DeviceSyncPayload? = null,
-    val signaling: SignalingPayload? = null
+    val signaling: SignalingPayload? = null,
+    val routingTokens: RoutingTokenRegistrationPayload? = null,
+    val peerSync: PeerSyncPayload? = null,
+    val custodyAck: CustodyAckPayload? = null
 ) {
     /**
      * Serializes this packet into standard binary Protobuf wire format.
@@ -306,6 +411,22 @@ data class NexaWirePacket(
                 writeTag(ackOut, 2, 0)
                 writeVarint(ackOut, a.status.value.toLong())
             }
+            if (a.recipientNxId.isNotEmpty()) {
+                writeTag(ackOut, 3, 2)
+                writeLengthDelimited(ackOut, a.recipientNxId.toByteArray(Charsets.UTF_8))
+            }
+            if (a.deviceId.isNotEmpty()) {
+                writeTag(ackOut, 4, 2)
+                writeLengthDelimited(ackOut, a.deviceId.toByteArray(Charsets.UTF_8))
+            }
+            if (a.timestamp != 0L) {
+                writeTag(ackOut, 5, 0)
+                writeVarint(ackOut, a.timestamp)
+            }
+            if (a.signature.isNotEmpty()) {
+                writeTag(ackOut, 6, 2)
+                writeLengthDelimited(ackOut, a.signature)
+            }
 
             writeTag(out, 7, 2)
             writeLengthDelimited(out, ackOut.toByteArray())
@@ -409,6 +530,95 @@ data class NexaWirePacket(
             writeLengthDelimited(out, sigOut.toByteArray())
         }
 
+        // Field 13: routing_tokens (RoutingTokenRegistrationPayload, wire type 2)
+        routingTokens?.let { rt ->
+            val rtOut = ByteArrayOutputStream()
+            rt.tokens.forEach { token ->
+                if (token.isNotEmpty()) {
+                    writeTag(rtOut, 1, 2)
+                    writeLengthDelimited(rtOut, token.toByteArray(Charsets.UTF_8))
+                }
+            }
+            writeTag(out, 13, 2)
+            writeLengthDelimited(out, rtOut.toByteArray())
+        }
+
+        // Field 14: peer_sync (PeerSyncPayload, wire type 2)
+        peerSync?.let { ps ->
+            val psOut = ByteArrayOutputStream()
+            if (ps.action != PeerSyncAction.SYNC_UNKNOWN) {
+                writeTag(psOut, 1, 0)
+                writeVarint(psOut, ps.action.value.toLong())
+            }
+            if (ps.sessionId.isNotEmpty()) {
+                writeTag(psOut, 2, 2)
+                writeLengthDelimited(psOut, ps.sessionId.toByteArray(Charsets.UTF_8))
+            }
+            if (ps.conversationId.isNotEmpty()) {
+                writeTag(psOut, 3, 2)
+                writeLengthDelimited(psOut, ps.conversationId.toByteArray(Charsets.UTF_8))
+            }
+            if (ps.cursorTimestamp != 0L) {
+                writeTag(psOut, 4, 0)
+                writeVarint(psOut, ps.cursorTimestamp)
+            }
+            if (ps.cursorSequence != 0L) {
+                writeTag(psOut, 5, 0)
+                writeVarint(psOut, ps.cursorSequence)
+            }
+            ps.messageIds.forEach { mid ->
+                if (mid.isNotEmpty()) {
+                    writeTag(psOut, 6, 2)
+                    writeLengthDelimited(psOut, mid.toByteArray(Charsets.UTF_8))
+                }
+            }
+            ps.envelopes.forEach { env ->
+                if (env.isNotEmpty()) {
+                    writeTag(psOut, 7, 2)
+                    writeLengthDelimited(psOut, env)
+                }
+            }
+            if (ps.syncTimestamp != 0L) {
+                writeTag(psOut, 8, 0)
+                writeVarint(psOut, ps.syncTimestamp)
+            }
+            if (ps.errorMessage.isNotEmpty()) {
+                writeTag(psOut, 9, 2)
+                writeLengthDelimited(psOut, ps.errorMessage.toByteArray(Charsets.UTF_8))
+            }
+
+            writeTag(out, 14, 2)
+            writeLengthDelimited(out, psOut.toByteArray())
+        }
+
+        // Field 15: custody_ack (CustodyAckPayload, wire type 2)
+        custodyAck?.let { ca ->
+            val caOut = ByteArrayOutputStream()
+            if (ca.originalPacketId.isNotEmpty()) {
+                writeTag(caOut, 1, 2)
+                writeLengthDelimited(caOut, ca.originalPacketId.toByteArray(Charsets.UTF_8))
+            }
+            if (ca.custodianNxId.isNotEmpty()) {
+                writeTag(caOut, 2, 2)
+                writeLengthDelimited(caOut, ca.custodianNxId.toByteArray(Charsets.UTF_8))
+            }
+            if (ca.status != CustodyStatus.CUSTODY_STATUS_UNSPECIFIED) {
+                writeTag(caOut, 3, 0)
+                writeVarint(caOut, ca.status.value.toLong())
+            }
+            if (ca.timestamp != 0L) {
+                writeTag(caOut, 4, 0)
+                writeVarint(caOut, ca.timestamp)
+            }
+            if (ca.signature.isNotEmpty()) {
+                writeTag(caOut, 5, 2)
+                writeLengthDelimited(caOut, ca.signature)
+            }
+
+            writeTag(out, 15, 2)
+            writeLengthDelimited(out, caOut.toByteArray())
+        }
+
         return out.toByteArray()
     }
 
@@ -436,6 +646,9 @@ data class NexaWirePacket(
             var typing: TypingPayload? = null
             var deviceSync: DeviceSyncPayload? = null
             var signaling: SignalingPayload? = null
+            var routingTokens: RoutingTokenRegistrationPayload? = null
+            var peerSync: PeerSyncPayload? = null
+            var custodyAck: CustodyAckPayload? = null
 
             while (input.available() > 0) {
                 val tag = readVarint(input)
@@ -455,6 +668,9 @@ data class NexaWirePacket(
                     10 -> typing = decodeTypingPayload(readLengthDelimited(input))
                     11 -> deviceSync = decodeDeviceSyncPayload(readLengthDelimited(input))
                     12 -> signaling = decodeSignalingPayload(readLengthDelimited(input))
+                    13 -> routingTokens = decodeRoutingTokenRegistrationPayload(readLengthDelimited(input))
+                    14 -> peerSync = decodePeerSyncPayload(readLengthDelimited(input))
+                    15 -> custodyAck = decodeCustodyAckPayload(readLengthDelimited(input))
                     else -> skipField(input, wireType)
                 }
             }
@@ -471,8 +687,68 @@ data class NexaWirePacket(
                 authResponse = authResponse,
                 typing = typing,
                 deviceSync = deviceSync,
-                signaling = signaling
+                signaling = signaling,
+                routingTokens = routingTokens,
+                peerSync = peerSync,
+                custodyAck = custodyAck
             )
+        }
+
+        private fun decodePeerSyncPayload(bytes: ByteArray): PeerSyncPayload {
+            val input = ByteArrayInputStream(bytes)
+            var action = PeerSyncAction.SYNC_UNKNOWN
+            var sessionId = ""
+            var conversationId = ""
+            var cursorTimestamp = 0L
+            var cursorSequence = 0L
+            val messageIds = mutableListOf<String>()
+            val envelopes = mutableListOf<ByteArray>()
+            var syncTimestamp = 0L
+            var errorMessage = ""
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+                when (fieldNum) {
+                    1 -> action = PeerSyncAction.fromValue(readVarint(input).toInt())
+                    2 -> sessionId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    3 -> conversationId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    4 -> cursorTimestamp = readVarint(input)
+                    5 -> cursorSequence = readVarint(input)
+                    6 -> messageIds.add(String(readLengthDelimited(input), Charsets.UTF_8))
+                    7 -> envelopes.add(readLengthDelimited(input))
+                    8 -> syncTimestamp = readVarint(input)
+                    9 -> errorMessage = String(readLengthDelimited(input), Charsets.UTF_8)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return PeerSyncPayload(
+                action = action,
+                sessionId = sessionId,
+                conversationId = conversationId,
+                cursorTimestamp = cursorTimestamp,
+                cursorSequence = cursorSequence,
+                messageIds = messageIds,
+                envelopes = envelopes,
+                syncTimestamp = syncTimestamp,
+                errorMessage = errorMessage
+            )
+        }
+
+        private fun decodeRoutingTokenRegistrationPayload(bytes: ByteArray): RoutingTokenRegistrationPayload {
+            val input = ByteArrayInputStream(bytes)
+            val tokens = mutableListOf<String>()
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+                when (fieldNum) {
+                    1 -> tokens.add(String(readLengthDelimited(input), Charsets.UTF_8))
+                    else -> skipField(input, wireType)
+                }
+            }
+            return RoutingTokenRegistrationPayload(tokens)
         }
 
         private fun decodeMessagePayload(bytes: ByteArray): EncryptedMessagePayload {
@@ -533,6 +809,10 @@ data class NexaWirePacket(
             val input = ByteArrayInputStream(bytes)
             var origId = ""
             var status = AckStatus.ACK_UNKNOWN
+            var recipientNxId = ""
+            var deviceId = ""
+            var timestamp = 0L
+            var signature = ByteArray(0)
 
             while (input.available() > 0) {
                 val tag = readVarint(input)
@@ -542,10 +822,52 @@ data class NexaWirePacket(
                 when (fieldNum) {
                     1 -> origId = String(readLengthDelimited(input), Charsets.UTF_8)
                     2 -> status = AckStatus.fromValue(readVarint(input).toInt())
+                    3 -> recipientNxId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    4 -> deviceId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    5 -> timestamp = readVarint(input)
+                    6 -> signature = readLengthDelimited(input)
                     else -> skipField(input, wireType)
                 }
             }
-            return DeliveryAckPayload(origId, status)
+            return DeliveryAckPayload(
+                originalPacketId = origId,
+                status = status,
+                recipientNxId = recipientNxId,
+                deviceId = deviceId,
+                timestamp = timestamp,
+                signature = signature
+            )
+        }
+
+        private fun decodeCustodyAckPayload(bytes: ByteArray): CustodyAckPayload {
+            val input = ByteArrayInputStream(bytes)
+            var origId = ""
+            var custodianNxId = ""
+            var status = CustodyStatus.CUSTODY_STATUS_UNSPECIFIED
+            var timestamp = 0L
+            var signature = ByteArray(0)
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> origId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    2 -> custodianNxId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    3 -> status = CustodyStatus.fromValue(readVarint(input).toInt())
+                    4 -> timestamp = readVarint(input)
+                    5 -> signature = readLengthDelimited(input)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return CustodyAckPayload(
+                originalPacketId = origId,
+                custodianNxId = custodianNxId,
+                status = status,
+                timestamp = timestamp,
+                signature = signature
+            )
         }
 
         private fun decodeAuthChallengePayload(bytes: ByteArray): AuthChallengePayload {

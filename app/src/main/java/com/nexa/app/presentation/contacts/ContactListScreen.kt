@@ -221,6 +221,9 @@ fun ContactListScreen(
                     }
                 },
                 actions = {
+                    IconButton(onClick = onNavigateToPending) {
+                        Icon(Icons.Default.Notifications, contentDescription = "Pending Requests")
+                    }
                     IconButton(onClick = { viewModel.refreshContacts() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh Contacts")
                     }

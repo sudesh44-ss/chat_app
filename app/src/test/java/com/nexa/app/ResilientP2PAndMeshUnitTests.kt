@@ -255,7 +255,7 @@ class ResilientP2PAndMeshUnitTests {
     }
 
     @Test
-    fun testBloomDuplicateFilterFastDetection() {
+    fun testBloomDuplicateFilterFastDetection() = kotlinx.coroutines.test.runTest {
         val filter = BloomDuplicateFilter(bitSetSize = 32768, maxHistorySize = 100)
 
         val packetA = "MSG_PACKET_998877"

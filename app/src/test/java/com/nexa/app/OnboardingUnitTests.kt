@@ -112,7 +112,8 @@ class OnboardingUnitTests {
             avatarUrl: String?,
             age: Int?,
             gender: String?,
-            bio: String?
+            bio: String?,
+            email: String?
         ): Result<UserProfile> {
             return Result.success(
                 UserProfile(
@@ -120,10 +121,21 @@ class OnboardingUnitTests {
                     fullName = name,
                     phoneNumber = phone,
                     avatarUrl = avatarUrl,
-                    publicKeyHex = "abcd"
+                    publicKeyHex = "abcd",
+                    email = email
                 )
             )
         }
+
+        override suspend fun fetchRemoteProfile(): Result<UserProfile> = Result.failure(NotImplementedError())
+
+        override suspend fun updateRemoteProfile(
+            name: String?,
+            bio: String?,
+            gender: String?,
+            age: Int?,
+            avatarUrl: String?
+        ): Result<Boolean> = Result.success(true)
 
         override suspend fun resolveUser(target: String): Result<UserResolveDto> {
             return Result.success(

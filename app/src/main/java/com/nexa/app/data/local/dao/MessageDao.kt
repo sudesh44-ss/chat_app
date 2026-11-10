@@ -80,4 +80,10 @@ interface MessageDao {
 
     @Query("DELETE FROM messages WHERE conversationId = :conversationId")
     suspend fun deleteMessagesForConversation(conversationId: String): Int
+
+    @Query("SELECT packetId FROM messages WHERE conversationId = :conversationId AND timestamp > :afterTimestamp ORDER BY timestamp ASC LIMIT :limit")
+    suspend fun getMessageIdsAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int = 50): List<String>
+
+    @Query("SELECT * FROM messages WHERE conversationId = :conversationId AND timestamp > :afterTimestamp ORDER BY timestamp ASC LIMIT :limit")
+    suspend fun getMessagesAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int = 50): List<MessageEntity>
 }

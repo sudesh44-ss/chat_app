@@ -10,11 +10,8 @@ class MeshTransport(
     suspend fun broadcastDtnEnvelope(blindTokenHex: String, rawWireBytes: ByteArray): Boolean {
         val envId = ByteArray(16).also { Random().nextBytes(it) }
         val tokenBytes = fromHex(blindTokenHex.padEnd(32, '0').take(32))
-        val envelope = DtnEnvelope(
-            envelopeId = envId,
+        val envelope = DtnEnvelope.createNew(
             blindToken = tokenBytes,
-            hopLimit = 7,
-            expiresAtEpochSec = (System.currentTimeMillis() / 1000L) + (48 * 3600L),
             encryptedPayload = rawWireBytes
         )
         return dtnRepository.ingestInboundEnvelope(envelope)

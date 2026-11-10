@@ -324,6 +324,10 @@ class ContactsAndDemoUnitTests {
         override suspend fun unpinMessage(packetId: String): Int = 1
         override suspend fun clearExpiredPins(conversationId: String, currentTimeMillis: Long): Int = 0
         override suspend fun deleteMessagesForConversation(conversationId: String): Int = 1
+        override suspend fun getMessageIdsAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int): List<String> =
+            messages.filter { it.conversationId == conversationId && it.timestamp > afterTimestamp }.take(limit).map { it.packetId }
+        override suspend fun getMessagesAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int): List<MessageEntity> =
+            messages.filter { it.conversationId == conversationId && it.timestamp > afterTimestamp }.take(limit)
     }
 
     private class FakeContactDao : ContactDao {

@@ -11,12 +11,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -74,6 +80,27 @@ fun SettingsScreen(
     val backgroundColor = if (isDark) Color.Black else Color.White
     val snackbarHostState = remember { SnackbarHostState() }
     val coroutineScope = rememberCoroutineScope()
+    var activeDialogTitle by remember { mutableStateOf<String?>(null) }
+    var activeDialogMessage by remember { mutableStateOf<String?>(null) }
+
+    if (activeDialogTitle != null && activeDialogMessage != null) {
+        AlertDialog(
+            onDismissRequest = {
+                activeDialogTitle = null
+                activeDialogMessage = null
+            },
+            title = { Text(activeDialogTitle!!) },
+            text = { Text(activeDialogMessage!!) },
+            confirmButton = {
+                TextButton(onClick = {
+                    activeDialogTitle = null
+                    activeDialogMessage = null
+                }) {
+                    Text("OK")
+                }
+            }
+        )
+    }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -157,7 +184,10 @@ fun SettingsScreen(
                         title = "Language",
                         subtitle = "English (System Default)",
                         iconRes = R.drawable.ic_nexa_language,
-                        onClick = { onNavigateDestination(SettingsDestination.LANGUAGE) }
+                        onClick = {
+                            activeDialogTitle = "Language"
+                            activeDialogMessage = "NEXA currently operates in English (System Default). Additional localization packages will be enabled in upcoming releases."
+                        }
                     )
                 }
 
@@ -167,7 +197,10 @@ fun SettingsScreen(
                         title = "Archived Chats",
                         subtitle = "Hidden & muted conversations",
                         iconRes = R.drawable.ic_nexa_archive,
-                        onClick = { onNavigateDestination(SettingsDestination.ARCHIVED_CHATS) }
+                        onClick = {
+                            activeDialogTitle = "Archived Chats"
+                            activeDialogMessage = "No archived conversations. You can archive any conversation by long-pressing it on the home screen."
+                        }
                     )
                 }
 
@@ -177,7 +210,10 @@ fun SettingsScreen(
                         title = "Network",
                         subtitle = "RAM relay, Nearby Mesh, Port 8901 SMS",
                         iconRes = R.drawable.ic_nexa_wifi,
-                        onClick = { onNavigateDestination(SettingsDestination.NETWORK) }
+                        onClick = {
+                            activeDialogTitle = "Network & Transports"
+                            activeDialogMessage = "Active Relay: WebSocket over TLS.\nNearby Mesh: Google Nearby Connections.\nZero-disk DTN store-and-forward: Active."
+                        }
                     )
                 }
 
@@ -187,7 +223,10 @@ fun SettingsScreen(
                         title = "Storage and Data",
                         subtitle = "Encrypted cache, media auto-download",
                         iconRes = R.drawable.ic_nexa_storage,
-                        onClick = { onNavigateDestination(SettingsDestination.STORAGE_AND_DATA) }
+                        onClick = {
+                            activeDialogTitle = "Storage & Data"
+                            activeDialogMessage = "Local database is encrypted at rest using SQLCipher 4.\nTemporary files in quarantine sandbox are purged automatically."
+                        }
                     )
                 }
 
@@ -217,7 +256,10 @@ fun SettingsScreen(
                         title = "Help",
                         subtitle = "FAQ, security guide, contact support",
                         iconRes = R.drawable.ic_nexa_help,
-                        onClick = { onNavigateDestination(SettingsDestination.HELP) }
+                        onClick = {
+                            activeDialogTitle = "Help & Support"
+                            activeDialogMessage = "NEXA is a privacy-first, zero-knowledge decentralized messaging application with end-to-end Double Ratchet encryption. For documentation visit https://nexa.network."
+                        }
                     )
                 }
 
@@ -227,7 +269,10 @@ fun SettingsScreen(
                         title = "About",
                         subtitle = "NEXA v2.0 • Zero-Knowledge Architecture",
                         iconRes = R.drawable.ic_nexa_about,
-                        onClick = { onNavigateDestination(SettingsDestination.ABOUT) }
+                        onClick = {
+                            activeDialogTitle = "About NEXA"
+                            activeDialogMessage = "NEXA Mobile v2.0\nBuilt on Double Ratchet, X25519, Ed25519, Android Keystore StrongBox, and SQLCipher.\nYour keys and data remain exclusively on your device."
+                        }
                     )
                 }
             }

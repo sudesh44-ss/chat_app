@@ -46,6 +46,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.nio.charset.StandardCharsets
 import java.util.UUID
+import com.nexa.app.core.transport.NexaUniversalTransportIngest
+import com.nexa.app.core.transport.TransportMedium
 
 class ChatRepositoryImpl(
     private val messageDao: MessageDao,
@@ -62,6 +64,8 @@ class ChatRepositoryImpl(
     private val chatPrivacyPrefs: ChatPrivacyPrefs? = null,
     private val notificationDispatcher: NexaNotificationDispatcher? = null
 ) : ChatRepository {
+
+    var universalTransportIngest: NexaUniversalTransportIngest? = null
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _typingFlow = MutableSharedFlow<Pair<String, Boolean>>(extraBufferCapacity = 32)
@@ -170,10 +174,11 @@ class ChatRepositoryImpl(
             when (transport) {
                 TransportType.DTN_MESH -> {
                     // Route via Delay-Tolerant Mesh (Store-Carry-Forward)
-                    val dummyRecipientPk = "00".repeat(32) // Resolved from contact's cached public key
+                    val contact = contactDao?.getContact(recipientNxId)
+                    val recipientPkHex = contact?.publicKeyHex?.takeIf { it.isNotBlank() } ?: "00".repeat(32)
                     val dtnResult = dtnRepository.createAndCacheEnvelope(
                         recipientNxId = recipientNxId,
-                        recipientPublicKeyHex = dummyRecipientPk,
+                        recipientPublicKeyHex = recipientPkHex,
                         plainText = text
                     )
                     if (dtnResult.isSuccess) {
@@ -188,6 +193,15 @@ class ChatRepositoryImpl(
 
                 TransportType.DATA_SMS -> {
                     // Route via Port 8901 Data SMS (Offline / High-Privacy Fallback)
+                    if (!dataSmsSender.isSupported()) {
+                        messageDao.updateMessageStatus(packetId, MessageStatus.FAILED.name)
+                        val error = UnsupportedOperationException(
+                            "Data SMS transport is disabled in this build for Google Play Protect compliance. Please use Internet or DTN Mesh."
+                        )
+                        Log.w(TAG, "Data SMS transmission blocked for packet $packetId: transport is disabled")
+                        return@withContext Result.failure(error)
+                    }
+
                     val targetPhone = destinationPhone?.trim()
                     if (targetPhone.isNullOrBlank()) {
                         throw IllegalArgumentException("Data SMS transport requires a destination phone number")
@@ -273,6 +287,11 @@ class ChatRepositoryImpl(
     }
 
     override suspend fun handleIncomingDataSmsPacket(packet: NexaWirePacket) = withContext(Dispatchers.IO) {
+        val ingest = universalTransportIngest
+        if (ingest != null) {
+            ingest.ingestWirePacket(packet, TransportMedium.CELLULAR_DATA_SMS)
+            return@withContext
+        }
         val myNxId = getMyNxId()
         when (packet.type) {
             PacketType.PACKET_MESSAGE -> {
@@ -588,16 +607,21 @@ class ChatRepositoryImpl(
         scope.launch {
             webSocketManager.incomingPackets.collect { packet ->
                 try {
-                    when (packet.type) {
-                        PacketType.PACKET_MESSAGE -> handleIncomingMessage(packet)
-                        PacketType.PACKET_ACK -> handleIncomingAck(packet)
-                        PacketType.PACKET_TYPING -> {
-                            packet.typing?.let { t ->
-                                _typingFlow.tryEmit(Pair(t.conversationId, t.isTyping))
+                    val ingest = universalTransportIngest
+                    if (ingest != null) {
+                        ingest.ingestWirePacket(packet, TransportMedium.INTERNET_WS)
+                    } else {
+                        when (packet.type) {
+                            PacketType.PACKET_MESSAGE -> handleIncomingMessage(packet)
+                            PacketType.PACKET_ACK -> handleIncomingAck(packet)
+                            PacketType.PACKET_TYPING -> {
+                                packet.typing?.let { t ->
+                                    _typingFlow.tryEmit(Pair(t.conversationId, t.isTyping))
+                                }
                             }
+                            PacketType.PACKET_PING -> { /* Heartbeat handled at network level */ }
+                            else -> Unit
                         }
-                        PacketType.PACKET_PING -> { /* Heartbeat handled at network level */ }
-                        else -> Unit
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error processing incoming wire packet: ${packet.packetId}", e)

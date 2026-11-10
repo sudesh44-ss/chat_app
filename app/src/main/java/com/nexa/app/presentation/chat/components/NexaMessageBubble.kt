@@ -209,6 +209,7 @@ fun NexaMessageBubble(
 @Composable
 private fun DeliveryStatusIndicator(status: MessageStatus) {
     when (status) {
+        MessageStatus.CREATED,
         MessageStatus.PENDING -> {
             Icon(
                 painter = painterResource(id = R.drawable.ic_nexa_help),
@@ -217,10 +218,19 @@ private fun DeliveryStatusIndicator(status: MessageStatus) {
                 modifier = Modifier.size(12.dp)
             )
         }
+        MessageStatus.QUEUED,
         MessageStatus.SENT -> {
             Icon(
                 painter = painterResource(id = R.drawable.ic_nexa_check),
-                contentDescription = "Sent",
+                contentDescription = "Accepted by Cloud Queue",
+                tint = Color.Gray,
+                modifier = Modifier.size(12.dp)
+            )
+        }
+        MessageStatus.RELAYED -> {
+            Icon(
+                painter = painterResource(id = R.drawable.ic_nexa_check),
+                contentDescription = "Relayed via Custody Node",
                 tint = Color.Gray,
                 modifier = Modifier.size(12.dp)
             )
@@ -241,10 +251,11 @@ private fun DeliveryStatusIndicator(status: MessageStatus) {
                 modifier = Modifier.size(13.dp)
             )
         }
-        MessageStatus.FAILED -> {
+        MessageStatus.FAILED,
+        MessageStatus.EXPIRED -> {
             Icon(
                 painter = painterResource(id = R.drawable.ic_nexa_delete),
-                contentDescription = "Failed",
+                contentDescription = if (status == MessageStatus.EXPIRED) "Expired" else "Failed",
                 tint = NexaWarningOrange,
                 modifier = Modifier.size(12.dp)
             )

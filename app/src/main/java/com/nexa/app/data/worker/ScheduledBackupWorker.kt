@@ -49,29 +49,40 @@ class ScheduledBackupWorker(
         const val UNIQUE_WORK_NAME = "nexa_nightly_backup"
 
         /**
-         * Builds the 24-hour periodic backup work request.
-         * Note: Does not set requiresDeviceIdle(true) to avoid WorkManager backoff criteria conflicts.
+         * Builds the periodic backup work request respecting user's frequency and network constraints.
          */
-        fun createPeriodicWorkRequest(): androidx.work.PeriodicWorkRequest {
+        fun createPeriodicWorkRequest(context: Context? = null): androidx.work.PeriodicWorkRequest {
+            val app = context?.applicationContext as? NexaApplication
+            val prefs = app?.backupPrefs
+
+            val networkType = if (prefs?.backupOverWifiOnly != false) NetworkType.UNMETERED else NetworkType.CONNECTED
+            val requiresCharging = prefs?.backupWhenCharging ?: true
+
             val constraints = Constraints.Builder()
-                .setRequiredNetworkType(NetworkType.UNMETERED)
-                .setRequiresCharging(true)
+                .setRequiredNetworkType(networkType)
+                .setRequiresCharging(requiresCharging)
                 .build()
 
-            return PeriodicWorkRequestBuilder<ScheduledBackupWorker>(24, TimeUnit.HOURS)
+            val (interval, timeUnit) = when (prefs?.backupFrequency) {
+                com.nexa.app.data.local.preferences.BackupFrequency.WEEKLY -> Pair(7L, TimeUnit.DAYS)
+                com.nexa.app.data.local.preferences.BackupFrequency.MONTHLY -> Pair(30L, TimeUnit.DAYS)
+                else -> Pair(24L, TimeUnit.HOURS)
+            }
+
+            return PeriodicWorkRequestBuilder<ScheduledBackupWorker>(interval, timeUnit)
                 .setConstraints(constraints)
                 .build()
         }
 
         /**
-         * Enqueues or retains the 24-hour periodic backup schedule.
+         * Enqueues or updates the periodic backup schedule.
          */
         fun scheduleNightlyBackup(context: Context) {
-            val periodicRequest = createPeriodicWorkRequest()
+            val periodicRequest = createPeriodicWorkRequest(context)
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 UNIQUE_WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
+                ExistingPeriodicWorkPolicy.UPDATE,
                 periodicRequest
             )
         }

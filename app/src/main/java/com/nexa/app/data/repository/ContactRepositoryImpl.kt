@@ -103,6 +103,12 @@ class ContactRepositoryImpl(
                 )
             )
 
+            // 8. Register connection request in backend graph if session is active
+            val sessionToken = secureStorage.getAuthToken()
+            if (!sessionToken.isNullOrBlank()) {
+                connectionApiService.sendRequest(sessionToken, targetNxId, introMessage)
+            }
+
             if (!dispatchSuccess) {
                 return@withContext Result.failure(IllegalStateException("Server failed to route handshake envelope"))
             }
@@ -161,6 +167,16 @@ class ContactRepositoryImpl(
                 )
             )
 
+            // 7. Accept request in backend connection graph
+            val sessionToken = secureStorage.getAuthToken()
+            if (!sessionToken.isNullOrBlank()) {
+                val incomingRes = connectionApiService.getIncomingRequests(sessionToken)
+                val matchingReq = incomingRes.getOrNull()?.find { it.senderNxId == contact.nxId }
+                if (matchingReq != null) {
+                    connectionApiService.acceptRequest(sessionToken, matchingReq.id)
+                }
+            }
+
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -174,7 +190,29 @@ class ContactRepositoryImpl(
             } else {
                 contactDao.deleteContact(nxId)
             }
-            // SILENT DISCARD: Dispatches ZERO response to network; initiator remains in pending state
+
+            // Synchronize with backend connection graph if authenticated
+            val sessionToken = secureStorage.getAuthToken()
+            if (!sessionToken.isNullOrBlank()) {
+                if (block) {
+                    connectionApiService.blockUser(sessionToken, nxId)
+                } else {
+                    val incomingRes = connectionApiService.getIncomingRequests(sessionToken)
+                    val match = incomingRes.getOrNull()?.find { it.senderNxId == nxId }
+                    if (match != null) {
+                        connectionApiService.rejectRequest(sessionToken, match.id)
+                    } else {
+                        val outgoingRes = connectionApiService.getOutgoingRequests(sessionToken)
+                        val outMatch = outgoingRes.getOrNull()?.find { it.recipientNxId == nxId }
+                        if (outMatch != null) {
+                            connectionApiService.cancelRequest(sessionToken, outMatch.id)
+                        } else {
+                            connectionApiService.removeConnection(sessionToken, nxId)
+                        }
+                    }
+                }
+            }
+
             Result.success(Unit)
         } catch (e: Exception) {
             Result.failure(e)
@@ -185,49 +223,97 @@ class ContactRepositoryImpl(
         val localNxId = secureStorage.getActiveNxId() ?: return@withContext 0
 
         try {
-            val envelopes = handshakeApi.getPendingRequests(localNxId)
             var processed = 0
 
-            val (dhPrivKey, _) = getOrCreateIdentityDhKeyPair()
-            val (signPrivKey, _) = getOrCreateIdentitySigningKeyPair()
+            // 1. Process X3DH envelopes from mailbox
+            try {
+                val envelopes = handshakeApi.getPendingRequests(localNxId)
+                val (dhPrivKey, _) = getOrCreateIdentityDhKeyPair()
+                val (signPrivKey, _) = getOrCreateIdentitySigningKeyPair()
 
-            for (envelope in envelopes) {
-                // Check Local Blocklist: Silent Drop
-                val existing = contactDao.getContact(envelope.senderNxId)
-                if (existing != null && existing.status == ContactStatus.BLOCKED) {
-                    continue
+                for (envelope in envelopes) {
+                    // Check Local Blocklist: Silent Drop
+                    val existing = contactDao.getContact(envelope.senderNxId)
+                    if (existing != null && existing.status == ContactStatus.BLOCKED) {
+                        continue
+                    }
+
+                    // Process Inbound Envelope (Anti-impersonation signature checked inside)
+                    val senderSigningPub = fromHex(envelope.identityPublicKeyHex)
+                    val payload = X3dhHandshakeEngine.processInboundEnvelope(
+                        envelope = envelope,
+                        recipientIdentityPrivateKey = dhPrivKey,
+                        recipientSignedPrivateKey = dhPrivKey,
+                        senderSigningPublicKey = senderSigningPub
+                    ) ?: continue
+
+                    if (envelope.isAccept) {
+                        // Recipient accepted our request!
+                        contactDao.updateStatus(envelope.senderNxId, ContactStatus.MUTUAL_FRIEND)
+                        val remoteEphemeralPub = fromHex(envelope.ephemeralPublicKeyHex)
+                        val (_, dhPubKeyHex) = getOrCreateIdentityDhKeyPair()
+                        val localPub = fromHex(dhPubKeyHex)
+                        doubleRatchetEngine.initBilateralSession(envelope.senderNxId, dhPrivKey, localPub, remoteEphemeralPub)
+                        processed++
+                    } else {
+                        // New Inbound Request
+                        val newContact = ContactEntity(
+                            nxId = payload.senderNxId,
+                            displayName = payload.displayName,
+                            publicKeyHex = envelope.identityPublicKeyHex,
+                            introMessage = payload.introMessage,
+                            status = ContactStatus.REQUEST_RECEIVED
+                        )
+                        contactDao.upsertContact(newContact)
+                        processed++
+                    }
                 }
+            } catch (e: Exception) {
+                // Mailbox sync error does not block REST sync
+            }
 
-                // Process Inbound Envelope (Anti-impersonation signature checked inside)
-                val senderSigningPub = fromHex(envelope.identityPublicKeyHex)
-                val payload = X3dhHandshakeEngine.processInboundEnvelope(
-                    envelope = envelope,
-                    recipientIdentityPrivateKey = dhPrivKey,
-                    recipientSignedPrivateKey = dhPrivKey,
-                    senderSigningPublicKey = senderSigningPub
-                ) ?: continue
+            // 2. Synchronize REST Connection Graph
+            val sessionToken = secureStorage.getAuthToken()
+            if (!sessionToken.isNullOrBlank()) {
+                try {
+                    val incomingResult = connectionApiService.getIncomingRequests(sessionToken)
+                    incomingResult.getOrNull()?.forEach { req ->
+                        val existing = contactDao.getContact(req.senderNxId)
+                        if (existing == null) {
+                            contactDao.upsertContact(
+                                ContactEntity(
+                                    nxId = req.senderNxId,
+                                    displayName = req.profile?.displayName ?: req.senderNxId,
+                                    publicKeyHex = req.profile?.publicKeyHex ?: "",
+                                    introMessage = req.introMessage,
+                                    status = ContactStatus.REQUEST_RECEIVED
+                                )
+                            )
+                            processed++
+                        }
+                    }
 
-                if (envelope.isAccept) {
-                    // Recipient accepted our request!
-                    contactDao.updateStatus(envelope.senderNxId, ContactStatus.MUTUAL_FRIEND)
-                    val remoteEphemeralPub = fromHex(envelope.ephemeralPublicKeyHex)
-                    val (_, dhPubKeyHex) = getOrCreateIdentityDhKeyPair()
-                    val localPub = fromHex(dhPubKeyHex)
-                    doubleRatchetEngine.initBilateralSession(envelope.senderNxId, dhPrivKey, localPub, remoteEphemeralPub)
-                    processed++
-                } else {
-                    // New Inbound Request
-                    val newContact = ContactEntity(
-                        nxId = payload.senderNxId,
-                        displayName = payload.displayName,
-                        publicKeyHex = envelope.identityPublicKeyHex,
-                        introMessage = payload.introMessage,
-                        status = ContactStatus.REQUEST_RECEIVED
-                    )
-                    contactDao.upsertContact(newContact)
-                    processed++
+                    val connsResult = connectionApiService.getConnections(sessionToken)
+                    connsResult.getOrNull()?.forEach { conn ->
+                        val existing = contactDao.getContact(conn.nxId)
+                        if (existing == null) {
+                            contactDao.upsertContact(
+                                ContactEntity(
+                                    nxId = conn.nxId,
+                                    displayName = conn.displayName.ifBlank { conn.nxId },
+                                    publicKeyHex = conn.publicKeyHex,
+                                    status = ContactStatus.MUTUAL_FRIEND
+                                )
+                            )
+                        } else if (existing.status != ContactStatus.MUTUAL_FRIEND && existing.status != ContactStatus.BLOCKED) {
+                            contactDao.updateStatus(conn.nxId, ContactStatus.MUTUAL_FRIEND)
+                        }
+                    }
+                } catch (e: Exception) {
+                    // Graceful degradation when network unavailable
                 }
             }
+
             processed
         } catch (e: Exception) {
             0
@@ -342,7 +428,47 @@ class ContactRepositoryImpl(
         try {
             // Read device contacts purely locally via ContentResolver (Zero server upload / complete privacy)
             val localContacts = com.nexa.app.core.contacts.ContactsProviderHelper.readDeviceContacts(context)
-            Result.success(localContacts)
+            if (localContacts.isEmpty()) {
+                return@withContext Result.success(emptyList())
+            }
+
+            val sessionToken = secureStorage.getSessionToken()
+            if (sessionToken.isNullOrBlank()) {
+                return@withContext Result.success(localContacts)
+            }
+
+            // Extract unique phone numbers and batch query up to 100 per request
+            val phoneList = localContacts.mapNotNull { contact ->
+                val num = contact.normalizedNumber.ifBlank { contact.phoneNumber }.trim()
+                if (num.isNotBlank()) num else null
+            }.distinct()
+
+            val matchesByNumber = mutableMapOf<String, com.nexa.app.data.remote.dto.ContactMatchDto>()
+            for (batch in phoneList.chunked(100)) {
+                val lookupResult = authApiService.lookupContacts(sessionToken, batch)
+                lookupResult.getOrNull()?.forEach { match ->
+                    matchesByNumber[match.phoneNumber] = match
+                }
+            }
+
+            if (matchesByNumber.isEmpty()) {
+                return@withContext Result.success(localContacts)
+            }
+
+            val augmented = localContacts.map { contact ->
+                val norm = contact.normalizedNumber.ifBlank { contact.phoneNumber }.trim()
+                val match = matchesByNumber[norm]
+                if (match != null) {
+                    contact.copy(
+                        isNexaUser = true,
+                        nexaNxId = match.nxId
+                    )
+                } else {
+                    contact
+                }
+            }
+
+            Result.success(augmented)
         } catch (e: Exception) {
             Result.failure(e)
         }

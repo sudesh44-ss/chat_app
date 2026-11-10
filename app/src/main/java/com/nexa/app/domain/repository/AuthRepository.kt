@@ -39,8 +39,19 @@ interface AuthRepository {
         avatarUrl: String? = null,
         age: Int? = null,
         gender: String? = null,
-        bio: String? = null
+        bio: String? = null,
+        email: String? = null
     ): Result<UserProfile>
+
+    suspend fun fetchRemoteProfile(): Result<UserProfile>
+
+    suspend fun updateRemoteProfile(
+        name: String? = null,
+        bio: String? = null,
+        gender: String? = null,
+        age: Int? = null,
+        avatarUrl: String? = null
+    ): Result<Boolean>
 
     suspend fun resolveUser(target: String): Result<UserResolveDto>
 

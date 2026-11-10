@@ -21,6 +21,19 @@ const (
 	PacketType_PACKET_TYPING         PacketType = 10
 	PacketType_PACKET_DEVICE_SYNC    PacketType = 11
 	PacketType_PACKET_SIGNALING      PacketType = 12 // OP_SIGNALING for WebRTC SDP & ICE candidates
+	PacketType_PACKET_REGISTER_ROUTING_TOKENS PacketType = 13
+	PacketType_PACKET_PEER_SYNC      PacketType = 14
+	PacketType_PACKET_CUSTODY_ACK    PacketType = 15
+)
+
+type CustodyStatus int32
+
+const (
+	CustodyStatus_CUSTODY_STATUS_UNSPECIFIED CustodyStatus = 0
+	CustodyStatus_CUSTODY_ACCEPTED           CustodyStatus = 1
+	CustodyStatus_CUSTODY_TRANSFERRED        CustodyStatus = 2
+	CustodyStatus_CUSTODY_REJECTED           CustodyStatus = 3
+	CustodyStatus_CUSTODY_EXPIRED            CustodyStatus = 4
 )
 
 type AckStatus int32
@@ -53,6 +66,18 @@ type EncryptedMessagePayload struct {
 type DeliveryAckPayload struct {
 	OriginalPacketId string    `json:"original_packet_id"`
 	Status           AckStatus `json:"status"`
+	RecipientNxId    string    `json:"recipient_nx_id,omitempty"`
+	DeviceId         string    `json:"device_id,omitempty"`
+	Timestamp        int64     `json:"timestamp,omitempty"`
+	Signature        []byte    `json:"signature,omitempty"`
+}
+
+type CustodyAckPayload struct {
+	OriginalPacketId string        `json:"original_packet_id"`
+	CustodianNxId    string        `json:"custodian_nx_id"`
+	Status           CustodyStatus `json:"status"`
+	Timestamp        int64         `json:"timestamp"`
+	Signature        []byte        `json:"signature,omitempty"`
 }
 
 type AuthChallengePayload struct {
@@ -85,19 +110,51 @@ type SignalingPayload struct {
 	Data       string `json:"data,omitempty"`
 }
 
+type RoutingTokenRegistrationPayload struct {
+	Tokens []string `json:"tokens"`
+}
+
+type PeerSyncAction int32
+
+const (
+	PeerSyncAction_SYNC_UNKNOWN        PeerSyncAction = 0
+	PeerSyncAction_SYNC_HELLO          PeerSyncAction = 1
+	PeerSyncAction_SYNC_HELLO_ACK      PeerSyncAction = 2
+	PeerSyncAction_SYNC_INVENTORY_REQ  PeerSyncAction = 3
+	PeerSyncAction_SYNC_INVENTORY_RESP PeerSyncAction = 4
+	PeerSyncAction_SYNC_PULL_REQ       PeerSyncAction = 5
+	PeerSyncAction_SYNC_PULL_RESP      PeerSyncAction = 6
+	PeerSyncAction_SYNC_ACK            PeerSyncAction = 7
+)
+
+type PeerSyncPayload struct {
+	Action          PeerSyncAction `json:"action"`
+	SessionId       string         `json:"session_id"`
+	ConversationId  string         `json:"conversation_id"`
+	CursorTimestamp int64          `json:"cursor_timestamp"`
+	CursorSequence  int64          `json:"cursor_sequence"`
+	MessageIds      []string       `json:"message_ids,omitempty"`
+	Envelopes       [][]byte       `json:"envelopes,omitempty"`
+	SyncTimestamp   int64          `json:"sync_timestamp"`
+	ErrorMessage    string         `json:"error_message,omitempty"`
+}
+
 type NexaWirePacket struct {
-	PacketId      string                   `json:"packet_id"`
-	Type          PacketType               `json:"type"`
-	SenderNxId    string                   `json:"sender_nx_id"`
-	RecipientNxId string                   `json:"recipient_nx_id"`
-	Timestamp     int64                    `json:"timestamp"`
-	Message       *EncryptedMessagePayload `json:"message,omitempty"`
-	Ack           *DeliveryAckPayload      `json:"ack,omitempty"`
-	AuthChallenge *AuthChallengePayload    `json:"auth_challenge,omitempty"`
-	AuthResponse  *AuthResponsePayload     `json:"auth_response,omitempty"`
-	Typing        *TypingPayload           `json:"typing,omitempty"`
-	DeviceSync    *DeviceSyncPayload       `json:"device_sync,omitempty"`
-	Signaling     *SignalingPayload        `json:"signaling,omitempty"`
+	PacketId      string                           `json:"packet_id"`
+	Type          PacketType                       `json:"type"`
+	SenderNxId    string                           `json:"sender_nx_id"`
+	RecipientNxId string                           `json:"recipient_nx_id"`
+	Timestamp     int64                            `json:"timestamp"`
+	Message       *EncryptedMessagePayload         `json:"message,omitempty"`
+	Ack           *DeliveryAckPayload              `json:"ack,omitempty"`
+	AuthChallenge *AuthChallengePayload            `json:"auth_challenge,omitempty"`
+	AuthResponse  *AuthResponsePayload             `json:"auth_response,omitempty"`
+	Typing        *TypingPayload                   `json:"typing,omitempty"`
+	DeviceSync    *DeviceSyncPayload               `json:"device_sync,omitempty"`
+	Signaling     *SignalingPayload                `json:"signaling,omitempty"`
+	RoutingTokens *RoutingTokenRegistrationPayload `json:"routing_tokens,omitempty"`
+	PeerSync      *PeerSyncPayload                 `json:"peer_sync,omitempty"`
+	CustodyAck    *CustodyAckPayload               `json:"custody_ack,omitempty"`
 }
 
 // Encode encodes a NexaWirePacket into standard Protobuf wire binary format.
@@ -201,6 +258,22 @@ func (p *NexaWirePacket) Encode() ([]byte, error) {
 		if p.Ack.Status != AckStatus_ACK_UNKNOWN {
 			writeTag(ackBuf, 2, 0)
 			writeVarint(ackBuf, uint64(p.Ack.Status))
+		}
+		if p.Ack.RecipientNxId != "" {
+			writeTag(ackBuf, 3, 2)
+			writeLengthDelimited(ackBuf, []byte(p.Ack.RecipientNxId))
+		}
+		if p.Ack.DeviceId != "" {
+			writeTag(ackBuf, 4, 2)
+			writeLengthDelimited(ackBuf, []byte(p.Ack.DeviceId))
+		}
+		if p.Ack.Timestamp != 0 {
+			writeTag(ackBuf, 5, 0)
+			writeVarint(ackBuf, uint64(p.Ack.Timestamp))
+		}
+		if len(p.Ack.Signature) > 0 {
+			writeTag(ackBuf, 6, 2)
+			writeLengthDelimited(ackBuf, p.Ack.Signature)
 		}
 
 		writeTag(buf, 7, 2)
@@ -308,6 +381,95 @@ func (p *NexaWirePacket) Encode() ([]byte, error) {
 
 		writeTag(buf, 12, 2)
 		writeLengthDelimited(buf, sBuf.Bytes())
+	}
+
+	// Field 13: routing_tokens (RoutingTokenRegistrationPayload, wire type 2)
+	if p.RoutingTokens != nil {
+		rtBuf := new(bytes.Buffer)
+		for _, token := range p.RoutingTokens.Tokens {
+			if token != "" {
+				writeTag(rtBuf, 1, 2)
+				writeLengthDelimited(rtBuf, []byte(token))
+			}
+		}
+		writeTag(buf, 13, 2)
+		writeLengthDelimited(buf, rtBuf.Bytes())
+	}
+
+	// Field 14: peer_sync (PeerSyncPayload, wire type 2)
+	if p.PeerSync != nil {
+		psBuf := new(bytes.Buffer)
+		if p.PeerSync.Action != PeerSyncAction_SYNC_UNKNOWN {
+			writeTag(psBuf, 1, 0)
+			writeVarint(psBuf, uint64(p.PeerSync.Action))
+		}
+		if p.PeerSync.SessionId != "" {
+			writeTag(psBuf, 2, 2)
+			writeLengthDelimited(psBuf, []byte(p.PeerSync.SessionId))
+		}
+		if p.PeerSync.ConversationId != "" {
+			writeTag(psBuf, 3, 2)
+			writeLengthDelimited(psBuf, []byte(p.PeerSync.ConversationId))
+		}
+		if p.PeerSync.CursorTimestamp != 0 {
+			writeTag(psBuf, 4, 0)
+			writeVarint(psBuf, uint64(p.PeerSync.CursorTimestamp))
+		}
+		if p.PeerSync.CursorSequence != 0 {
+			writeTag(psBuf, 5, 0)
+			writeVarint(psBuf, uint64(p.PeerSync.CursorSequence))
+		}
+		for _, mid := range p.PeerSync.MessageIds {
+			if mid != "" {
+				writeTag(psBuf, 6, 2)
+				writeLengthDelimited(psBuf, []byte(mid))
+			}
+		}
+		for _, env := range p.PeerSync.Envelopes {
+			if len(env) > 0 {
+				writeTag(psBuf, 7, 2)
+				writeLengthDelimited(psBuf, env)
+			}
+		}
+		if p.PeerSync.SyncTimestamp != 0 {
+			writeTag(psBuf, 8, 0)
+			writeVarint(psBuf, uint64(p.PeerSync.SyncTimestamp))
+		}
+		if p.PeerSync.ErrorMessage != "" {
+			writeTag(psBuf, 9, 2)
+			writeLengthDelimited(psBuf, []byte(p.PeerSync.ErrorMessage))
+		}
+
+		writeTag(buf, 14, 2)
+		writeLengthDelimited(buf, psBuf.Bytes())
+	}
+
+	// Field 15: custody_ack (CustodyAckPayload, wire type 2)
+	if p.CustodyAck != nil {
+		caBuf := new(bytes.Buffer)
+		if p.CustodyAck.OriginalPacketId != "" {
+			writeTag(caBuf, 1, 2)
+			writeLengthDelimited(caBuf, []byte(p.CustodyAck.OriginalPacketId))
+		}
+		if p.CustodyAck.CustodianNxId != "" {
+			writeTag(caBuf, 2, 2)
+			writeLengthDelimited(caBuf, []byte(p.CustodyAck.CustodianNxId))
+		}
+		if p.CustodyAck.Status != CustodyStatus_CUSTODY_STATUS_UNSPECIFIED {
+			writeTag(caBuf, 3, 0)
+			writeVarint(caBuf, uint64(p.CustodyAck.Status))
+		}
+		if p.CustodyAck.Timestamp != 0 {
+			writeTag(caBuf, 4, 0)
+			writeVarint(caBuf, uint64(p.CustodyAck.Timestamp))
+		}
+		if len(p.CustodyAck.Signature) > 0 {
+			writeTag(caBuf, 5, 2)
+			writeLengthDelimited(caBuf, p.CustodyAck.Signature)
+		}
+
+		writeTag(buf, 15, 2)
+		writeLengthDelimited(buf, caBuf.Bytes())
 	}
 
 	return buf.Bytes(), nil
@@ -431,6 +593,36 @@ func Decode(data []byte) (*NexaWirePacket, error) {
 				return nil, err
 			}
 			packet.Signaling = sig
+		case 13: // routing_tokens
+			val, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			rt, err := decodeRoutingTokenRegistrationPayload(val)
+			if err != nil {
+				return nil, err
+			}
+			packet.RoutingTokens = rt
+		case 14: // peer_sync
+			val, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			ps, err := decodePeerSyncPayload(val)
+			if err != nil {
+				return nil, err
+			}
+			packet.PeerSync = ps
+		case 15: // custody_ack
+			val, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			ca, err := decodeCustodyAckPayload(val)
+			if err != nil {
+				return nil, err
+			}
+			packet.CustodyAck = ca
 		default:
 			// Skip unknown fields according to wire type
 			if err := skipField(r, wireType); err != nil {
@@ -596,6 +788,86 @@ func decodeAckPayload(data []byte) (*DeliveryAckPayload, error) {
 				return nil, err
 			}
 			payload.Status = AckStatus(v)
+		case 3:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.RecipientNxId = string(b)
+		case 4:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.DeviceId = string(b)
+		case 5:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Timestamp = int64(v)
+		case 6:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Signature = b
+		default:
+			if err := skipField(r, wireType); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return payload, nil
+}
+
+func decodeCustodyAckPayload(data []byte) (*CustodyAckPayload, error) {
+	r := bytes.NewReader(data)
+	payload := &CustodyAckPayload{}
+
+	for {
+		tag, err := binary.ReadUvarint(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+
+		switch fieldNum {
+		case 1:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.OriginalPacketId = string(b)
+		case 2:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.CustodianNxId = string(b)
+		case 3:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Status = CustodyStatus(v)
+		case 4:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Timestamp = int64(v)
+		case 5:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Signature = b
 		default:
 			if err := skipField(r, wireType); err != nil {
 				return nil, err
@@ -876,4 +1148,110 @@ func skipField(r io.Reader, wireType uint64) error {
 	default:
 		return errors.New("unsupported wire type")
 	}
+}
+
+func decodeRoutingTokenRegistrationPayload(data []byte) (*RoutingTokenRegistrationPayload, error) {
+	r := bytes.NewReader(data)
+	payload := &RoutingTokenRegistrationPayload{}
+	for {
+		tag, err := binary.ReadUvarint(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		switch fieldNum {
+		case 1:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Tokens = append(payload.Tokens, string(b))
+		default:
+			if err := skipField(r, wireType); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return payload, nil
+}
+
+func decodePeerSyncPayload(data []byte) (*PeerSyncPayload, error) {
+	r := bytes.NewReader(data)
+	payload := &PeerSyncPayload{}
+	for {
+		tag, err := binary.ReadUvarint(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		switch fieldNum {
+		case 1:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Action = PeerSyncAction(v)
+		case 2:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.SessionId = string(b)
+		case 3:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.ConversationId = string(b)
+		case 4:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.CursorTimestamp = int64(v)
+		case 5:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.CursorSequence = int64(v)
+		case 6:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.MessageIds = append(payload.MessageIds, string(b))
+		case 7:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Envelopes = append(payload.Envelopes, b)
+		case 8:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.SyncTimestamp = int64(v)
+		case 9:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.ErrorMessage = string(b)
+		default:
+			if err := skipField(r, wireType); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return payload, nil
 }

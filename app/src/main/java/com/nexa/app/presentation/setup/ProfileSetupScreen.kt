@@ -88,7 +88,8 @@ fun ProfileSetupScreen(
         gender: String?,
         bio: String?
     ) -> Unit,
-    onProceedToOtp: ((name: String, phone: String, age: Int?, gender: String?, about: String?) -> Unit)? = null
+    onProceedToOtp: ((name: String, phone: String, age: Int?, gender: String?, about: String?) -> Unit)? = null,
+    onProceedToBadge: ((nxId: String, name: String, phone: String, avatarUrl: String?) -> Unit)? = null
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -122,8 +123,20 @@ fun ProfileSetupScreen(
         )
     }
 
-    LaunchedEffect(uiState.reverseVerifyPayload) {
-        uiState.reverseVerifyPayload?.let { payload ->
+    LaunchedEffect(uiState.isAutoVerified, uiState.allocatedNxId) {
+        if (uiState.isAutoVerified && !uiState.allocatedNxId.isNullOrBlank() && onProceedToBadge != null) {
+            onProceedToBadge(
+                uiState.allocatedNxId ?: "",
+                uiState.name.trim(),
+                uiState.phone.trim(),
+                uiState.avatarUrl
+            )
+        }
+    }
+
+    LaunchedEffect(uiState.reverseVerifyPayload, uiState.isAutoVerified) {
+        val payload = uiState.reverseVerifyPayload
+        if (payload != null && !uiState.isAutoVerified) {
             onProceedToReverseVerify(
                 payload.nonce,
                 payload.inboundReceiverNumber,

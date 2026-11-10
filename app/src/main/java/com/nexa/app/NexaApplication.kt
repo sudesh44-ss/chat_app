@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.launch
 import com.nexa.app.core.crypto.DoubleRatchetEngine
 import com.nexa.app.core.keystore.HardwareKeystoreVault
@@ -37,6 +38,15 @@ import com.nexa.app.domain.repository.ChatRepository
 import com.nexa.app.domain.repository.DtnRepository
 import com.nexa.app.domain.repository.P2PTransferRepository
 import com.nexa.app.domain.repository.SecureFileTransferRepository
+import com.nexa.app.core.dtn.BlindTokenGenerator
+import com.nexa.app.core.dtn.DtnConstants
+import com.nexa.app.core.dtn.DtnEnvelope
+import com.nexa.app.core.dtn.PairwiseRoutingTokenGenerator
+import com.nexa.app.core.proto.NexaWirePacket
+import com.nexa.app.core.transport.NexaUniversalTransportIngest
+import com.nexa.app.core.transport.TransportMedium
+import com.nexa.app.data.remote.media.R2MediaFallbackService
+import com.nexa.app.data.remote.media.R2MediaFallbackServiceImpl
 import com.nexa.app.domain.repository.SecureMessageRepository
 
 class NexaApplication : Application() {
@@ -95,6 +105,9 @@ class NexaApplication : Application() {
     lateinit var secureFileTransferRepository: SecureFileTransferRepository
         private set
 
+    lateinit var r2MediaFallbackService: R2MediaFallbackService
+        private set
+
     lateinit var hardwareKeystoreVault: HardwareKeystoreVault
         private set
 
@@ -102,6 +115,9 @@ class NexaApplication : Application() {
         private set
 
     lateinit var transportRouter: TransportRouter
+        private set
+
+    lateinit var universalTransportIngest: NexaUniversalTransportIngest
         private set
 
     lateinit var pushManager: com.nexa.app.data.remote.push.NexaPushManager
@@ -311,6 +327,38 @@ class NexaApplication : Application() {
             }
         )
 
+        // 8b. Register active pairwise rotating routing tokens upon WebSocket authentication (Phase C)
+        webSocketManager.setOnAuthenticatedListener {
+            CoroutineScope(Dispatchers.IO).launch {
+                val user = database.userDao().getLocalProfile() ?: return@launch
+                val myNxId = user.nxId
+                val contacts = database.contactDao().getAllContacts().firstOrNull() ?: emptyList()
+                if (contacts.isNotEmpty()) {
+                    try {
+                        val dhKeys = keystoreManager.getOrCreateDhIdentityKeyPair(secureStorage)
+                        val myPriv = keystoreManager.decryptWithMasterKey(dhKeys.iv, dhKeys.encryptedPrivateKey)
+                        val tokens = mutableListOf<String>()
+                        val currentEpoch = com.nexa.app.core.dtn.PairwiseRoutingTokenGenerator.currentEpoch()
+                        for (contact in contacts) {
+                            if (contact.publicKeyHex.length == 64) {
+                                val contactPub = hexToBytes(contact.publicKeyHex)
+                                val pairwiseSecret = com.nexa.app.core.dtn.PairwiseRoutingTokenGenerator.derivePairwiseDhSecret(myPriv, contactPub)
+                                val routingKey = com.nexa.app.core.dtn.PairwiseRoutingTokenGenerator.deriveRoutingKey(pairwiseSecret, contact.nxId, myNxId)
+                                tokens.addAll(com.nexa.app.core.dtn.PairwiseRoutingTokenGenerator.getActiveInboundTokenHexes(routingKey, currentEpoch))
+                                java.util.Arrays.fill(pairwiseSecret, 0.toByte())
+                            }
+                        }
+                        java.util.Arrays.fill(myPriv, 0.toByte())
+                        if (tokens.isNotEmpty()) {
+                            webSocketManager.registerRoutingTokens(tokens.distinct())
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("NexaApplication", "Failed to register pairwise routing tokens on WebSocket auth: ${e.message}")
+                    }
+                }
+            }
+        }
+
         // 9. Initialize Privacy-First Notification Subsystem & Channels
         notificationPrefs = com.nexa.app.data.local.preferences.NotificationPrefs(this)
         com.nexa.app.core.notification.NexaNotificationChannelManager.createAllNotificationChannels(this)
@@ -335,15 +383,93 @@ class NexaApplication : Application() {
             notificationDispatcher = notificationDispatcher
         )
 
+        // 10b. Initialize Universal Multi-Transport Ingestion Pipeline
+        universalTransportIngest = NexaUniversalTransportIngest(
+            messageDao = database.messageDao(),
+            chatDao = database.chatDao(),
+            userDao = database.userDao(),
+            contactDao = database.contactDao(),
+            secureStorage = secureStorage,
+            keystoreManager = keystoreManager,
+            doubleRatchetEngine = doubleRatchetEngine,
+            envelopeDao = database.dtnEnvelopeDao(),
+            notificationDispatcher = notificationDispatcher,
+            messageDedupDao = database.messageDedupDao(),
+            messageTransportDao = database.messageTransportDao(),
+            ackDispatcher = { ackPacket, medium ->
+                when (medium) {
+                    TransportMedium.INTERNET_WS -> {
+                        webSocketManager.sendPacket(ackPacket)
+                    }
+                    TransportMedium.OFFLINE_MESH -> {
+                        try {
+                            val ackBytes = ackPacket.encode()
+                            val contact = database.contactDao().getContact(ackPacket.recipientNxId)
+                            val blindToken = if (contact != null && contact.publicKeyHex.length == 64) {
+                                try {
+                                    val dhKeys = keystoreManager.getOrCreateDhIdentityKeyPair(secureStorage)
+                                    val myPriv = keystoreManager.decryptWithMasterKey(dhKeys.iv, dhKeys.encryptedPrivateKey)
+                                    val contactPub = hexToBytes(contact.publicKeyHex)
+                                    val pairwiseSecret = PairwiseRoutingTokenGenerator.derivePairwiseDhSecret(myPriv, contactPub)
+                                    val myNxId = secureStorage.getActiveNxId() ?: "NX-ANONYMOUS"
+                                    val routingKey = PairwiseRoutingTokenGenerator.deriveRoutingKey(pairwiseSecret, myNxId, ackPacket.recipientNxId)
+                                    val token = PairwiseRoutingTokenGenerator.generateRoutingToken(routingKey)
+                                    java.util.Arrays.fill(pairwiseSecret, 0.toByte())
+                                    java.util.Arrays.fill(myPriv, 0.toByte())
+                                    token
+                                } catch (e: Exception) {
+                                    val recipientPkHex = contact.publicKeyHex.takeIf { it.isNotBlank() } ?: "00".repeat(32)
+                                    BlindTokenGenerator.generateTokenFromHex(recipientPkHex)
+                                }
+                            } else {
+                                val recipientPkHex = contact?.publicKeyHex?.takeIf { it.isNotBlank() } ?: "00".repeat(32)
+                                BlindTokenGenerator.generateTokenFromHex(recipientPkHex)
+                            }
+                            val idKeyPair = try { keystoreManager.getOrCreateIdentityKeyPair(secureStorage) } catch (e: Exception) { null }
+                            if (idKeyPair != null) {
+                                val env = keystoreManager.withDecryptedPrivateKey(idKeyPair) { rawPriv ->
+                                    val pubBytes = hexToBytes(idKeyPair.publicKeyHex)
+                                    DtnEnvelope.createAuthenticated(
+                                        blindToken = blindToken,
+                                        encryptedPayload = ackBytes,
+                                        senderPrivateKey = rawPriv,
+                                        senderPublicKey = pubBytes,
+                                        envelopeType = DtnConstants.TYPE_ACK_PACKET
+                                    )
+                                }
+                                dtnRepository.ingestInboundEnvelope(env)
+                            } else {
+                                android.util.Log.w("NexaApplication", "Cannot dispatch Mesh ACK: Identity key unavailable")
+                            }
+                        } catch (e: Exception) {
+                            android.util.Log.w("NexaApplication", "Failed to broadcast Mesh delivery ACK: ${e.message}")
+                        }
+                    }
+                    TransportMedium.CELLULAR_DATA_SMS -> {
+                        // SMS ACK is carrier-dependent / optional
+                    }
+                }
+            }
+        )
+        (chatRepository as? ChatRepositoryImpl)?.universalTransportIngest = universalTransportIngest
+        (dtnRepository as? DtnRepositoryImpl)?.apply {
+            this.universalTransportIngest = this@NexaApplication.universalTransportIngest
+            this.doubleRatchetEngine = this@NexaApplication.doubleRatchetEngine
+            this.contactDao = database.contactDao()
+        }
+
         // 10. Initialize WebRTC Signaling Client, Engine & P2P Transfer Repository
         signalingClient = SignalingClient()
         webRtcClient = WebRtcClient(this)
+        r2MediaFallbackService = R2MediaFallbackServiceImpl()
         p2pTransferRepository = P2PTransferRepositoryImpl(
             context = this,
             transferDao = database.fileTransferDao(),
             signalingClient = signalingClient,
             webRtcClient = webRtcClient,
-            secureStorage = secureStorage
+            secureStorage = secureStorage,
+            networkMonitor = networkMonitor,
+            r2FallbackService = r2MediaFallbackService
         )
 
         // 11. Initialize Quarantine Sandbox, Swarm Coordinator & Secure File Transfer Repository
@@ -380,9 +506,10 @@ class NexaApplication : Application() {
         )
 
         val activeNxId = secureStorage.getActiveNxId()
+        val sessionToken = secureStorage.getSessionToken()
         if (!activeNxId.isNullOrBlank()) {
-            signalingClient.connect(activeNxId)
-            swarmSignalingClient.connect(activeNxId)
+            signalingClient.connect(activeNxId, sessionToken)
+            swarmSignalingClient.connect(activeNxId, sessionToken)
         }
 
         // 12. Initialize Zero-Knowledge Google Drive Backup Subsystem

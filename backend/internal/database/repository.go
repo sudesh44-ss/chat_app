@@ -250,7 +250,8 @@ func (r *PostgresRepository) LookupVerifiedPhoneNumbers(phoneNumbers []string) [
 		SELECT phone_number, nx_id, profile_name, public_key_hex
 		FROM accounts
 		WHERE phone_number = ANY($1)
-		  AND (phone_verified = TRUE OR is_discoverable_by_phone = TRUE);
+		  AND phone_verified = TRUE
+		  AND is_discoverable_by_phone = TRUE;
 	`
 
 	rows, err := r.pool.Query(ctx, query, unique)

@@ -60,6 +60,14 @@ class SecureStorage(context: Context) {
         return newPassphrase
     }
 
+    /**
+     * Imports an existing database passphrase (e.g. during cross-device restoration).
+     * Protected under the local hardware Android KeyStore MasterKey.
+     */
+    fun saveDatabasePassphrase(passphrase: ByteArray) {
+        prefs.edit().putString(KEY_DB_PASSPHRASE, passphrase.toHex()).apply()
+    }
+
     fun saveRecoveryPassphrase(passphrase: String) {
         prefs.edit().putString(KEY_RECOVERY_PASSPHRASE, passphrase.trim()).apply()
     }
@@ -122,6 +130,65 @@ class SecureStorage(context: Context) {
         return prefs.getString(KEY_ACCOUNT_STATUS, "ACTIVE") ?: "ACTIVE"
     }
 
+    fun saveActiveUploadSession(
+        sessionUri: String,
+        versionEpoch: Long,
+        vaultFilePath: String,
+        expectedFileSize: Long,
+        lastConfirmedOffset: Long,
+        existingFileId: String? = null
+    ) {
+        prefs.edit()
+            .putString(KEY_UPLOAD_SESSION_URI, sessionUri)
+            .putLong(KEY_UPLOAD_VERSION_EPOCH, versionEpoch)
+            .putString(KEY_UPLOAD_VAULT_PATH, vaultFilePath)
+            .putLong(KEY_UPLOAD_EXPECTED_SIZE, expectedFileSize)
+            .putLong(KEY_UPLOAD_CONFIRMED_OFFSET, lastConfirmedOffset)
+            .putLong(KEY_UPLOAD_UPDATED_AT, System.currentTimeMillis())
+            .putString(KEY_UPLOAD_EXISTING_FILE_ID, existingFileId)
+            .apply()
+    }
+
+    fun getActiveUploadSession(): com.nexa.app.data.drive.UploadSessionState? {
+        val uri = prefs.getString(KEY_UPLOAD_SESSION_URI, null) ?: return null
+        val epoch = prefs.getLong(KEY_UPLOAD_VERSION_EPOCH, 0L)
+        val path = prefs.getString(KEY_UPLOAD_VAULT_PATH, null) ?: return null
+        val size = prefs.getLong(KEY_UPLOAD_EXPECTED_SIZE, 0L)
+        val offset = prefs.getLong(KEY_UPLOAD_CONFIRMED_OFFSET, 0L)
+        val updated = prefs.getLong(KEY_UPLOAD_UPDATED_AT, 0L)
+        val fileId = prefs.getString(KEY_UPLOAD_EXISTING_FILE_ID, null)
+
+        val session = com.nexa.app.data.drive.UploadSessionState(
+            sessionUri = uri,
+            versionEpoch = epoch,
+            vaultFilePath = path,
+            expectedFileSize = size,
+            lastConfirmedOffset = offset,
+            updatedAt = updated,
+            existingFileId = fileId
+        )
+        return if (session.isValid()) session else null
+    }
+
+    fun updateUploadSessionOffset(confirmedOffset: Long) {
+        prefs.edit()
+            .putLong(KEY_UPLOAD_CONFIRMED_OFFSET, confirmedOffset)
+            .putLong(KEY_UPLOAD_UPDATED_AT, System.currentTimeMillis())
+            .apply()
+    }
+
+    fun clearActiveUploadSession() {
+        prefs.edit()
+            .remove(KEY_UPLOAD_SESSION_URI)
+            .remove(KEY_UPLOAD_VERSION_EPOCH)
+            .remove(KEY_UPLOAD_VAULT_PATH)
+            .remove(KEY_UPLOAD_EXPECTED_SIZE)
+            .remove(KEY_UPLOAD_CONFIRMED_OFFSET)
+            .remove(KEY_UPLOAD_UPDATED_AT)
+            .remove(KEY_UPLOAD_EXISTING_FILE_ID)
+            .apply()
+    }
+
     fun clearAll() {
         prefs.edit().clear().apply()
     }
@@ -142,5 +209,12 @@ class SecureStorage(context: Context) {
         private const val KEY_DH_IDENTITY_ENCRYPTED_PRIVKEY = "key_dh_identity_encrypted_privkey"
         private const val KEY_DH_IDENTITY_IV = "key_dh_identity_iv"
         private const val KEY_ACCOUNT_STATUS = "key_account_status"
+        private const val KEY_UPLOAD_SESSION_URI = "key_upload_session_uri"
+        private const val KEY_UPLOAD_VERSION_EPOCH = "key_upload_version_epoch"
+        private const val KEY_UPLOAD_VAULT_PATH = "key_upload_vault_path"
+        private const val KEY_UPLOAD_EXPECTED_SIZE = "key_upload_expected_size"
+        private const val KEY_UPLOAD_CONFIRMED_OFFSET = "key_upload_confirmed_offset"
+        private const val KEY_UPLOAD_UPDATED_AT = "key_upload_updated_at"
+        private const val KEY_UPLOAD_EXISTING_FILE_ID = "key_upload_existing_file_id"
     }
 }

@@ -47,7 +47,8 @@ enum class NexaTransportOption {
 fun NexaTransportSelector(
     currentOption: NexaTransportOption,
     onOptionSelected: (NexaTransportOption) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isSmsSupported: Boolean = false
 ) {
     val isDark = isSystemInDarkTheme()
 
@@ -91,17 +92,23 @@ fun NexaTransportSelector(
                 iconRes = R.drawable.ic_nexa_wifi,
                 tint = MaterialTheme.colorScheme.primary,
                 isSelected = currentOption == NexaTransportOption.INTERNET,
+                isEnabled = true,
                 onClick = { onOptionSelected(NexaTransportOption.INTERNET) }
             )
 
-            // 2. SMS
+            // 2. SMS (Disabled for Play Store & ECM compliance)
             TransportOptionItem(
                 title = "SMS",
-                description = "Port 8901 binary SMS airwaves. No data plan required.",
+                description = if (isSmsSupported) "Port 8901 binary SMS airwaves. No data plan required." else "Unavailable: Port 8901 binary SMS is disabled for Play Protect compliance.",
                 iconRes = R.drawable.ic_nexa_messages_square,
-                tint = NexaWarningOrange,
-                isSelected = currentOption == NexaTransportOption.SMS,
-                onClick = { onOptionSelected(NexaTransportOption.SMS) }
+                tint = if (isSmsSupported) NexaWarningOrange else Color.Gray,
+                isSelected = isSmsSupported && currentOption == NexaTransportOption.SMS,
+                isEnabled = isSmsSupported,
+                onClick = {
+                    if (isSmsSupported) {
+                        onOptionSelected(NexaTransportOption.SMS)
+                    }
+                }
             )
 
             // 3. Mesh / Nearby Bluetooth
@@ -111,6 +118,7 @@ fun NexaTransportSelector(
                 iconRes = R.drawable.ic_nexa_mesh,
                 tint = NexaBadgeMonospace,
                 isSelected = currentOption == NexaTransportOption.MESH_BLUETOOTH,
+                isEnabled = true,
                 onClick = { onOptionSelected(NexaTransportOption.MESH_BLUETOOTH) }
             )
 
@@ -121,6 +129,7 @@ fun NexaTransportSelector(
                 iconRes = R.drawable.ic_nexa_badge_check,
                 tint = contentColor,
                 isSelected = currentOption == NexaTransportOption.AUTO,
+                isEnabled = true,
                 onClick = { onOptionSelected(NexaTransportOption.AUTO) }
             )
         }
@@ -134,10 +143,12 @@ private fun TransportOptionItem(
     iconRes: Int,
     tint: Color,
     isSelected: Boolean,
+    isEnabled: Boolean = true,
     onClick: () -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
-    val bgColor = if (isSelected) {
+    val effectiveTint = if (isEnabled) tint else Color.Gray
+    val bgColor = if (isSelected && isEnabled) {
         tint.copy(alpha = if (isDark) 0.18f else 0.12f)
     } else {
         Color.Transparent
@@ -146,11 +157,11 @@ private fun TransportOptionItem(
     NexaGlassSurface(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick),
+            .clickable(enabled = isEnabled, onClick = onClick),
         shape = RoundedCornerShape(14.dp),
         surfaceColor = bgColor,
-        isSelected = isSelected,
-        elevation = if (isSelected) 2.dp else 0.dp
+        isSelected = isSelected && isEnabled,
+        elevation = if (isSelected && isEnabled) 2.dp else 0.dp
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -159,28 +170,39 @@ private fun TransportOptionItem(
             Icon(
                 painter = painterResource(id = iconRes),
                 contentDescription = title,
-                tint = tint,
+                tint = effectiveTint,
                 modifier = Modifier.size(24.dp)
             )
             Spacer(modifier = Modifier.width(14.dp))
             Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = title,
-                    fontSize = 15.sp,
-                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                    color = if (isDark) Color.White else Color.Black
-                )
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = title,
+                        fontSize = 15.sp,
+                        fontWeight = if (isSelected && isEnabled) FontWeight.Bold else FontWeight.Medium,
+                        color = if (!isEnabled) Color.Gray else if (isDark) Color.White else Color.Black
+                    )
+                    if (!isEnabled) {
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "(Disabled)",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f)
+                        )
+                    }
+                }
                 Text(
                     text = description,
                     fontSize = 12.sp,
-                    color = if (isDark) Color(0xFFAAAAAA) else Color(0xFF666666)
+                    color = if (!isEnabled) Color.Gray.copy(alpha = 0.8f) else if (isDark) Color(0xFFAAAAAA) else Color(0xFF666666)
                 )
             }
-            if (isSelected) {
+            if (isSelected && isEnabled) {
                 Icon(
                     painter = painterResource(id = R.drawable.ic_nexa_check),
                     contentDescription = "Selected",
-                    tint = tint,
+                    tint = effectiveTint,
                     modifier = Modifier.size(20.dp)
                 )
             }

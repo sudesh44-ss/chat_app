@@ -32,10 +32,27 @@ class DriveResumableUploader(
     suspend fun upload(
         sessionUri: String,
         file: File,
-        onProgress: (uploadedBytes: Long, totalBytes: Long) -> Unit = { _, _ -> }
+        onProgress: (uploadedBytes: Long, totalBytes: Long) -> Unit = { _, _ -> },
+        onChunkUploaded: (confirmedOffset: Long) -> Unit = {}
     ): String = withContext(Dispatchers.IO) {
+        if (!UploadSessionState.isValidSessionUri(sessionUri)) {
+            throw IllegalArgumentException("Invalid or untrusted Google Drive resumable upload session URI")
+        }
+
         val totalBytes = file.length()
         var currentOffset = queryUploadOffset(sessionUri, totalBytes)
+        onProgress(currentOffset, totalBytes)
+        onChunkUploaded(currentOffset)
+
+        if (currentOffset >= totalBytes && totalBytes > 0) {
+            val completedFileId = fetchUploadedFileMetadata(sessionUri, totalBytes)
+            if (completedFileId != null) {
+                onProgress(totalBytes, totalBytes)
+                onChunkUploaded(totalBytes)
+                return@withContext completedFileId
+            }
+        }
+
         val buffer = ByteArray(CHUNK_SIZE)
 
         RandomAccessFile(file, "r").use { raf ->
@@ -58,11 +75,13 @@ class DriveResumableUploader(
 
                 if (uploadedFileId != null) {
                     onProgress(totalBytes, totalBytes)
+                    onChunkUploaded(totalBytes)
                     return@withContext uploadedFileId
                 }
 
                 currentOffset = queryUploadOffset(sessionUri, totalBytes)
                 onProgress(currentOffset, totalBytes)
+                onChunkUploaded(currentOffset)
             }
         }
 
@@ -70,6 +89,7 @@ class DriveResumableUploader(
         val finalFileId = fetchUploadedFileMetadata(sessionUri, totalBytes)
         if (finalFileId != null) {
             onProgress(totalBytes, totalBytes)
+            onChunkUploaded(totalBytes)
             return@withContext finalFileId
         }
 
@@ -115,6 +135,10 @@ class DriveResumableUploader(
                             // Resume Incomplete - chunk recorded by Drive
                             return null
                         }
+                        404, 410 -> {
+                            // Session expired or purged on Google Drive server
+                            throw UploadSessionExpiredException("Resumable upload session expired or not found on server (HTTP $code)")
+                        }
                         in 500..599 -> {
                             // Transient server error, wait & retry
                             if (attempt == maxRetries) {
@@ -127,6 +151,7 @@ class DriveResumableUploader(
                     }
                 }
             } catch (e: Exception) {
+                if (e is UploadSessionExpiredException) throw e
                 if (attempt == maxRetries) throw e
             }
 
@@ -140,6 +165,10 @@ class DriveResumableUploader(
      * Queries Google Drive for the last confirmed byte offset stored in the session.
      */
     suspend fun queryUploadOffset(sessionUri: String, totalBytes: Long): Long = withContext(Dispatchers.IO) {
+        if (!UploadSessionState.isValidSessionUri(sessionUri)) {
+            throw IllegalArgumentException("Invalid or untrusted Google Drive resumable upload session URI")
+        }
+
         val emptyBody = ByteArray(0).toRequestBody("application/octet-stream".toMediaType())
         val request = Request.Builder()
             .url(sessionUri)
@@ -150,17 +179,28 @@ class DriveResumableUploader(
 
         try {
             client.newCall(request).execute().use { response ->
-                if (response.code == 308) {
-                    val rangeHeader = response.header("Range") // e.g. "bytes=0-262143"
-                    if (!rangeHeader.isNullOrBlank() && rangeHeader.startsWith("bytes=0-")) {
-                        val endByteStr = rangeHeader.substringAfter("bytes=0-").trim()
-                        val lastByte = endByteStr.toLongOrNull()
-                        if (lastByte != null) {
-                            return@withContext lastByte + 1
+                when (response.code) {
+                    308 -> {
+                        val rangeHeader = response.header("Range") // e.g. "bytes=0-262143"
+                        if (!rangeHeader.isNullOrBlank() && rangeHeader.startsWith("bytes=0-")) {
+                            val endByteStr = rangeHeader.substringAfter("bytes=0-").trim()
+                            val lastByte = endByteStr.toLongOrNull()
+                            if (lastByte != null) {
+                                return@withContext lastByte + 1
+                            }
                         }
+                        return@withContext 0L
+                    }
+                    200, 201 -> {
+                        return@withContext totalBytes
+                    }
+                    404, 410 -> {
+                        throw UploadSessionExpiredException("Google Drive resumable upload session has expired (HTTP ${response.code})")
                     }
                 }
             }
+        } catch (e: UploadSessionExpiredException) {
+            throw e
         } catch (ignored: Exception) {}
 
         0L

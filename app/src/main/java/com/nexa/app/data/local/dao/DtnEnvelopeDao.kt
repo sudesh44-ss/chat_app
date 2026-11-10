@@ -19,6 +19,9 @@ interface DtnEnvelopeDao {
     @Query("SELECT rawEnvelopeBytes FROM dtn_envelopes WHERE blindTokenHex = :tokenHex LIMIT 20")
     suspend fun findMatchingEnvelopes(tokenHex: String): List<ByteArray>
 
+    @Query("SELECT rawEnvelopeBytes FROM dtn_envelopes WHERE blindTokenHex IN (:tokenHexes) LIMIT 50")
+    suspend fun findMatchingEnvelopesBatch(tokenHexes: List<String>): List<ByteArray>
+
     @Query("DELETE FROM dtn_envelopes WHERE expiresAtEpochSec <= :currentEpochSec")
     suspend fun purgeExpiredEnvelopes(currentEpochSec: Long): Int
 
@@ -34,4 +37,16 @@ interface DtnEnvelopeDao {
 
     @Query("SELECT COUNT(*) FROM dtn_envelopes")
     fun getCachedCountFlow(): Flow<Int>
+
+    @Query("UPDATE dtn_envelopes SET custodyState = :custodyState WHERE envelopeIdHex = :envelopeIdHex")
+    suspend fun updateCustodyState(envelopeIdHex: String, custodyState: String): Int
+
+    @Query("UPDATE dtn_envelopes SET custodyState = :custodyState, nextHopNodeId = :nextHopNodeId, transferredAtTimestamp = :transferredAt WHERE envelopeIdHex = :envelopeIdHex")
+    suspend fun markCustodyTransferred(envelopeIdHex: String, custodyState: String, nextHopNodeId: String, transferredAt: Long): Int
+
+    @Query("SELECT * FROM dtn_envelopes WHERE custodyState = :custodyState AND expiresAtEpochSec > :currentEpochSec")
+    suspend fun getEnvelopesByCustodyState(custodyState: String, currentEpochSec: Long): List<DtnEnvelopeEntity>
+
+    @Query("SELECT * FROM dtn_envelopes WHERE envelopeIdHex = :envelopeIdHex LIMIT 1")
+    suspend fun getEnvelopeById(envelopeIdHex: String): DtnEnvelopeEntity?
 }

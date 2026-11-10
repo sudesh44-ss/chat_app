@@ -328,7 +328,7 @@ func (s *Store) LookupVerifiedPhoneNumbers(phoneNumbers []string) []*ContactMatc
 		}
 
 		// Only return if phone is verified and account allows phone discoverability
-		if acc.PhoneVerified || acc.PhoneNumber == phone {
+		if (acc.PhoneVerified || acc.PhoneNumber == phone) && acc.IsDiscoverableByPhone {
 			matches = append(matches, &ContactMatch{
 				PhoneNumber:  phone,
 				NxID:         acc.NxID,

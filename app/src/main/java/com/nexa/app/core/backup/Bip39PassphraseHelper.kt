@@ -22,6 +22,27 @@ object Bip39PassphraseHelper {
     }
 
     /**
+     * Alias for generateMnemonic() for backward compatibility.
+     */
+    fun generate12WordPassphrase(): String = generateMnemonic()
+
+    /**
+     * Alias for validateMnemonic() for backward compatibility.
+     */
+    fun isValidPassphrase(mnemonic: String): Boolean = validateMnemonic(mnemonic)
+
+    /**
+     * Standard BIP-39 PBKDF2-HMAC-SHA512 seed derivation (2048 iterations, 512 bits / 64 bytes).
+     */
+    fun toSeed(mnemonic: String, passphrase: String = ""): ByteArray {
+        val normalized = normalize(mnemonic)
+        val salt = ("mnemonic$passphrase").toByteArray(Charsets.UTF_8)
+        val spec = javax.crypto.spec.PBEKeySpec(normalized.toCharArray(), salt, 2048, 512)
+        val factory = javax.crypto.SecretKeyFactory.getInstance("PBKDF2WithHmacSHA512")
+        return factory.generateSecret(spec).encoded
+    }
+
+    /**
      * Converts 16 bytes of entropy into 12 BIP-39 words.
      */
     fun entropyToMnemonic(entropy: ByteArray): String {

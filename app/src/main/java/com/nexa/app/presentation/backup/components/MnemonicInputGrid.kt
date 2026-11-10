@@ -38,8 +38,8 @@ import com.nexa.app.core.backup.Bip39PassphraseHelper
 @Composable
 fun MnemonicInputGrid(
     words: List<String>,
-    onWordChange: (index: Int, newWord: String) -> Unit,
-    onPasteFullMnemonic: (phrase: String) -> Unit,
+    onWordChange: (index: Int, newWord: String) -> Unit = { _, _ -> },
+    onPasteFullMnemonic: (phrase: String) -> Unit = {},
     modifier: Modifier = Modifier,
     isReadOnly: Boolean = false
 ) {

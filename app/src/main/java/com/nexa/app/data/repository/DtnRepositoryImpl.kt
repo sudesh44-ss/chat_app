@@ -5,9 +5,17 @@ import android.util.Log
 import com.nexa.app.core.dtn.BlindTokenGenerator
 import com.nexa.app.core.dtn.DtnConstants
 import com.nexa.app.core.dtn.DtnEnvelope
+import com.nexa.app.core.dtn.PairwiseRoutingTokenGenerator
+import com.nexa.app.core.proto.NexaWirePacket
+import com.nexa.app.core.proto.PacketType
 import com.nexa.app.core.security.CryptoKeystoreManager
+import com.nexa.app.core.crypto.DoubleRatchetEngine
 import com.nexa.app.core.security.SecureStorage
+import com.nexa.app.core.transport.NexaUniversalTransportIngest
+import com.nexa.app.core.transport.TransportMedium
 import com.nexa.app.data.local.dao.ChatDao
+import com.nexa.app.data.local.dao.ContactDao
+import com.nexa.app.data.local.dao.getAllContactsList
 import com.nexa.app.data.local.dao.DtnEnvelopeDao
 import com.nexa.app.data.local.dao.MessageDao
 import com.nexa.app.data.local.dao.UserDao
@@ -42,6 +50,10 @@ class DtnRepositoryImpl(
     private val keystoreManager: CryptoKeystoreManager,
     private val relayApi: DtnRelayApi
 ) : DtnRepository {
+
+    var doubleRatchetEngine: DoubleRatchetEngine? = null
+    var universalTransportIngest: NexaUniversalTransportIngest? = null
+    var contactDao: ContactDao? = null
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -79,33 +91,79 @@ class DtnRepositoryImpl(
         try {
             val myNxId = secureStorage.getActiveNxId() ?: "NX-ANONYMOUS"
 
-            // 1. Generate 16-byte Blind Token from recipient's public key & day salt
-            val blindToken = BlindTokenGenerator.generateTokenFromHex(recipientPublicKeyHex)
+            // 1. Generate 16-byte Pairwise Rotating Routing Token (Phase C) with fallback
+            val blindToken = try {
+                val dhKeys = keystoreManager.getOrCreateDhIdentityKeyPair(secureStorage)
+                val myPriv = keystoreManager.decryptWithMasterKey(dhKeys.iv, dhKeys.encryptedPrivateKey)
+                val recipientPubBytes = recipientPublicKeyHex.hexToByteArray()
+                if (recipientPubBytes.size == 32) {
+                    val pairwiseSecret = PairwiseRoutingTokenGenerator.derivePairwiseDhSecret(myPriv, recipientPubBytes)
+                    val routingKey = PairwiseRoutingTokenGenerator.deriveRoutingKey(pairwiseSecret, myNxId, recipientNxId)
+                    val token = PairwiseRoutingTokenGenerator.generateRoutingToken(routingKey)
+                    java.util.Arrays.fill(myPriv, 0.toByte())
+                    java.util.Arrays.fill(pairwiseSecret, 0.toByte())
+                    token
+                } else {
+                    BlindTokenGenerator.generateTokenFromHex(recipientPublicKeyHex)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Falling back to legacy blind token: ${e.message}")
+                BlindTokenGenerator.generateTokenFromHex(recipientPublicKeyHex)
+            }
 
-            // 2. Wrap message into internal JSON payload before encryption
-            val innerJson = JSONObject().apply {
-                put("sender_nx_id", myNxId)
-                put("recipient_nx_id", recipientNxId)
-                put("text", plainText)
-                put("timestamp", System.currentTimeMillis())
-                put("packet_id", UUID.randomUUID().toString())
-            }.toString()
+            // 2. Encrypt using Double Ratchet E2EE if engine is available
+            val encryptedPayload = if (doubleRatchetEngine != null) {
+                val plainBytes = plainText.toByteArray(StandardCharsets.UTF_8)
+                val recipientPubKeyBytes = recipientPublicKeyHex.hexToByteArray()
+                val encEnvelope = doubleRatchetEngine?.ratchetEncrypt(recipientNxId, plainBytes, recipientPubKeyBytes)
+                    ?: throw IllegalStateException("Double Ratchet encryption returned null")
 
-            val plainBytes = innerJson.toByteArray(StandardCharsets.UTF_8)
-            val (iv, ciphertext) = keystoreManager.encryptWithMasterKey(plainBytes)
+                val wirePacket = NexaWirePacket(
+                    packetId = UUID.randomUUID().toString(),
+                    type = PacketType.PACKET_MESSAGE,
+                    senderNxId = myNxId,
+                    recipientNxId = recipientNxId,
+                    timestamp = System.currentTimeMillis(),
+                    message = encEnvelope.toProtobufPayload()
+                )
+                wirePacket.encode()
+            } else {
+                // Fallback to Keystore encryption for test environments without ratchet
+                val innerJson = JSONObject().apply {
+                    put("sender_nx_id", myNxId)
+                    put("recipient_nx_id", recipientNxId)
+                    put("text", plainText)
+                    put("timestamp", System.currentTimeMillis())
+                    put("packet_id", UUID.randomUUID().toString())
+                }.toString()
 
-            // Pack IV + ciphertext into envelope payload
-            val encryptedPayload = ByteArray(iv.size + ciphertext.size)
-            System.arraycopy(iv, 0, encryptedPayload, 0, iv.size)
-            System.arraycopy(ciphertext, 0, encryptedPayload, iv.size, ciphertext.size)
+                val plainBytes = innerJson.toByteArray(StandardCharsets.UTF_8)
+                val (iv, ciphertext) = keystoreManager.encryptWithMasterKey(plainBytes)
 
-            // 3. Create sealed DTN envelope
-            val envelope = DtnEnvelope.createNew(
-                blindToken = blindToken,
-                encryptedPayload = encryptedPayload,
-                hopLimit = DtnConstants.DEFAULT_HOP_LIMIT,
-                ttlSeconds = DtnConstants.DEFAULT_TTL_SECONDS
-            )
+                val payload = ByteArray(iv.size + ciphertext.size)
+                System.arraycopy(iv, 0, payload, 0, iv.size)
+                System.arraycopy(ciphertext, 0, payload, iv.size, ciphertext.size)
+                payload
+            }
+
+            // 3. Create cryptographically authenticated NXDT envelope (Fail-closed on missing key)
+            val idKeyPair = try {
+                keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
+            } catch (e: Exception) {
+                null
+            } ?: throw IllegalStateException("Cannot create authenticated DTN envelope: Device identity key unavailable")
+
+            val envelope = keystoreManager.withDecryptedPrivateKey(idKeyPair) { rawPriv ->
+                val pubBytes = idKeyPair.publicKeyHex.hexToByteArray()
+                DtnEnvelope.createAuthenticated(
+                    blindToken = blindToken,
+                    encryptedPayload = encryptedPayload,
+                    senderPrivateKey = rawPriv,
+                    senderPublicKey = pubBytes,
+                    hopLimit = DtnConstants.DEFAULT_HOP_LIMIT,
+                    ttlSeconds = DtnConstants.DEFAULT_TTL_SECONDS
+                )
+            }
 
             // 4. Persist to local SQLCipher DTN vault
             val entity = DtnEnvelopeEntity(
@@ -134,6 +192,12 @@ class DtnRepositoryImpl(
         val nowSec = System.currentTimeMillis() / 1000L
         if (envelope.expiresAtEpochSec <= nowSec) return@withContext false
 
+        // Cryptographic integrity gate: Reject invalid or tampered NXDT v1 envelopes
+        if (envelope.protocolVersion == DtnConstants.PROTOCOL_VERSION_1 && !envelope.verifySignature()) {
+            Log.w(TAG, "Rejected inbound NXDT envelope [${envelope.envelopeIdHex.take(8)}]: Signature verification failed")
+            return@withContext false
+        }
+
         val entity = DtnEnvelopeEntity(
             envelopeIdHex = envelope.envelopeIdHex,
             blindTokenHex = envelope.blindTokenHex,
@@ -152,23 +216,55 @@ class DtnRepositoryImpl(
 
     override suspend fun checkAndConsumeEnvelopesForMe(): List<DtnEnvelope> = withContext(Dispatchers.IO) {
         val user = userDao.getLocalProfile() ?: return@withContext emptyList()
+        val myNxId = user.nxId
         val myPkHex = user.publicKeyHex
-        if (myPkHex.isBlank()) return@withContext emptyList()
 
-        val myKeyBytes = myPkHex.hexToByteArray()
-        val currentDay = BlindTokenGenerator.currentEpochDay()
+        val tokenHexesToSearch = mutableSetOf<String>()
 
-        // Check tokens for today and yesterday (to tolerate clock drift across 24h boundary)
-        val todayTokenHex = BlindTokenGenerator.generateToken(myKeyBytes, currentDay).toHex()
-        val yesterdayTokenHex = BlindTokenGenerator.generateToken(myKeyBytes, currentDay - 1).toHex()
+        // 1. Pairwise Rotating Routing Tokens across established contacts (Phase C)
+        val contacts = contactDao?.getAllContactsList() ?: emptyList()
+        val currentEpoch = PairwiseRoutingTokenGenerator.currentEpoch()
+        if (contacts.isNotEmpty()) {
+            try {
+                val dhKeys = keystoreManager.getOrCreateDhIdentityKeyPair(secureStorage)
+                val myPriv = keystoreManager.decryptWithMasterKey(dhKeys.iv, dhKeys.encryptedPrivateKey)
+                for (contact in contacts) {
+                    if (contact.publicKeyHex.length == 64) {
+                        val contactPub = contact.publicKeyHex.hexToByteArray()
+                        val pairwiseSecret = PairwiseRoutingTokenGenerator.derivePairwiseDhSecret(myPriv, contactPub)
+                        val routingKey = PairwiseRoutingTokenGenerator.deriveRoutingKey(pairwiseSecret, contact.nxId, myNxId)
+                        tokenHexesToSearch.addAll(PairwiseRoutingTokenGenerator.getActiveInboundTokenHexes(routingKey, currentEpoch))
+                        java.util.Arrays.fill(pairwiseSecret, 0.toByte())
+                    }
+                }
+                java.util.Arrays.fill(myPriv, 0.toByte())
+            } catch (e: Exception) {
+                Log.w(TAG, "Error deriving pairwise routing tokens: ${e.message}")
+            }
+        }
 
-        val matchingRaw = mutableListOf<ByteArray>()
-        matchingRaw.addAll(envelopeDao.findMatchingEnvelopes(todayTokenHex))
-        matchingRaw.addAll(envelopeDao.findMatchingEnvelopes(yesterdayTokenHex))
+        // 2. Legacy fallback tokens (today and yesterday)
+        if (myPkHex.isNotBlank()) {
+            val myKeyBytes = myPkHex.hexToByteArray()
+            val currentDay = BlindTokenGenerator.currentEpochDay()
+            tokenHexesToSearch.add(BlindTokenGenerator.generateToken(myKeyBytes, currentDay).toHex())
+            tokenHexesToSearch.add(BlindTokenGenerator.generateToken(myKeyBytes, currentDay - 1).toHex())
+        }
+
+        val matchingRaw = if (tokenHexesToSearch.isNotEmpty()) {
+            envelopeDao.findMatchingEnvelopesBatch(tokenHexesToSearch.toList())
+        } else {
+            emptyList()
+        }
 
         val consumed = mutableListOf<DtnEnvelope>()
         for (raw in matchingRaw) {
             val env = DtnEnvelope.deserialize(raw) ?: continue
+            if (env.protocolVersion == DtnConstants.PROTOCOL_VERSION_1 && !env.verifySignature()) {
+                Log.w(TAG, "Discarded tampered cached NXDT envelope [${env.envelopeIdHex.take(8)}]")
+                envelopeDao.deleteEnvelope(env.envelopeIdHex)
+                continue
+            }
             if (inspectAndProcessInboundEnvelope(env)) {
                 consumed.add(env)
                 envelopeDao.deleteEnvelope(env.envelopeIdHex)
@@ -197,20 +293,93 @@ class DtnRepositoryImpl(
     private suspend fun inspectAndProcessInboundEnvelope(envelope: DtnEnvelope): Boolean {
         return try {
             val user = userDao.getLocalProfile() ?: return false
-            val myPkHex = user.publicKeyHex
-            if (myPkHex.isBlank()) return false
+            val myNxId = user.nxId
+            var isForMe = false
 
-            val myKeyBytes = myPkHex.hexToByteArray()
-            val currentDay = BlindTokenGenerator.currentEpochDay()
-            val todayToken = BlindTokenGenerator.generateToken(myKeyBytes, currentDay)
-            val yesterdayToken = BlindTokenGenerator.generateToken(myKeyBytes, currentDay - 1)
+            // 1. Check Pairwise Rotating Routing Tokens (Phase C)
+            val contacts = contactDao?.getAllContactsList() ?: emptyList()
+            var matchedContact: com.nexa.app.data.local.entity.ContactEntity? = null
+            if (contacts.isNotEmpty()) {
+                try {
+                    val dhKeys = keystoreManager.getOrCreateDhIdentityKeyPair(secureStorage)
+                    val myPriv = keystoreManager.decryptWithMasterKey(dhKeys.iv, dhKeys.encryptedPrivateKey)
+                    val nowSec = System.currentTimeMillis() / 1000L
+                    for (contact in contacts) {
+                        if (contact.publicKeyHex.length == 64) {
+                            val contactPub = contact.publicKeyHex.hexToByteArray()
+                            val pairwiseSecret = PairwiseRoutingTokenGenerator.derivePairwiseDhSecret(myPriv, contactPub)
+                            val routingKey = PairwiseRoutingTokenGenerator.deriveRoutingKey(pairwiseSecret, contact.nxId, myNxId)
+                            if (PairwiseRoutingTokenGenerator.isTokenInWindowForEnvelope(
+                                    candidateToken = envelope.blindToken,
+                                    routingKey = routingKey,
+                                    createdAtEpochSec = envelope.createdAtEpochSec,
+                                    expiresAtEpochSec = envelope.expiresAtEpochSec,
+                                    nowSec = nowSec
+                                )
+                            ) {
+                                isForMe = true
+                                matchedContact = contact
+                                java.util.Arrays.fill(pairwiseSecret, 0.toByte())
+                                break
+                            }
+                            java.util.Arrays.fill(pairwiseSecret, 0.toByte())
+                        }
+                    }
+                    java.util.Arrays.fill(myPriv, 0.toByte())
+                } catch (e: Exception) {
+                    Log.w(TAG, "Error checking pairwise tokens for inbound envelope: ${e.message}")
+                }
+            }
 
-            if (!envelope.blindToken.contentEquals(todayToken) && !envelope.blindToken.contentEquals(yesterdayToken)) {
+            // 2. Legacy fallback
+            if (!isForMe && user.publicKeyHex.isNotBlank()) {
+                val myKeyBytes = user.publicKeyHex.hexToByteArray()
+                val currentDay = BlindTokenGenerator.currentEpochDay()
+                val todayToken = BlindTokenGenerator.generateToken(myKeyBytes, currentDay)
+                val yesterdayToken = BlindTokenGenerator.generateToken(myKeyBytes, currentDay - 1)
+                if (envelope.blindToken.contentEquals(todayToken) || envelope.blindToken.contentEquals(yesterdayToken)) {
+                    isForMe = true
+                }
+            }
+
+            if (!isForMe) {
                 // Not for me -> acts strictly as a data mule
                 return false
             }
 
-            // Envelope IS for me! Decrypt the payload
+            // Authenticate Sender Identity before delivery (Phase B Security Enforcement)
+            if (envelope.protocolVersion == DtnConstants.PROTOCOL_VERSION_1) {
+                val senderPub = envelope.senderPublicKey
+                if (senderPub == null || senderPub.size != 32) {
+                    Log.w(TAG, "Security Rejection: Inbound NXDT envelope [${envelope.envelopeIdHex.take(8)}] missing senderPublicKey")
+                    return false
+                }
+                // Verify sender public key against matched contact identity if available
+                if (matchedContact != null && matchedContact.publicKeyHex.length == 64) {
+                    if (!senderPub.toHex().equals(matchedContact.publicKeyHex, ignoreCase = true)) {
+                        Log.e(
+                            TAG,
+                            "SECURITY ALERT: Inbound envelope sender key mismatch! Claimed routing peer: ${matchedContact.nxId}. Dropping spoofed envelope."
+                        )
+                        return false
+                    }
+                }
+            }
+
+            // Envelope IS for me! Ingest via Universal Ingest if available
+            if (universalTransportIngest != null) {
+                val ingested = universalTransportIngest?.ingestRawBytes(
+                    envelope.encryptedPayload,
+                    TransportMedium.OFFLINE_MESH
+                ) ?: false
+                if (ingested) {
+                    envelopeDao.deleteEnvelope(envelope.envelopeIdHex)
+                    Log.i(TAG, "Ingested and unvaulted DTN message [${envelope.envelopeIdHex.take(8)}] via Universal Ingest")
+                    return true
+                }
+            }
+
+            // Fallback for legacy format or standalone tests
             val payload = envelope.encryptedPayload
             if (payload.size <= 12) return false
 
@@ -225,9 +394,31 @@ class DtnRepositoryImpl(
 
             val senderNxId = json.getString("sender_nx_id")
             val recipientNxId = json.getString("recipient_nx_id")
+            if (recipientNxId != myNxId) {
+                Log.w(TAG, "Security Rejection: Inbound message recipient $recipientNxId does not match local user $myNxId")
+                return false
+            }
+
+            // Sender identity verification for fallback path
+            if (envelope.protocolVersion == DtnConstants.PROTOCOL_VERSION_1) {
+                val contact = contactDao?.getContact(senderNxId)
+                if (contact != null && contact.publicKeyHex.length == 64) {
+                    val senderPubHex = envelope.senderPublicKey?.toHex() ?: ""
+                    if (!senderPubHex.equals(contact.publicKeyHex, ignoreCase = true)) {
+                        Log.e(TAG, "SECURITY ALERT: Fallback path rejected spoofed sender identity for $senderNxId")
+                        return false
+                    }
+                }
+            }
             val text = json.getString("text")
             val timestamp = json.optLong("timestamp", System.currentTimeMillis())
             val packetId = json.optString("packet_id", UUID.randomUUID().toString())
+
+            // Persistent deduplication gate check
+            if (messageDao.getMessageByPacketId(packetId) != null) {
+                envelopeDao.deleteEnvelope(envelope.envelopeIdHex)
+                return true
+            }
 
             val conversationId = deriveConversationId(senderNxId, recipientNxId)
 

@@ -2,14 +2,13 @@ package api
 
 import (
 	"encoding/base64"
-	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"log"
 	"net/http"
 	"time"
 
 	"nexa/wire/internal/connection"
+	"nexa/wire/internal/dtn"
 )
 
 type DtnDumpRequest struct {
@@ -39,10 +38,19 @@ func (h *DtnHandler) HandleOpportunisticDump(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Request-size limit: max 10MB to prevent memory exhaustion DoS
+	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024)
+
 	var req DtnDumpRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("[DTN Bridge] Failed to parse JSON body: %v", err)
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		http.Error(w, "Invalid JSON payload or payload too large", http.StatusBadRequest)
+		return
+	}
+
+	// Batch limit: max 100 envelopes per dump
+	if len(req.Envelopes) > 100 {
+		http.Error(w, "Batch limit exceeded (maximum 100 envelopes per dump)", http.StatusBadRequest)
 		return
 	}
 
@@ -54,27 +62,35 @@ func (h *DtnHandler) HandleOpportunisticDump(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 
-		// Validate minimum envelope header (45 bytes):
-		// [EnvId 16B][BlindToken 16B][HopLimit 1B][Expiry 8B][PayloadLen 4B]
-		if len(rawBytes) < 45 {
-			log.Printf("[DTN Bridge] Dropped truncated envelope of size %d bytes", len(rawBytes))
+		// Parse and validate DTN envelope (enforces Ed25519 signature & payload hash for NXDT v1)
+		env, err := dtn.ParseEnvelope(rawBytes, true)
+		if err != nil {
+			log.Printf("[DTN Bridge] Dropped invalid/unauthenticated DTN envelope: %v", err)
 			continue
 		}
 
-		blindTokenBytes := rawBytes[16:32]
-		blindTokenHex := hex.EncodeToString(blindTokenBytes)
-
-		expiryEpochSec := int64(binary.BigEndian.Uint64(rawBytes[33:41]))
 		nowSec := time.Now().Unix()
-		if expiryEpochSec <= nowSec {
-			log.Printf("[DTN Bridge] Dropped expired envelope [token=%s, expiry=%d]", blindTokenHex[:8], expiryEpochSec)
+		if env.ExpiresAt <= nowSec {
+			log.Printf("[DTN Bridge] Dropped expired envelope [token=%s, expiry=%d]", env.BlindTokenHex()[:min(len(env.BlindTokenHex()), 8)], env.ExpiresAt)
 			continue
+		}
+
+		if env.HopLimit == 0 {
+			log.Printf("[DTN Bridge] Dropped envelope [token=%s]: Hop limit reached zero", env.BlindTokenHex()[:min(len(env.BlindTokenHex()), 8)])
+			continue
+		}
+
+		// Decrement hop limit for forward relay custody
+		forwardedEnv, err := env.WithDecrementedHop(nowSec)
+		forwardBytes := rawBytes
+		if err == nil && forwardedEnv != nil {
+			forwardBytes = forwardedEnv.Serialize()
 		}
 
 		// Route via Blind-Postman Hub:
 		// If recipient is connected -> Deliver directly via WebSocket
 		// If recipient is offline   -> Buffer in ephemeral Redis (24h TTL) & trigger FCM wake-up
-		h.hub.RouteDtnEnvelope(blindTokenHex, rawBytes)
+		h.hub.RouteDtnEnvelope(env.BlindTokenHex(), forwardBytes)
 		processedCount++
 	}
 

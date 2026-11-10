@@ -42,7 +42,8 @@ fun TransportToggleBar(
     destinationPhone: String?,
     onTransportSelected: (TransportType) -> Unit,
     onPhoneEditClicked: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isSmsSupported: Boolean = false
 ) {
     Row(
         modifier = modifier
@@ -69,10 +70,11 @@ fun TransportToggleBar(
 
             TransportOptionPill(
                 icon = Icons.Default.SignalCellularAlt,
-                label = "SMS (8901)",
+                label = if (isSmsSupported) "SMS (8901)" else "SMS (Disabled)",
                 isSelected = selectedTransport == TransportType.DATA_SMS,
                 activeColor = NexaWarningOrange,
-                onClick = { onTransportSelected(TransportType.DATA_SMS) }
+                enabled = isSmsSupported,
+                onClick = { if (isSmsSupported) onTransportSelected(TransportType.DATA_SMS) }
             )
 
             TransportOptionPill(
@@ -141,6 +143,7 @@ private fun TransportOptionPill(
     label: String,
     isSelected: Boolean,
     activeColor: Color,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
     val bgColor by animateColorAsState(
@@ -150,7 +153,11 @@ private fun TransportOptionPill(
     )
 
     val contentColor by animateColorAsState(
-        targetValue = if (isSelected) activeColor else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+        targetValue = when {
+            !enabled -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+            isSelected -> activeColor
+            else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+        },
         animationSpec = tween(200),
         label = "contentColor"
     )
@@ -159,7 +166,7 @@ private fun TransportOptionPill(
         modifier = Modifier
             .clip(RoundedCornerShape(16.dp))
             .background(bgColor)
-            .clickable { onClick() }
+            .clickable(enabled = enabled) { onClick() }
             .padding(horizontal = 9.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

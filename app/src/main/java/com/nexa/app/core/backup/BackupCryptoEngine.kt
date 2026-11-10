@@ -3,6 +3,7 @@ package com.nexa.app.core.backup
 import android.content.Context
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.nexa.app.core.backup.crypto.VaultStreamEncryptor
+import com.nexa.app.core.security.SecureStorage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -25,18 +26,22 @@ import javax.crypto.spec.SecretKeySpec
  * 3. 256-bit AES master key derivation from 12-Word BIP-39 mnemonic via PBKDF2-HMAC-SHA256 (65,536 iterations).
  * 4. Streaming AES-256-GCM authenticated encryption (Zero RAM overhead).
  * 5. Pre-decryption SHA-256 checksum verification and authenticated restoration.
+ * 6. Design C: Dual-Layer Cryptographic Key Envelope (`key_envelope.bin`) with zero-disk RAM staging.
  */
 class BackupCryptoEngine(private val context: Context) {
 
     private val secureRandom = SecureRandom()
 
     /**
-     * Executes atomic SQLite snapshotting, manifest calculation, bundle packaging, and streaming AES-256-GCM encryption.
+     * Executes atomic SQLite snapshotting, key envelope sealing, manifest calculation,
+     * category filtering, and streaming AES-256-GCM encryption.
      */
     suspend fun createEncryptedVault(
         rawDatabase: SupportSQLiteDatabase,
         passphraseWords: String,
         outputVaultFile: File,
+        dbPassphrase: ByteArray? = null,
+        categoryConfig: BackupCategoryConfig = BackupCategoryConfig(),
         onProgress: (phase: String, percent: Float) -> Unit = { _, _ -> }
     ): Boolean = withContext(Dispatchers.IO) {
         val stagingDir = File(context.cacheDir, "staging_${System.currentTimeMillis()}")
@@ -47,31 +52,31 @@ class BackupCryptoEngine(private val context: Context) {
             if (tempArchive.exists()) tempArchive.delete()
             if (outputVaultFile.exists()) outputVaultFile.delete()
 
-            // 1. Pack Complete Snapshot Bundle (Zero-Lock VACUUM INTO + Preferences + Media + Manifest)
-            onProgress("Packaging Database & Media Vault...", 0.15f)
+            // 1. Generate Vault Salt, Nonce, and Derive Master Vault Key
+            onProgress("Deriving Encryption Key...", 0.10f)
+            val salt = ByteArray(BackupVaultHeader.SALT_SIZE).also { secureRandom.nextBytes(it) }
+            val iv = ByteArray(BackupVaultHeader.IV_SIZE).also { secureRandom.nextBytes(it) }
+            val secretKey = deriveKey(passphraseWords, salt)
+
+            // 2. Pack Complete Snapshot Bundle (Zero-Lock VACUUM INTO + Key Envelope + Preferences + Media + Manifest)
+            onProgress("Packaging Database & Media Vault...", 0.25f)
             VaultBundlePackager.packBundle(
                 context = context,
                 rawDatabase = rawDatabase,
                 outputArchiveFile = tempArchive,
                 stagingDir = stagingDir,
-                onProgress = { phase, p -> onProgress(phase, 0.15f + p * 0.35f) }
+                dbPassphrase = dbPassphrase,
+                vaultMasterKeyBytes = secretKey.encoded,
+                salt = salt,
+                categoryConfig = categoryConfig,
+                onProgress = { phase, p -> onProgress(phase, 0.25f + p * 0.40f) }
             )
 
-            // 2. Derive 256-bit Key from BIP-39 Mnemonic
-            onProgress("Deriving Encryption Key...", 0.55f)
-            val salt = ByteArray(BackupVaultHeader.SALT_SIZE).also { secureRandom.nextBytes(it) }
-            val iv = ByteArray(BackupVaultHeader.IV_SIZE).also { secureRandom.nextBytes(it) }
-            val secretKey = deriveKey(passphraseWords, salt)
-
-            // 3. Streaming AES-256-GCM Encryption with 71-Byte Header
+            // 3. Streaming AES-256-GCM Encryption with 71-Byte Header (Version 2)
             onProgress("Encrypting Vault Container (Streaming)...", 0.70f)
-            val archiveLength = tempArchive.length()
-
-            // Calculate payload SHA-256 for the header
             val cipher = Cipher.getInstance("AES/GCM/NoPadding")
             cipher.init(Cipher.ENCRYPT_MODE, secretKey, GCMParameterSpec(128, iv))
 
-            // For deterministic SHA-256 header validation
             val ciphertextFile = File(context.cacheDir, "cipher_${System.currentTimeMillis()}.bin")
             try {
                 FileOutputStream(ciphertextFile).use { fos ->
@@ -89,7 +94,7 @@ class BackupCryptoEngine(private val context: Context) {
 
                 val payloadSha256 = MessageDigest.getInstance("SHA-256").digest(ciphertextFile.readBytes())
 
-                // 4. Write Rigid 71-Byte Header + Ciphertext
+                // 4. Write Rigid 71-Byte Header (Version 2) + Ciphertext
                 onProgress("Writing Vault Container...", 0.90f)
                 val header = BackupVaultHeader(
                     version = BackupVaultHeader.CURRENT_VERSION,
@@ -123,11 +128,14 @@ class BackupCryptoEngine(private val context: Context) {
 
     /**
      * Reads the encrypted vault, validates magic header and checksum, derives key, decrypts and unpacks bundle.
+     * Extracts Key Envelope in volatile RAM with zero disk exposure.
      */
     suspend fun decryptAndRestoreVault(
         vaultFile: File,
         passphraseWords: String,
         targetDbFile: File,
+        secureStorage: SecureStorage? = null,
+        restoreCategoryConfig: BackupCategoryConfig = BackupCategoryConfig(),
         onProgress: (phase: String, percent: Float) -> Unit = { _, _ -> }
     ): Boolean = withContext(Dispatchers.IO) {
         val stagingDir = File(context.cacheDir, "restore_staging_${System.currentTimeMillis()}")
@@ -190,12 +198,16 @@ class BackupCryptoEngine(private val context: Context) {
                     decryptedBytes[1] == 0x4B.toByte()
 
             if (isZip) {
-                // Multi-pillar bundle: restore databases, preferences, media vault, and manifest
+                // Multi-pillar bundle: restore databases, preferences, media vault, and unseal key envelope
                 VaultBundlePackager.unpackAndRestoreBundle(
                     context = context,
                     archiveFile = tempArchive,
                     stagingDir = stagingDir,
                     liveDatabaseFile = targetDbFile,
+                    vaultMasterKeyBytes = secretKey.encoded,
+                    salt = header.salt,
+                    secureStorage = secureStorage,
+                    restoreCategoryConfig = restoreCategoryConfig,
                     onProgress = { phase, p -> onProgress(phase, 0.80f + p * 0.20f) }
                 )
             } else {

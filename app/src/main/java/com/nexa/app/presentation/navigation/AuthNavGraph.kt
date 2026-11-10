@@ -16,11 +16,15 @@ import com.nexa.app.domain.repository.AuthRepository
 import com.nexa.app.domain.repository.ChatRepository
 import com.nexa.app.domain.repository.P2PTransferRepository
 import com.nexa.app.presentation.badge.ProfileBadgeScreen
+import com.nexa.app.presentation.backup.BackupSettingsScreen
+import com.nexa.app.presentation.backup.BackupViewModel
+import com.nexa.app.presentation.backup.RestoreBackupScreen
 import com.nexa.app.presentation.common.viewer.ProfileImageViewerScreen
 import com.nexa.app.presentation.chat.ChatScreen
 import com.nexa.app.presentation.chat.ChatViewModel
 import com.nexa.app.presentation.contacts.ContactListScreen
 import com.nexa.app.presentation.contacts.ContactViewModel
+import com.nexa.app.presentation.contacts.PendingRequestsScreen
 import com.nexa.app.presentation.dashboard.MainChatDashboardScreen
 import com.nexa.app.presentation.otp.OtpVerificationScreen
 import com.nexa.app.presentation.otp.OtpViewModel
@@ -183,6 +187,9 @@ sealed class Screen(val route: String) {
             return "profile_image_viewer?imageUri=${Uri.encode(imageUri)}"
         }
     }
+    data object BackupSettings : Screen("backup_settings")
+    data object RestoreBackup : Screen("restore_backup")
+    data object PendingRequests : Screen("pending_requests")
 }
 
 @Composable
@@ -309,6 +316,18 @@ fun AuthNavGraph(
                             about = about
                         )
                     )
+                },
+                onProceedToBadge = { nxId, name, phone, avatarUrl ->
+                    navController.navigate(
+                        Screen.ProfileBadge.createRoute(
+                            nxId = nxId,
+                            name = name,
+                            phone = phone,
+                            avatarUrl = avatarUrl
+                        )
+                    ) {
+                        popUpTo(Screen.Welcome.route) { inclusive = true }
+                    }
                 }
             )
         }
@@ -472,6 +491,9 @@ fun AuthNavGraph(
                 onOpenContacts = {
                     navController.navigate(Screen.Contacts.route)
                 },
+                onOpenPendingRequests = {
+                    navController.navigate(Screen.PendingRequests.route)
+                },
                 onOpenNotificationSettings = {
                     navController.navigate(Screen.NotificationSettings.route)
                 },
@@ -608,7 +630,7 @@ fun AuthNavGraph(
                     }
                 },
                 onNavigateToPending = {
-                    // Navigate to pending invitations if needed
+                    navController.navigate(Screen.PendingRequests.route)
                 }
             )
         }
@@ -665,7 +687,7 @@ fun AuthNavGraph(
                     when (destination) {
                         SettingsDestination.ACCOUNT -> navController.navigate(Screen.Account.route)
                         SettingsDestination.PRIVACY_AND_SAFETY -> {
-                            navController.navigate(Screen.NotificationSettings.route)
+                            navController.navigate(Screen.Security.route)
                         }
                         SettingsDestination.SECURITY -> navController.navigate(Screen.Security.route)
                         SettingsDestination.APPEARANCE -> navController.navigate(Screen.Appearance.route)
@@ -675,7 +697,7 @@ fun AuthNavGraph(
                         SettingsDestination.NETWORK -> {}
                         SettingsDestination.STORAGE_AND_DATA -> {}
                         SettingsDestination.DEVICES -> navController.navigate(Screen.Security.route)
-                        SettingsDestination.BACKUP -> {}
+                        SettingsDestination.BACKUP -> navController.navigate(Screen.BackupSettings.route)
                         SettingsDestination.HELP -> {}
                         SettingsDestination.ABOUT -> navController.navigate(Screen.Security.route)
                     }
@@ -889,6 +911,55 @@ fun AuthNavGraph(
                 onNavigateToMessage = {
                     navController.popBackStack()
                 }
+            )
+        }
+
+        // 29. Zero-Knowledge Google Drive Backup Settings Screen
+        composable(route = Screen.BackupSettings.route) {
+            val app = LocalContext.current.applicationContext as NexaApplication
+            val backupViewModel = remember {
+                BackupViewModel(
+                    backupRepository = app.driveBackupRepository,
+                    backupPrefs = app.backupPrefs,
+                    authManager = app.googleDriveAuthManager
+                )
+            }
+            BackupSettingsScreen(
+                viewModel = backupViewModel,
+                onNavigateBack = { navController.popBackStack() },
+                onNavigateRestore = { navController.navigate(Screen.RestoreBackup.route) }
+            )
+        }
+
+        // 30. Zero-Knowledge Backup Restoration Screen (BIP-39 Mnemonic)
+        composable(route = Screen.RestoreBackup.route) {
+            val app = LocalContext.current.applicationContext as NexaApplication
+            val backupViewModel = remember {
+                BackupViewModel(
+                    backupRepository = app.driveBackupRepository,
+                    backupPrefs = app.backupPrefs,
+                    authManager = app.googleDriveAuthManager
+                )
+            }
+            RestoreBackupScreen(
+                viewModel = backupViewModel,
+                onRestoreSuccess = {
+                    navController.navigate(Screen.Dashboard.route) {
+                        popUpTo(Screen.Dashboard.route) { inclusive = true }
+                    }
+                },
+                onNavigateBack = { navController.popBackStack() }
+            )
+        }
+
+        // 31. Pending Connection Requests Screen
+        composable(route = Screen.PendingRequests.route) {
+            val app = LocalContext.current.applicationContext as NexaApplication
+            val contactViewModel = remember { ContactViewModel(app.contactRepository) }
+
+            PendingRequestsScreen(
+                viewModel = contactViewModel,
+                onNavigateBack = { navController.popBackStack() }
             )
         }
     }

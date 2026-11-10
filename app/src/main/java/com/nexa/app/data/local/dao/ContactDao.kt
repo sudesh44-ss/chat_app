@@ -7,6 +7,7 @@ import androidx.room.Query
 import com.nexa.app.data.local.entity.ContactEntity
 import com.nexa.app.data.local.entity.ContactStatus
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.firstOrNull
 
 @Dao
 interface ContactDao {
@@ -56,4 +57,8 @@ interface ContactDao {
 
     @Query("UPDATE contacts SET deviceContactPhotoUri = :photoUri WHERE nxId = :nxId")
     suspend fun updateDeviceContactPhotoUri(nxId: String, photoUri: String?): Int
+}
+
+suspend fun ContactDao.getAllContactsList(): List<ContactEntity> {
+    return this.getAllContacts().firstOrNull() ?: emptyList()
 }

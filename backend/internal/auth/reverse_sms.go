@@ -21,11 +21,12 @@ import (
 )
 
 var (
-	ErrInvalidDomesticPhone = errors.New("invalid domestic mobile number: must be valid 10-digit Indian mobile starting with 6-9 (+91)")
-	ErrReverseRateLimited   = errors.New("rate limit exceeded for reverse verification: maximum attempts reached")
-	ErrNonceNotFound        = errors.New("verification nonce not found or already consumed")
-	ErrNonceExpired         = errors.New("verification nonce has expired (validity: 90 seconds)")
-	ErrPhoneMismatch        = errors.New("sender phone number does not match registered initiation number")
+	ErrInvalidDomesticPhone   = errors.New("invalid domestic mobile number: must be valid 10-digit Indian mobile starting with 6-9 (+91)")
+	ErrReverseRateLimited     = errors.New("rate limit exceeded for reverse verification: maximum attempts reached")
+	ErrNonceNotFound          = errors.New("verification nonce not found or already consumed")
+	ErrNonceExpired           = errors.New("verification nonce has expired (validity: 90 seconds)")
+	ErrPhoneMismatch          = errors.New("sender phone number does not match registered initiation number")
+	ErrPhoneAlreadyRegistered = errors.New("phone number is already associated with an existing account")
 )
 
 var (
@@ -78,49 +79,59 @@ type InitiateReverseVerifyRequest struct {
 }
 
 type InitiateReverseVerifyResponse struct {
-	Status                string `json:"status"`
-	Nonce                 string `json:"nonce"`
-	SessionID             string `json:"session_id,omitempty"`
-	InboundReceiverNumber string `json:"inbound_receiver_number"`
-	InboundNumber         string `json:"inbound_number,omitempty"`
-	SmsPayload            string `json:"sms_payload"`
-	ExpiresInSeconds      int    `json:"expires_in_seconds"`
+	Status                string                `json:"status"`
+	Nonce                 string                `json:"nonce"`
+	SessionID             string                `json:"session_id,omitempty"`
+	InboundReceiverNumber string                `json:"inbound_receiver_number"`
+	InboundNumber         string                `json:"inbound_number,omitempty"`
+	SmsPayload            string                `json:"sms_payload"`
+	ExpiresInSeconds      int                   `json:"expires_in_seconds"`
+	NxID                  string                `json:"nx_id,omitempty"`
+	SessionAuthToken      string                `json:"session_auth_token,omitempty"`
+	SessionToken          string                `json:"session_token,omitempty"`
+	VerificationMethod    string                `json:"verification_method,omitempty"`
+	VerifiedAt            int64                 `json:"verified_at,omitempty"`
+	User                  *identity.UserAccount `json:"user,omitempty"`
 }
 
 type PendingVerification struct {
-	Nonce            string `json:"nonce"`
-	SessionID        string `json:"session_id,omitempty"`
-	GoogleUID        string `json:"google_uid"`
-	Email            string `json:"email"`
-	PhoneNumber      string `json:"phone_number"`
-	Name             string `json:"name"`
-	AvatarURL        string `json:"avatar_url"`
-	Gender           string `json:"gender"`
-	Age              int    `json:"age"`
-	Bio              string `json:"bio"`
-	PublicKeyHex     string `json:"public_key_hex"`
-	DhPublicKeyHex   string `json:"dh_public_key_hex"`
-	DeviceID         string `json:"device_id"`
-	DeviceName       string `json:"device_name"`
-	IsReverify       bool   `json:"is_reverify"`
-	Status           string `json:"status"` // "PENDING", "VERIFIED", "CONSUMED", "EXPIRED"
-	CreatedAt        int64  `json:"created_at"`
-	ExpiresAt        int64  `json:"expires_at"`
-	AllocatedNxID    string `json:"allocated_nx_id,omitempty"`
-	SessionAuthToken string `json:"session_auth_token,omitempty"`
+	Nonce              string `json:"nonce"`
+	SessionID          string `json:"session_id,omitempty"`
+	GoogleUID          string `json:"google_uid"`
+	Email              string `json:"email"`
+	PhoneNumber        string `json:"phone_number"`
+	Name               string `json:"name"`
+	AvatarURL          string `json:"avatar_url"`
+	Gender             string `json:"gender"`
+	Age                int    `json:"age"`
+	Bio                string `json:"bio"`
+	PublicKeyHex       string `json:"public_key_hex"`
+	DhPublicKeyHex     string `json:"dh_public_key_hex"`
+	DeviceID           string `json:"device_id"`
+	DeviceName         string `json:"device_name"`
+	IsReverify         bool   `json:"is_reverify"`
+	Status             string `json:"status"` // "PENDING", "VERIFIED", "CONSUMED", "EXPIRED"
+	VerificationMethod string `json:"verification_method,omitempty"`
+	VerifiedAt         int64  `json:"verified_at,omitempty"`
+	CreatedAt          int64  `json:"created_at"`
+	ExpiresAt          int64  `json:"expires_at"`
+	AllocatedNxID      string `json:"allocated_nx_id,omitempty"`
+	SessionAuthToken   string `json:"session_auth_token,omitempty"`
 }
 
 type VerificationStatusResponse struct {
-	Status           string                `json:"status"` // "PENDING", "VERIFIED", "EXPIRED"
-	IsVerified       bool                  `json:"is_verified"`
-	ExpiresInSeconds int                   `json:"expires_in_seconds,omitempty"`
-	NxID             string                `json:"nx_id,omitempty"`
-	SessionAuthToken string                `json:"session_auth_token,omitempty"`
-	SessionToken     string                `json:"session_token,omitempty"`
-	Name             string                `json:"name,omitempty"`
-	Phone            string                `json:"phone,omitempty"`
-	AvatarURL        string                `json:"avatar_url,omitempty"`
-	User             *identity.UserAccount `json:"user,omitempty"`
+	Status             string                `json:"status"` // "PENDING", "VERIFIED", "EXPIRED"
+	IsVerified         bool                  `json:"is_verified"`
+	VerificationMethod string                `json:"verification_method,omitempty"`
+	VerifiedAt         int64                 `json:"verified_at,omitempty"`
+	ExpiresInSeconds   int                   `json:"expires_in_seconds,omitempty"`
+	NxID               string                `json:"nx_id,omitempty"`
+	SessionAuthToken   string                `json:"session_auth_token,omitempty"`
+	SessionToken       string                `json:"session_token,omitempty"`
+	Name               string                `json:"name,omitempty"`
+	Phone              string                `json:"phone,omitempty"`
+	AvatarURL          string                `json:"avatar_url,omitempty"`
+	User               *identity.UserAccount `json:"user,omitempty"`
 }
 
 type UserResolveResponse struct {
@@ -142,6 +153,8 @@ type ReverseSmsService struct {
 	ipRate             map[string][]int64              // ip -> timestamps
 	userRate           map[string][]int64              // googleUid/device -> timestamps
 	inboundReceiverNum string
+	trustedRegistry    *TrustedPhoneRegistry
+	googleVerifier     *GoogleVerifier
 }
 
 func NewReverseSmsService(store identity.IdentityRepository) *ReverseSmsService {
@@ -172,7 +185,29 @@ func NewReverseSmsService(store identity.IdentityRepository) *ReverseSmsService 
 		ipRate:             make(map[string][]int64),
 		userRate:           make(map[string][]int64),
 		inboundReceiverNum: inbound,
+		trustedRegistry:    NewTrustedPhoneRegistry(),
 	}
+}
+
+// SetTrustedRegistry injects a custom or mocked trusted phone registry (e.g. for testing).
+func (s *ReverseSmsService) SetTrustedRegistry(registry *TrustedPhoneRegistry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.trustedRegistry = registry
+}
+
+// GetTrustedRegistry returns the active trusted phone registry.
+func (s *ReverseSmsService) GetTrustedRegistry() *TrustedPhoneRegistry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.trustedRegistry
+}
+
+// SetGoogleVerifier attaches a Google token verifier for authenticating Google identity tokens.
+func (s *ReverseSmsService) SetGoogleVerifier(v *GoogleVerifier) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.googleVerifier = v
 }
 
 // SetRedisClient attaches a Redis client for cluster-wide nonce distribution, persistence, and distributed rate limiting.
@@ -236,11 +271,29 @@ func (s *ReverseSmsService) generateCryptoNonce() (string, error) {
 	return "NX-" + string(buf), nil
 }
 
-// InitiateVerification creates a short-lived 90-second nonce linked to the user's Google UID and phone.
+// InitiateVerification creates a verification session.
+// If the phone number is recognized as a server-controlled trusted number via NEXA_TRUSTED_PHONE_NUMBERS,
+// the Client-Initiated Reverse SMS verification challenge is bypassed and the user continues through
+// the authentic account registration pipeline immediately (with verification_method: "trusted_allowlist").
+// Non-trusted phone numbers continue through the existing Reverse SMS flow without alteration.
 func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyRequest, clientIP string) (*InitiateReverseVerifyResponse, error) {
-	canonicalPhone, err := CanonicalizeDomesticPhone(req.PhoneNumber)
-	if err != nil {
-		return nil, err
+	isTrusted := false
+	var canonicalPhone string
+	var phoneErr error
+
+	// 1. Check whether submitted phone number exists in server-controlled trusted allowlist
+	if s.trustedRegistry != nil && s.trustedRegistry.IsTrusted(req.PhoneNumber) {
+		isTrusted = true
+		canonicalPhone, phoneErr = CanonicalizePhone(req.PhoneNumber)
+		if phoneErr != nil {
+			return nil, phoneErr
+		}
+	} else {
+		// Non-trusted number: enforce strict domestic Indian mobile validation for Reverse SMS
+		canonicalPhone, phoneErr = CanonicalizeDomesticPhone(req.PhoneNumber)
+		if phoneErr != nil {
+			return nil, phoneErr
+		}
 	}
 
 	env := strings.ToLower(os.Getenv("APP_ENV"))
@@ -248,8 +301,30 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 		env = strings.ToLower(os.Getenv("ENV"))
 	}
 	isProduction := env == "production"
-	if isProduction && (s.inboundReceiverNum == "" || s.inboundReceiverNum == "+919800000000" || s.inboundReceiverNum == "+910000000000") {
+
+	// If not trusted, require configured inbound SMS receiver number in production
+	if !isTrusted && isProduction && (s.inboundReceiverNum == "" || s.inboundReceiverNum == "+919800000000" || s.inboundReceiverNum == "+910000000000") {
 		return nil, fmt.Errorf("reverse verification unavailable: real INBOUND_SMS_RECEIVER_NUMBER is required in production environment (dummy placeholder rejected)")
+	}
+
+	// 2. Validate Google Identity Token if provided (common to both Route A and Route B)
+	if req.GoogleAuthToken != "" && s.googleVerifier != nil {
+		claims, err := s.googleVerifier.VerifyIdToken(req.GoogleAuthToken)
+		if err != nil {
+			return nil, fmt.Errorf("google token verification failed: %w", err)
+		}
+		if claims != nil {
+			req.GoogleUID = claims.Subject
+			if req.Email == "" {
+				req.Email = claims.Email
+			}
+			if req.Name == "" && claims.Name != "" {
+				req.Name = claims.Name
+			}
+			if req.AvatarURL == "" && claims.Picture != "" {
+				req.AvatarURL = claims.Picture
+			}
+		}
 	}
 
 	s.mu.Lock()
@@ -299,6 +374,239 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 	rand.Read(sessionBytes)
 	sessionID := hex.EncodeToString(sessionBytes)
 
+	// Route A: Trusted Auto-Verification Route
+	if isTrusted {
+		var finalNxID string
+		var sessionToken string
+		var committedAccount *identity.UserAccount
+
+		existingAcc, foundByPhone := s.store.GetAccountByPhone(canonicalPhone)
+
+		if req.IsReverify {
+			// Re-verification flow: logging into existing account on new device / SIM
+			if !foundByPhone && req.GoogleUID != "" {
+				existingAcc, foundByPhone = s.store.GetAccountByGoogleID(req.GoogleUID)
+			}
+			if !foundByPhone || existingAcc == nil {
+				return nil, fmt.Errorf("re-verification failed: existing account not found for phone %s", maskPhone(canonicalPhone))
+			}
+
+			finalNxID = existingAcc.NxID
+			committedAccount = existingAcc
+
+			// Register new device
+			devID := req.DeviceID
+			if devID == "" {
+				devID = fmt.Sprintf("dev_%d", now)
+			}
+			devName := req.DeviceName
+			if devName == "" {
+				devName = "Android Device"
+			}
+
+			device := &identity.Device{
+				DeviceID:     devID,
+				AccountID:    existingAcc.ID,
+				NxID:         existingAcc.NxID,
+				DeviceName:   devName,
+				PublicKeyHex: req.PublicKeyHex,
+				DhKeyHex:     req.DhPublicKeyHex,
+				IsRevoked:    false,
+				CreatedAt:    now,
+				LastActiveAt: now,
+			}
+			if err := s.store.RegisterDevice(device); err != nil {
+				return nil, fmt.Errorf("failed to register device: %w", err)
+			}
+
+			// Create 30-day session token
+			tokenBytes := make([]byte, 32)
+			rand.Read(tokenBytes)
+			sessionToken = "nexa_sess_" + hex.EncodeToString(tokenBytes)
+
+			session := &identity.Session{
+				Token:     sessionToken,
+				AccountID: existingAcc.ID,
+				NxID:      existingAcc.NxID,
+				DeviceID:  devID,
+				ExpiresAt: now + (30 * 24 * 60 * 60 * 1000),
+				IsRevoked: false,
+				CreatedAt: now,
+			}
+			if err := s.store.CreateSession(session); err != nil {
+				return nil, fmt.Errorf("failed to create session: %w", err)
+			}
+		} else {
+			// Fresh Registration Flow:
+			// 1. Account Uniqueness & Takeover Protection: reject duplicate registrations
+			if foundByPhone {
+				return nil, fmt.Errorf("%w: %s", ErrPhoneAlreadyRegistered, maskPhone(canonicalPhone))
+			}
+
+			// Prevent duplicate public key registration
+			if req.PublicKeyHex != "" {
+				if _, exists := s.store.GetAccountByPublicKey(req.PublicKeyHex); exists {
+					return nil, fmt.Errorf("public key is already registered to an existing account")
+				}
+			}
+
+			// Prevent duplicate Google ID registration
+			if req.GoogleUID != "" {
+				if _, exists := s.store.GetAccountByGoogleID(req.GoogleUID); exists {
+					return nil, fmt.Errorf("google account is already associated with an existing account")
+				}
+			}
+
+			// Validate Public Key format (32 bytes Ed25519)
+			pubBytes, err := hex.DecodeString(strings.TrimSpace(req.PublicKeyHex))
+			if err != nil || len(pubBytes) != 32 {
+				return nil, fmt.Errorf("invalid 32-byte Ed25519 public key hex")
+			}
+
+			// 2. Allocate authentic NX-ID (locked NX-XXXXXXXX format)
+			allocatedNxID, err := s.store.AllocateNxID(req.PublicKeyHex)
+			if err != nil {
+				return nil, fmt.Errorf("failed to allocate NX-ID: %w", err)
+			}
+			finalNxID = allocatedNxID
+
+			usrIDPrefix := "usr_rand"
+			if len(pubBytes) >= 8 {
+				usrIDPrefix = fmt.Sprintf("usr_%s", hex.EncodeToString(pubBytes[:8]))
+			}
+
+			account := &identity.UserAccount{
+				ID:                    usrIDPrefix,
+				NxID:                  finalNxID,
+				PublicKeyHex:          req.PublicKeyHex,
+				DhKeyHex:              req.DhPublicKeyHex,
+				PhoneNumber:           canonicalPhone,
+				PhoneVerified:         true,
+				IsDiscoverableByPhone: true,
+				GoogleID:              req.GoogleUID,
+				Email:                 req.Email,
+				ProfileName:           req.Name,
+				AvatarUrl:             req.AvatarURL,
+				Bio:                   req.Bio,
+				Gender:                req.Gender,
+				Age:                   req.Age,
+				CreatedAt:             now,
+				UpdatedAt:             now,
+			}
+
+			if err := s.store.CreateAccount(account); err != nil {
+				return nil, fmt.Errorf("failed to commit account: %w", err)
+			}
+			committedAccount = account
+
+			// 3. Register Device
+			devID := req.DeviceID
+			if devID == "" {
+				devID = fmt.Sprintf("dev_%d", now)
+			}
+			devName := req.DeviceName
+			if devName == "" {
+				devName = "Android Device"
+			}
+
+			device := &identity.Device{
+				DeviceID:     devID,
+				AccountID:    account.ID,
+				NxID:         account.NxID,
+				DeviceName:   devName,
+				PublicKeyHex: req.PublicKeyHex,
+				DhKeyHex:     req.DhPublicKeyHex,
+				IsRevoked:    false,
+				CreatedAt:    now,
+				LastActiveAt: now,
+			}
+			if err := s.store.RegisterDevice(device); err != nil {
+				return nil, fmt.Errorf("failed to register device: %w", err)
+			}
+
+			// 4. Create 30-Day Session Token
+			tokenBytes := make([]byte, 32)
+			rand.Read(tokenBytes)
+			sessionToken = "nexa_sess_" + hex.EncodeToString(tokenBytes)
+
+			session := &identity.Session{
+				Token:     sessionToken,
+				AccountID: account.ID,
+				NxID:      account.NxID,
+				DeviceID:  devID,
+				ExpiresAt: now + (30 * 24 * 60 * 60 * 1000),
+				IsRevoked: false,
+				CreatedAt: now,
+			}
+			if err := s.store.CreateSession(session); err != nil {
+				return nil, fmt.Errorf("failed to create session: %w", err)
+			}
+		}
+
+		// Store completed auto-verified record
+		record := &PendingVerification{
+			Nonce:              nonce,
+			SessionID:          sessionID,
+			GoogleUID:          req.GoogleUID,
+			Email:              req.Email,
+			PhoneNumber:        canonicalPhone,
+			Name:               req.Name,
+			AvatarURL:          req.AvatarURL,
+			Gender:             req.Gender,
+			Age:                req.Age,
+			Bio:                req.Bio,
+			PublicKeyHex:       req.PublicKeyHex,
+			DhPublicKeyHex:     req.DhPublicKeyHex,
+			DeviceID:           req.DeviceID,
+			DeviceName:         req.DeviceName,
+			IsReverify:         req.IsReverify,
+			Status:             "VERIFIED",
+			VerificationMethod: "trusted_allowlist",
+			VerifiedAt:         now,
+			CreatedAt:          now,
+			ExpiresAt:          now + (90 * 1000),
+			AllocatedNxID:      finalNxID,
+			SessionAuthToken:   sessionToken,
+		}
+
+		s.pending[nonce] = record
+		s.byPhone[canonicalPhone] = nonce
+		s.bySession[sessionID] = nonce
+
+		if s.redisClient != nil {
+			if recordJSON, err := json.Marshal(record); err == nil {
+				ttl := 5 * time.Minute
+				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+				pipe := s.redisClient.Pipeline()
+				pipe.Set(ctx, "reverse_sms:nonce:"+nonce, recordJSON, ttl)
+				pipe.Set(ctx, "reverse_sms:session:"+sessionID, nonce, ttl)
+				pipe.Set(ctx, "reverse_sms:phone:"+canonicalPhone, nonce, ttl)
+				_, _ = pipe.Exec(ctx)
+				cancel()
+			}
+		}
+
+		log.Printf("[ReverseSMS] Trusted phone auto-verified: Phone=%s, Nonce=%s, NxID=%s, Method=trusted_allowlist",
+			maskPhone(canonicalPhone), nonce, finalNxID)
+
+		return &InitiateReverseVerifyResponse{
+			Status:                "VERIFIED",
+			Nonce:                 nonce,
+			SessionID:             sessionID,
+			InboundReceiverNumber: s.inboundReceiverNum,
+			InboundNumber:         s.inboundReceiverNum,
+			SmsPayload:            fmt.Sprintf("NEXA-VERIFY:%s:%s", nonce, sessionID),
+			ExpiresInSeconds:      90,
+			NxID:                  finalNxID,
+			SessionAuthToken:      sessionToken,
+			SessionToken:          sessionToken,
+			VerificationMethod:    "trusted_allowlist",
+			VerifiedAt:            now,
+			User:                  committedAccount,
+		}, nil
+	}
+
+	// Route B: Normal Reverse SMS Verification Route
 	record := &PendingVerification{
 		Nonce:          nonce,
 		SessionID:      sessionID,
@@ -566,6 +874,8 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 	}
 
 	record.Status = "VERIFIED"
+	record.VerificationMethod = "reverse_sms"
+	record.VerifiedAt = now
 	record.AllocatedNxID = finalNxID
 	record.SessionAuthToken = sessionToken
 
@@ -633,11 +943,13 @@ func (s *ReverseSmsService) GetVerificationStatus(key string) (*VerificationStat
 	if record.Status == "VERIFIED" {
 		account, _ := s.store.GetAccountByNxID(record.AllocatedNxID)
 		resp := &VerificationStatusResponse{
-			Status:           "VERIFIED",
-			IsVerified:       true,
-			NxID:             record.AllocatedNxID,
-			SessionAuthToken: record.SessionAuthToken,
-			SessionToken:     record.SessionAuthToken,
+			Status:             "VERIFIED",
+			IsVerified:         true,
+			VerificationMethod: record.VerificationMethod,
+			VerifiedAt:         record.VerifiedAt,
+			NxID:               record.AllocatedNxID,
+			SessionAuthToken:   record.SessionAuthToken,
+			SessionToken:       record.SessionAuthToken,
 			Name:             record.Name,
 			Phone:            record.PhoneNumber,
 			AvatarURL:        record.AvatarURL,

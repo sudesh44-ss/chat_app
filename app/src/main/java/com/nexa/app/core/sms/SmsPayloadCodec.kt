@@ -252,6 +252,19 @@ object SmsPayloadCodec {
 
         return packets
     }
+
+    /**
+     * Reassembles a list of binary wire chunks into the original payload ByteArray.
+     */
+    fun reassemblePayload(rawChunks: List<ByteArray>): ByteArray {
+        val reassembler = ChunkReassembler()
+        var assembled: ByteArray? = null
+        for (raw in rawChunks) {
+            val chunk = decodeChunk(raw) ?: throw IllegalArgumentException("Invalid chunk")
+            assembled = reassembler.ingestChunk(chunk)
+        }
+        return assembled ?: throw IllegalStateException("Could not reassemble chunks")
+    }
 }
 
 /**

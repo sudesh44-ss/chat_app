@@ -23,7 +23,9 @@ data class ProfileSetupUiState(
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val isOtpTriggered: Boolean = false,
-    val reverseVerifyPayload: InitiateReverseVerifyResponseDto? = null
+    val reverseVerifyPayload: InitiateReverseVerifyResponseDto? = null,
+    val isAutoVerified: Boolean = false,
+    val allocatedNxId: String? = null
 ) {
     val isPhoneValid: Boolean
         get() {
@@ -124,12 +126,34 @@ class SetupViewModel(
                 isReverify = false
             )
             result.onSuccess { payload ->
-                _uiState.update {
-                    it.copy(
-                        isLoading = false,
-                        reverseVerifyPayload = payload,
-                        isOtpTriggered = true
+                if (payload.status == "VERIFIED" && !payload.nxId.isNullOrBlank() && !payload.sessionAuthToken.isNullOrBlank()) {
+                    authRepository.saveVerifiedSession(
+                        nxId = payload.nxId,
+                        sessionToken = payload.sessionAuthToken,
+                        name = state.name.trim(),
+                        phone = state.phone.trim(),
+                        avatarUrl = state.avatarUrl,
+                        age = state.age.toIntOrNull(),
+                        gender = state.gender.trim().takeIf { it.isNotBlank() },
+                        bio = state.bio.trim().takeIf { it.isNotBlank() },
+                        email = state.email
                     )
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            isAutoVerified = true,
+                            allocatedNxId = payload.nxId,
+                            reverseVerifyPayload = payload
+                        )
+                    }
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false,
+                            reverseVerifyPayload = payload,
+                            isOtpTriggered = true
+                        )
+                    }
                 }
             }.onFailure { error ->
                 _uiState.update {

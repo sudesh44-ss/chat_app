@@ -10,6 +10,8 @@ data class UserEntity(
     val nxId: String,
     val fullName: String,
     val phoneNumber: String,
+    val email: String? = null,
+    val avatarUrl: String? = null,
     val age: Int?,
     val gender: String?,
     val bio: String?,
@@ -18,12 +20,13 @@ data class UserEntity(
     val createdAt: Long = System.currentTimeMillis()
 )
 
-fun UserEntity.toDomain(avatarUrl: String? = null): UserProfile {
+fun UserEntity.toDomain(fallbackAvatarUrl: String? = null): UserProfile {
     return UserProfile(
         nxId = nxId,
         fullName = fullName,
         phoneNumber = phoneNumber,
-        avatarUrl = avatarUrl,
+        email = email,
+        avatarUrl = avatarUrl ?: fallbackAvatarUrl,
         age = age,
         gender = gender,
         bio = bio,
@@ -38,6 +41,8 @@ fun UserProfile.toEntity(): UserEntity {
         nxId = nxId,
         fullName = fullName,
         phoneNumber = phoneNumber,
+        email = email,
+        avatarUrl = avatarUrl,
         age = age,
         gender = gender,
         bio = bio,

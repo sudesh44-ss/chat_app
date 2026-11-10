@@ -27,4 +27,7 @@ object SmsConstants {
 
     /** Absolute maximum packet size: 12 bytes header + 121 bytes payload = 133 bytes */
     const val MAX_PACKET_SIZE = HEADER_SIZE + MAX_CHUNK_PAYLOAD_SIZE // 133 bytes
+
+    /** Alias for maximum chunk/packet size for single PDU delivery */
+    const val MAX_PAYLOAD_CHUNK_SIZE = MAX_PACKET_SIZE
 }

@@ -1,13 +1,13 @@
-<?xml version="1.0" encoding="utf-8"?><!--
-   Sample backup rules file; uncomment and customize as necessary.
-   See https://developer.android.com/guide/topics/data/autobackup
-   for details.
-   Note: This file is ignored for devices older than API 31
-   See https://developer.android.com/about/versions/12/backup-restore
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+   NEXA Security & Zero-Plaintext Cloud Backup Policy
+   Room SQLite databases, private keystores, and shared preferences are strictly excluded
+   from standard unencrypted Android OS cloud backups.
+   Backup and recovery is performed exclusively via client-side BIP-39 AES-256-GCM vault bundles.
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <!-- Exclude all local SQLite Room databases and journal files -->
+    <exclude domain="database" path="." />
+    <!-- Exclude all shared preferences containing auth credentials, tokens, and identity keys -->
+    <exclude domain="sharedpref" path="." />
 </full-backup-content>

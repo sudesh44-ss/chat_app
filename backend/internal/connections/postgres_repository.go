@@ -364,16 +364,16 @@ func (r *PostgresRepository) AcceptRequest(ctx context.Context, recipientNxID, r
 	connID := generateID("conn")
 
 	insertConnSQL := `
-		INSERT INTO connections (id, user_a_nx_id, user_b_nx_id, status, created_at, updated_at)
-		VALUES ($1, $2, $3, 'ACTIVE', $4, $4)
+		INSERT INTO connections (id, user_a_nx_id, user_b_nx_id, status, source, created_at, updated_at)
+		VALUES ($1, $2, $3, 'ACTIVE', 'NEXA_ID', $4, $4)
 		ON CONFLICT (user_a_nx_id, user_b_nx_id) DO UPDATE SET
 			status = 'ACTIVE',
 			updated_at = EXCLUDED.updated_at
-		RETURNING id, user_a_nx_id, user_b_nx_id, status, created_at, updated_at;
+		RETURNING id, user_a_nx_id, user_b_nx_id, status, source, created_at, updated_at;
 	`
 	var conn Connection
 	err = tx.QueryRow(ctx, insertConnSQL, connID, uA, uB, now).Scan(
-		&conn.ID, &conn.UserANxID, &conn.UserBNxID, &conn.Status, &conn.CreatedAt, &conn.UpdatedAt,
+		&conn.ID, &conn.UserANxID, &conn.UserBNxID, &conn.Status, &conn.Source, &conn.CreatedAt, &conn.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bilateral connection: %w", err)
@@ -582,4 +582,204 @@ func (r *PostgresRepository) IsConnected(ctx context.Context, userA, userB strin
 	var isConnected bool
 	err := r.pool.QueryRow(ctx, query, uA, uB).Scan(&isConnected)
 	return isConnected, err
+}
+
+func (r *PostgresRepository) SyncQrHandshake(ctx context.Context, scannerNxID, scannedNxID string) (*Connection, error) {
+	if scannerNxID == scannedNxID {
+		return nil, ErrSelfRequest
+	}
+	if !identity.IsValidNxID(scannerNxID) || !identity.IsValidNxID(scannedNxID) {
+		return nil, ErrInvalidNxID
+	}
+
+	blocked, err := r.IsBlocked(ctx, scannerNxID, scannedNxID)
+	if err != nil {
+		return nil, err
+	}
+	if blocked {
+		return nil, ErrBlockedByUser
+	}
+
+	var exists bool
+	if err := r.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM accounts WHERE nx_id = $1)", scannerNxID).Scan(&exists); err != nil || !exists {
+		return nil, ErrUserNotFound
+	}
+	if err := r.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM accounts WHERE nx_id = $1)", scannedNxID).Scan(&exists); err != nil || !exists {
+		return nil, ErrUserNotFound
+	}
+
+	uA, uB := CanonicalPair(scannerNxID, scannedNxID)
+	now := time.Now().UnixMilli()
+	connID := generateID("conn")
+
+	tx, err := r.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Update any pending connection requests to ACCEPTED
+	_, _ = tx.Exec(ctx, `
+		UPDATE connection_requests SET status = 'ACCEPTED', updated_at = $3
+		WHERE ((sender_nx_id = $1 AND recipient_nx_id = $2) OR (sender_nx_id = $2 AND recipient_nx_id = $1))
+		  AND status = 'PENDING';
+	`, scannerNxID, scannedNxID, now)
+
+	insertConnSQL := `
+		INSERT INTO connections (id, user_a_nx_id, user_b_nx_id, status, source, created_at, updated_at)
+		VALUES ($1, $2, $3, 'ACTIVE', 'QR_SCAN', $4, $4)
+		ON CONFLICT (user_a_nx_id, user_b_nx_id) DO UPDATE SET
+			status = 'ACTIVE',
+			source = 'QR_SCAN',
+			updated_at = EXCLUDED.updated_at
+		RETURNING id, user_a_nx_id, user_b_nx_id, status, source, created_at, updated_at;
+	`
+	var conn Connection
+	err = tx.QueryRow(ctx, insertConnSQL, connID, uA, uB, now).Scan(
+		&conn.ID, &conn.UserANxID, &conn.UserBNxID, &conn.Status, &conn.Source, &conn.CreatedAt, &conn.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to sync QR connection: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return &conn, nil
+}
+
+func (r *PostgresRepository) SetPhoneVisibility(ctx context.Context, granterNxID, granteeNxID string, isActive bool) error {
+	if granterNxID == granteeNxID {
+		return nil
+	}
+	if !identity.IsValidNxID(granterNxID) || !identity.IsValidNxID(granteeNxID) {
+		return ErrInvalidNxID
+	}
+
+	now := time.Now().UnixMilli()
+	query := `
+		INSERT INTO phone_visibility_grants (granter_nx_id, grantee_nx_id, is_active, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $4)
+		ON CONFLICT (granter_nx_id, grantee_nx_id) DO UPDATE SET
+			is_active = EXCLUDED.is_active,
+			updated_at = EXCLUDED.updated_at;
+	`
+	_, err := r.pool.Exec(ctx, query, granterNxID, granteeNxID, isActive, now)
+	return err
+}
+
+func (r *PostgresRepository) HasPhoneVisibility(ctx context.Context, granterNxID, granteeNxID string) (bool, error) {
+	query := `
+		SELECT EXISTS(
+			SELECT 1 FROM phone_visibility_grants
+			WHERE granter_nx_id = $1 AND grantee_nx_id = $2 AND is_active = TRUE
+		);
+	`
+	var hasVisibility bool
+	err := r.pool.QueryRow(ctx, query, granterNxID, granteeNxID).Scan(&hasVisibility)
+	return hasVisibility, err
+}
+
+func (r *PostgresRepository) ListPhoneVisibilityGrants(ctx context.Context, granterNxID string) ([]string, error) {
+	query := `
+		SELECT grantee_nx_id FROM phone_visibility_grants
+		WHERE granter_nx_id = $1 AND is_active = TRUE
+		ORDER BY updated_at DESC;
+	`
+	rows, err := r.pool.Query(ctx, query, granterNxID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query phone visibility grants: %w", err)
+	}
+	defer rows.Close()
+
+	var grantees []string
+	for rows.Next() {
+		var grantee string
+		if err := rows.Scan(&grantee); err != nil {
+			return nil, err
+		}
+		grantees = append(grantees, grantee)
+	}
+	return grantees, nil
+}
+
+func (r *PostgresRepository) GetMutualConnections(ctx context.Context, userA, userB string, limit, offset int) ([]*PublicProfile, int, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	countQuery := `
+		WITH user_a_conns AS (
+			SELECT CASE WHEN user_a_nx_id = $1 THEN user_b_nx_id ELSE user_a_nx_id END AS nx_id
+			FROM connections
+			WHERE (user_a_nx_id = $1 OR user_b_nx_id = $1) AND status = 'ACTIVE'
+		),
+		user_b_conns AS (
+			SELECT CASE WHEN user_a_nx_id = $2 THEN user_b_nx_id ELSE user_a_nx_id END AS nx_id
+			FROM connections
+			WHERE (user_a_nx_id = $2 OR user_b_nx_id = $2) AND status = 'ACTIVE'
+		)
+		SELECT COUNT(DISTINCT a.nx_id)
+		FROM user_a_conns a
+		JOIN user_b_conns b ON a.nx_id = b.nx_id
+		LEFT JOIN user_blocks blk ON (
+			(blk.blocker_nx_id = $1 AND blk.blocked_nx_id = a.nx_id) OR
+			(blk.blocker_nx_id = a.nx_id AND blk.blocked_nx_id = $1)
+		)
+		WHERE a.nx_id != $1 AND a.nx_id != $2 AND blk.blocker_nx_id IS NULL;
+	`
+	var totalCount int
+	if err := r.pool.QueryRow(ctx, countQuery, userA, userB).Scan(&totalCount); err != nil {
+		return nil, 0, fmt.Errorf("failed to count mutual connections: %w", err)
+	}
+
+	dataQuery := `
+		WITH user_a_conns AS (
+			SELECT CASE WHEN user_a_nx_id = $1 THEN user_b_nx_id ELSE user_a_nx_id END AS nx_id
+			FROM connections
+			WHERE (user_a_nx_id = $1 OR user_b_nx_id = $1) AND status = 'ACTIVE'
+		),
+		user_b_conns AS (
+			SELECT CASE WHEN user_a_nx_id = $2 THEN user_b_nx_id ELSE user_a_nx_id END AS nx_id
+			FROM connections
+			WHERE (user_a_nx_id = $2 OR user_b_nx_id = $2) AND status = 'ACTIVE'
+		),
+		mutual AS (
+			SELECT DISTINCT a.nx_id
+			FROM user_a_conns a
+			JOIN user_b_conns b ON a.nx_id = b.nx_id
+			LEFT JOIN user_blocks blk ON (
+				(blk.blocker_nx_id = $1 AND blk.blocked_nx_id = a.nx_id) OR
+				(blk.blocker_nx_id = a.nx_id AND blk.blocked_nx_id = $1)
+			)
+			WHERE a.nx_id != $1 AND a.nx_id != $2 AND blk.blocker_nx_id IS NULL
+		)
+		SELECT 
+			acc.nx_id, acc.profile_name, COALESCE(acc.avatar_url, ''), COALESCE(acc.bio, ''), acc.public_key_hex, acc.created_at
+		FROM mutual m
+		JOIN accounts acc ON m.nx_id = acc.nx_id
+		ORDER BY acc.profile_name ASC
+		LIMIT $3 OFFSET $4;
+	`
+	rows, err := r.pool.Query(ctx, dataQuery, userA, userB, limit, offset)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to query mutual connections: %w", err)
+	}
+	defer rows.Close()
+
+	var profiles []*PublicProfile
+	for rows.Next() {
+		var p PublicProfile
+		if err := rows.Scan(&p.NxID, &p.DisplayName, &p.AvatarUrl, &p.Bio, &p.PublicKeyHex, &p.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		p.IsConnected = true
+		profiles = append(profiles, &p)
+	}
+
+	return profiles, totalCount, nil
 }

@@ -71,7 +71,13 @@ class ContactProfileViewModel(
 
                 val originalName = if (isSelf) (myProfile?.fullName ?: effectiveName) else (contact?.displayName ?: effectiveName)
                 val nickname = if (isSelf) null else contact?.customNickname
-                val phone = if (isSelf) myProfile?.phoneNumber else contact?.phoneNumber
+                val phone = if (isSelf) {
+                    myProfile?.phoneNumber
+                } else if (contact?.shouldShowPhoneNumber == true) {
+                    contact.phoneNumber
+                } else {
+                    null
+                }
                 val about = if (isSelf) (myProfile?.bio ?: "Hey there! I am using NEXA encrypted chat.") else "Hey there! I am using NEXA encrypted chat."
                 val avatar = contact?.effectiveAvatarUrl
                 val photoUri = if (isSelf) null else contact?.deviceContactPhotoUri

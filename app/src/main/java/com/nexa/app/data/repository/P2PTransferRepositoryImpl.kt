@@ -37,6 +37,12 @@ import java.io.FileInputStream
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.security.MessageDigest
+import com.nexa.app.core.network.NetworkChangeEvent
+import com.nexa.app.core.network.NetworkMonitor
+import com.nexa.app.core.network.NetworkTypeState
+import com.nexa.app.data.remote.media.R2MediaFallbackService
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import java.util.concurrent.ConcurrentHashMap
 
 class P2PTransferRepositoryImpl(
@@ -44,10 +50,13 @@ class P2PTransferRepositoryImpl(
     private val transferDao: FileTransferDao,
     private val signalingClient: SignalingClient,
     private val webRtcClient: WebRtcClient,
-    private val secureStorage: SecureStorage
+    private val secureStorage: SecureStorage,
+    private val networkMonitor: NetworkMonitor? = null,
+    private val r2FallbackService: R2MediaFallbackService? = null
 ) : P2PTransferRepository {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private var networkDebounceJob: Job? = null
 
     private val _incomingOffers = MutableSharedFlow<SignalingMessage.OfferTransfer>(extraBufferCapacity = 16)
 
@@ -60,6 +69,7 @@ class P2PTransferRepositoryImpl(
 
     init {
         observeSignalingMessages()
+        observeNetworkChanges()
     }
 
     override fun observeTransfer(transferId: Long): Flow<TransferEntity?> {
@@ -321,6 +331,10 @@ class P2PTransferRepositoryImpl(
 
     private fun handleIncomingIce(msg: SignalingMessage.SignalingIce) {
         val pc = activePeerConnections[msg.transferId] ?: return
+        val session = activeSessions[msg.transferId]
+        if (msg.sdpCandidate.contains("typ relay", ignoreCase = true)) {
+            session?.activeCandidateType = "relay"
+        }
         val iceCandidate = IceCandidate(msg.sdpMid, msg.sdpMLineIndex, msg.sdpCandidate)
         pc.addIceCandidate(iceCandidate)
     }
@@ -334,8 +348,12 @@ class P2PTransferRepositoryImpl(
     private fun setupSenderPeerConnection(transferId: Long, transfer: TransferEntity): PeerConnection? {
         val pc = webRtcClient.buildPeerConnection(object : SimplePeerConnectionObserver() {
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
-                Log.d(TAG, "Sender transfer #$transferId ICE state: $state")
                 val session = activeSessions[transferId]
+                val hasTurn = session?.hasTurnConfig?.get() ?: false
+                val diag = WebRtcClient.determineDiagnostic(state, session?.activeCandidateType, hasTurn)
+                session?.updateDiagnostic(diag)
+                Log.d(TAG, "Sender transfer #$transferId ICE state: $state, diagnostic: $diag")
+
                 when (state) {
                     PeerConnection.IceConnectionState.CONNECTED,
                     PeerConnection.IceConnectionState.COMPLETED -> {
@@ -360,6 +378,12 @@ class P2PTransferRepositoryImpl(
             }
 
             override fun onIceCandidate(candidate: IceCandidate) {
+                val session = activeSessions[transferId]
+                if (candidate.sdp.contains("typ relay", ignoreCase = true)) {
+                    session?.activeCandidateType = "relay"
+                } else if (session?.activeCandidateType == null) {
+                    session?.activeCandidateType = if (candidate.sdp.contains("typ srflx", ignoreCase = true)) "srflx" else "host"
+                }
                 val iceMsg = SignalingMessage.SignalingIce(
                     transferId = transferId,
                     sdpMid = candidate.sdpMid,
@@ -373,32 +397,102 @@ class P2PTransferRepositoryImpl(
         }) ?: return null
 
         val session = WebRtcSession(transferId, pc)
+        session.hasTurnConfig.set(com.nexa.app.core.webrtc.TurnConfigManager.turnConfigs.isNotEmpty())
         session.transitionTo(PeerLifecycleState.INITIALIZING)
         activeSessions[transferId] = session
         return pc
     }
 
+    private fun observeNetworkChanges() {
+        val monitor = networkMonitor ?: return
+        scope.launch {
+            monitor.networkChangeEvents.collect { event ->
+                onNetworkInterfaceChanged(event)
+            }
+        }
+    }
+
+    private fun onNetworkInterfaceChanged(event: NetworkChangeEvent) {
+        networkDebounceJob?.cancel()
+        networkDebounceJob = scope.launch {
+            // Debounce rapid callbacks (800ms) to allow OS route stabilization
+            delay(800)
+
+            if (!event.isOnline && event.networkState is NetworkTypeState.Disconnected) {
+                Log.d(TAG, "Network disconnected, holding active P2P transfers in pending state...")
+                return@launch
+            }
+
+            Log.i(TAG, "Network interface transition detected: ${event.networkState} (handle=${event.networkHandle})")
+
+            for ((transferId, session) in activeSessions) {
+                val pc = activePeerConnections[transferId] ?: continue
+                if (session.isClosed.get()) continue
+
+                val transfer = transferDao.getTransferById(transferId) ?: continue
+                val status = transfer.status
+                if (status != "CONNECTING" && status != "TRANSFERRING") {
+                    continue
+                }
+
+                val iceState = pc.iceConnectionState()
+                val needsRestart = iceState == PeerConnection.IceConnectionState.DISCONNECTED ||
+                        iceState == PeerConnection.IceConnectionState.FAILED ||
+                        (session.activeNetworkHandle != 0L && session.activeNetworkHandle != event.networkHandle)
+
+                if (needsRestart) {
+                    Log.i(TAG, "Triggering controlled ICE restart for transfer #$transferId due to network interface change")
+                    session.activeNetworkHandle = event.networkHandle
+                    triggerIceRestart(transferId, transfer)
+                } else {
+                    Log.d(TAG, "Transfer #$transferId connection is healthy ($iceState), skipping unnecessary restart")
+                }
+            }
+        }
+    }
+
     private suspend fun triggerIceRestart(transferId: Long, transfer: TransferEntity) {
         val pc = activePeerConnections[transferId] ?: return
-        val session = activeSessions[transferId]
-        if (session != null && !session.transitionTo(PeerLifecycleState.RECONNECTING)) {
+        val session = activeSessions[transferId] ?: return
+
+        // Prevent concurrent simultaneous ICE restarts
+        if (!session.isRestartingIce.compareAndSet(false, true)) {
+            Log.d(TAG, "ICE restart already in progress for transfer #$transferId, ignoring duplicate trigger")
             return
         }
-        val offerResult = webRtcClient.restartIce(pc)
-        offerResult.onSuccess { sdpOffer ->
-            val sdpMsg = SignalingMessage.SignalingSdp(
-                transferId = transferId,
-                sdpType = "offer",
-                sdpDescription = sdpOffer.description,
-                senderNxId = getMyNxId(),
-                recipientNxId = transfer.conversationId
-            )
-            signalingClient.sendMessage(sdpMsg)
-            Log.d(TAG, "Dispatched controlled ICE restart offer for transfer #$transferId")
-        }.onFailure { e ->
-            Log.e(TAG, "ICE restart failed for transfer #$transferId", e)
-            transferDao.updateStatus(transferId, "FAILED")
-            cleanupTransfer(transferId)
+
+        // Rate-limit: at least 3 seconds between restarts on the same transfer
+        val now = System.currentTimeMillis()
+        if (now - session.lastRestartTimestamp < 3000L) {
+            session.isRestartingIce.set(false)
+            return
+        }
+        session.lastRestartTimestamp = now
+
+        try {
+            session.transitionTo(PeerLifecycleState.RECONNECTING)
+            Log.i(TAG, "Executing controlled ICE restart for transfer #$transferId")
+
+            val offerResult = webRtcClient.restartIce(pc)
+            offerResult.onSuccess { sdpOffer ->
+                val sdpMsg = SignalingMessage.SignalingSdp(
+                    transferId = transferId,
+                    sdpType = "offer",
+                    sdpDescription = sdpOffer.description,
+                    senderNxId = getMyNxId(),
+                    recipientNxId = transfer.conversationId
+                )
+                signalingClient.sendMessage(sdpMsg)
+                Log.d(TAG, "Dispatched controlled ICE restart offer for transfer #$transferId")
+            }.onFailure { e ->
+                Log.e(TAG, "ICE restart failed for transfer #$transferId", e)
+                session.transitionTo(PeerLifecycleState.FAILED)
+            }
+        } finally {
+            scope.launch {
+                delay(2000)
+                session.isRestartingIce.set(false)
+            }
         }
     }
 
@@ -409,8 +503,12 @@ class P2PTransferRepositoryImpl(
 
         val pc = webRtcClient.buildPeerConnection(object : SimplePeerConnectionObserver() {
             override fun onIceConnectionChange(state: PeerConnection.IceConnectionState) {
-                Log.d(TAG, "Receiver transfer #$transferId ICE state: $state")
                 val session = activeSessions[transferId]
+                val hasTurn = session?.hasTurnConfig?.get() ?: false
+                val diag = WebRtcClient.determineDiagnostic(state, session?.activeCandidateType, hasTurn)
+                session?.updateDiagnostic(diag)
+                Log.d(TAG, "Receiver transfer #$transferId ICE state: $state, diagnostic: $diag")
+
                 when (state) {
                     PeerConnection.IceConnectionState.CONNECTED,
                     PeerConnection.IceConnectionState.COMPLETED -> {
@@ -421,6 +519,19 @@ class P2PTransferRepositoryImpl(
                     }
                     PeerConnection.IceConnectionState.FAILED -> {
                         session?.transitionTo(PeerLifecycleState.FAILED)
+                        Log.w(TAG, "Receiver transfer #$transferId ICE failed. Requesting sender resume...")
+                        scope.launch {
+                            val currentTransfer = transferDao.getTransferById(transferId)
+                            if (currentTransfer != null) {
+                                val resumeMsg = SignalingMessage.ResumeFromChunk(
+                                    transferId = transferId,
+                                    startChunkIndex = currentTransfer.chunksCompleted,
+                                    senderNxId = getMyNxId(),
+                                    recipientNxId = currentTransfer.conversationId
+                                )
+                                signalingClient.sendMessage(resumeMsg)
+                            }
+                        }
                     }
                     PeerConnection.IceConnectionState.CLOSED -> {
                         session?.transitionTo(PeerLifecycleState.CLOSED)
@@ -430,6 +541,12 @@ class P2PTransferRepositoryImpl(
             }
 
             override fun onIceCandidate(candidate: IceCandidate) {
+                val session = activeSessions[transferId]
+                if (candidate.sdp.contains("typ relay", ignoreCase = true)) {
+                    session?.activeCandidateType = "relay"
+                } else if (session?.activeCandidateType == null) {
+                    session?.activeCandidateType = if (candidate.sdp.contains("typ srflx", ignoreCase = true)) "srflx" else "host"
+                }
                 val iceMsg = SignalingMessage.SignalingIce(
                     transferId = transferId,
                     sdpMid = candidate.sdpMid,
@@ -485,6 +602,7 @@ class P2PTransferRepositoryImpl(
         }) ?: return null
 
         val session = WebRtcSession(transferId, pc)
+        session.hasTurnConfig.set(com.nexa.app.core.webrtc.TurnConfigManager.turnConfigs.isNotEmpty())
         session.transitionTo(PeerLifecycleState.INITIALIZING)
         activeSessions[transferId] = session
         return pc

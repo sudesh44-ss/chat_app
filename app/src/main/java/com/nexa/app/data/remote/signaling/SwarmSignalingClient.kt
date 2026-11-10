@@ -28,12 +28,17 @@ class SwarmSignalingClient(
     private var activeWebSocket: WebSocket? = null
     private var myPeerId: String? = null
 
-    fun connect(peerId: String) {
+    fun connect(peerId: String, sessionToken: String? = null) {
         myPeerId = peerId
         disconnect()
 
-        val fullUrl = "$serverUrl/ws/swarm?peer_id=$peerId"
-        val request = Request.Builder().url(fullUrl).build()
+        val baseUrl = "$serverUrl/ws/swarm?peer_id=$peerId"
+        val fullUrl = if (!sessionToken.isNullOrBlank()) "$baseUrl&token=$sessionToken" else baseUrl
+        val requestBuilder = Request.Builder().url(fullUrl)
+        if (!sessionToken.isNullOrBlank()) {
+            requestBuilder.addHeader("Authorization", "Bearer $sessionToken")
+        }
+        val request = requestBuilder.build()
 
         activeWebSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {

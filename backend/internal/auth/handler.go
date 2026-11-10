@@ -72,8 +72,10 @@ type ContactLookupResponse struct {
 
 type ProfileUpdateRequest struct {
 	ProfileName           string `json:"profile_name,omitempty"`
+	AvatarUrl             string `json:"avatar_url,omitempty"`
 	Bio                   string `json:"bio,omitempty"`
 	Gender                string `json:"gender,omitempty"`
+	Age                   *int   `json:"age,omitempty"`
 	IsDiscoverableByPhone *bool  `json:"is_discoverable_by_phone,omitempty"`
 }
 
@@ -93,10 +95,14 @@ type AuthHandler struct {
 }
 
 func NewAuthHandler(store identity.IdentityRepository, otpService *OtpService, googleVerifier *GoogleVerifier) *AuthHandler {
+	revSms := NewReverseSmsService(store)
+	if googleVerifier != nil {
+		revSms.SetGoogleVerifier(googleVerifier)
+	}
 	return &AuthHandler{
 		store:             store,
 		otpService:        otpService,
-		reverseSmsService: NewReverseSmsService(store),
+		reverseSmsService: revSms,
 		googleVerifier:    googleVerifier,
 		supabaseVerifier:  NewSupabaseVerifier(),
 		challengeStore:    NewMemoryChallengeStore(),
@@ -668,11 +674,17 @@ func (h *AuthHandler) handleProfile(w http.ResponseWriter, r *http.Request) {
 		if req.ProfileName != "" {
 			account.ProfileName = req.ProfileName
 		}
+		if req.AvatarUrl != "" {
+			account.AvatarUrl = req.AvatarUrl
+		}
 		if req.Bio != "" {
 			account.Bio = req.Bio
 		}
 		if req.Gender != "" {
 			account.Gender = req.Gender
+		}
+		if req.Age != nil {
+			account.Age = *req.Age
 		}
 		if req.IsDiscoverableByPhone != nil {
 			account.IsDiscoverableByPhone = *req.IsDiscoverableByPhone
@@ -972,6 +984,12 @@ func (h *AuthHandler) handleInitiateReverseVerify(w http.ResponseWriter, r *http
 				"error": err.Error(),
 				"code":  "INVALID_DOMESTIC_PHONE",
 			})
+		case errors.Is(err, ErrPhoneAlreadyRegistered):
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "PHONE_ALREADY_REGISTERED",
+			})
 		case errors.Is(err, ErrReverseRateLimited):
 			w.WriteHeader(http.StatusTooManyRequests)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1134,21 +1152,46 @@ func (h *AuthHandler) handleVerificationStatus(w http.ResponseWriter, r *http.Re
 }
 
 func (h *AuthHandler) handleUserResolve(w http.ResponseWriter, r *http.Request) {
+	// Authentication required to prevent unauthenticated scraping and phone number enumeration
+	authHeader := r.Header.Get("Authorization")
+	sessionToken := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	if sessionToken == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Authentication required: missing or empty session token",
+		})
+		return
+	}
+
+	sess, ok := h.store.GetSession(sessionToken)
+	if !ok || sess == nil || sess.IsRevoked || (sess.ExpiresAt > 0 && time.Now().UnixMilli() > sess.ExpiresAt) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Authentication failed: invalid, revoked, or expired session",
+		})
+		return
+	}
+
+	if sess.DeviceID != "" {
+		if dev, found := h.store.GetDevice(sess.DeviceID); found && (dev.IsRevoked || dev.NxID != sess.NxID) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Authentication failed: session device is revoked or mismatched",
+			})
+			return
+		}
+	}
+
 	target := r.URL.Query().Get("target")
 	if target == "" {
 		http.Error(w, "Missing target query parameter (Nx-ID or phone)", http.StatusBadRequest)
 		return
 	}
 
-	callerNxID := ""
-	authHeader := r.Header.Get("Authorization")
-	sessionToken := strings.TrimPrefix(authHeader, "Bearer ")
-	if sessionToken != "" {
-		if sess, ok := h.store.GetSession(sessionToken); ok && sess != nil {
-			callerNxID = sess.NxID
-		}
-	}
-
+	callerNxID := sess.NxID
 	resp, err := h.reverseSmsService.ResolveUser(target, callerNxID)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")

@@ -219,11 +219,6 @@ func main() {
 
 		session := connection.NewClientSession(hub, conn, nxId, deviceId)
 
-		// Optional: if client provided blind_token in query, register it
-		if blindToken := r.URL.Query().Get("blind_token"); blindToken != "" {
-			hub.RegisterBlindToken(blindToken, session)
-		}
-
 		go session.WritePump()
 		go session.ReadPump()
 
@@ -235,12 +230,43 @@ func main() {
 		}
 	})
 
-	// 7. Register WebRTC P2P Signaling WebSocket Endpoint
+	// 7. Register WebRTC P2P Signaling WebSocket Endpoint (VULN-01 Hardened)
 	http.HandleFunc("/ws/signaling", func(w http.ResponseWriter, r *http.Request) {
 		nxId := r.URL.Query().Get("nx_id")
 		if nxId == "" {
 			http.Error(w, "Missing nx_id query parameter", http.StatusBadRequest)
 			return
+		}
+
+		token := r.URL.Query().Get("token")
+		if token == "" {
+			authHeader := r.Header.Get("Authorization")
+			if strings.HasPrefix(authHeader, "Bearer ") {
+				token = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+			}
+		}
+
+		if token == "" {
+			http.Error(w, "Unauthorized: missing session token", http.StatusUnauthorized)
+			return
+		}
+
+		sess, ok := identityRepo.GetSession(token)
+		if !ok || sess == nil || sess.IsRevoked || (sess.ExpiresAt > 0 && time.Now().UnixMilli() > sess.ExpiresAt) {
+			http.Error(w, "Unauthorized: invalid or expired session", http.StatusUnauthorized)
+			return
+		}
+
+		if sess.NxID != nxId {
+			http.Error(w, "Forbidden: session token does not match nx_id", http.StatusForbidden)
+			return
+		}
+
+		if sess.DeviceID != "" {
+			if dev, found := identityRepo.GetDevice(sess.DeviceID); found && (dev.IsRevoked || dev.NxID != sess.NxID) {
+				http.Error(w, "Unauthorized: device revoked", http.StatusUnauthorized)
+				return
+			}
 		}
 
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -355,6 +381,28 @@ func main() {
 			return
 		}
 
+		// Enforce authentication via Bearer session token
+		authHeader := r.Header.Get("Authorization")
+		sessionToken := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		if sessionToken == "" {
+			http.Error(w, "Unauthorized: session required", http.StatusUnauthorized)
+			return
+		}
+		sess, ok := identityRepo.GetSession(sessionToken)
+		if !ok || sess == nil || sess.IsRevoked || (sess.ExpiresAt > 0 && time.Now().UnixMilli() > sess.ExpiresAt) {
+			http.Error(w, "Unauthorized: invalid or revoked session", http.StatusUnauthorized)
+			return
+		}
+		if sess.DeviceID != "" {
+			if dev, found := identityRepo.GetDevice(sess.DeviceID); found && (dev.IsRevoked || dev.NxID != sess.NxID) {
+				http.Error(w, "Unauthorized: session device revoked", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		// Enforce maximum body size 64 KB to prevent JSON DOS
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
 		var req struct {
 			NxId       string `json:"nx_id"`
 			SizeBytes  int64  `json:"size_bytes"`
@@ -364,6 +412,13 @@ func main() {
 			http.Error(w, "Invalid JSON body", http.StatusBadRequest)
 			return
 		}
+
+		// Bind req.NxId to authenticated caller identity to prevent IDOR spoofing
+		if req.NxId != "" && req.NxId != sess.NxID {
+			http.Error(w, "Forbidden: cannot request ticket for another NX-ID", http.StatusForbidden)
+			return
+		}
+		req.NxId = sess.NxID
 
 		// Max size gate: 100 MB ceiling over cloud fallback
 		const maxCloudBytes = 100 * 1024 * 1024
@@ -398,6 +453,28 @@ func main() {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+
+		// Enforce authentication via Bearer session token
+		authHeader := r.Header.Get("Authorization")
+		sessionToken := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		if sessionToken == "" {
+			http.Error(w, "Unauthorized: session required", http.StatusUnauthorized)
+			return
+		}
+		sess, ok := identityRepo.GetSession(sessionToken)
+		if !ok || sess == nil || sess.IsRevoked || (sess.ExpiresAt > 0 && time.Now().UnixMilli() > sess.ExpiresAt) {
+			http.Error(w, "Unauthorized: invalid or revoked session", http.StatusUnauthorized)
+			return
+		}
+		if sess.DeviceID != "" {
+			if dev, found := identityRepo.GetDevice(sess.DeviceID); found && (dev.IsRevoked || dev.NxID != sess.NxID) {
+				http.Error(w, "Unauthorized: session device revoked", http.StatusUnauthorized)
+				return
+			}
+		}
+
+		// Enforce maximum body size 64 KB
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 
 		var req struct {
 			ObjectKey string `json:"object_key"`

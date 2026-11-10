@@ -8,7 +8,7 @@ option java_multiple_files = true;
 enum PacketType {
   PACKET_UNKNOWN = 0;
   PACKET_MESSAGE = 1;
-  PACKET_ACK = 2;
+  PACKET_ACK = 2; // Final Recipient Delivery / Read ACK
   PACKET_PING = 3;
   PACKET_AUTH_CHALLENGE = 4;
   PACKET_AUTH_RESPONSE = 5;
@@ -16,6 +16,10 @@ enum PacketType {
   PACKET_AUTH_FAILURE = 7;
   PACKET_TYPING = 10;
   PACKET_DEVICE_SYNC = 11;
+  PACKET_SIGNALING = 12;
+  PACKET_REGISTER_ROUTING_TOKENS = 13;
+  PACKET_PEER_SYNC = 14;
+  PACKET_CUSTODY_ACK = 15; // Relay Store-and-Forward Custody ACK
 }
 
 enum AckStatus {
@@ -23,6 +27,14 @@ enum AckStatus {
   ACK_SERVER_RECEIVED = 1;
   ACK_DEVICE_DELIVERED = 2;
   ACK_DEVICE_READ = 3;
+}
+
+enum CustodyStatus {
+  CUSTODY_STATUS_UNSPECIFIED = 0;
+  CUSTODY_ACCEPTED = 1;
+  CUSTODY_TRANSFERRED = 2;
+  CUSTODY_REJECTED = 3;
+  CUSTODY_EXPIRED = 4;
 }
 
 message NexaWirePacket {
@@ -39,6 +51,10 @@ message NexaWirePacket {
     AuthResponsePayload auth_response = 9;
     TypingPayload typing = 10;
     DeviceSyncPayload device_sync = 11;
+    SignalingPayload signaling = 12;
+    RoutingTokenRegistrationPayload routing_tokens = 13;
+    PeerSyncPayload peer_sync = 14;
+    CustodyAckPayload custody_ack = 15;
   }
 }
 
@@ -63,6 +79,18 @@ message EncryptedMessagePayload {
 message DeliveryAckPayload {
   string original_packet_id = 1;
   AckStatus status = 2;
+  string recipient_nx_id = 3;
+  string device_id = 4;
+  int64 timestamp = 5;
+  bytes signature = 6;
+}
+
+message CustodyAckPayload {
+  string original_packet_id = 1;
+  string custodian_nx_id = 2;
+  CustodyStatus status = 3;
+  int64 timestamp = 4;
+  bytes signature = 5;
 }
 
 message AuthChallengePayload {
@@ -87,4 +115,37 @@ message DeviceSyncPayload {
   string source_device_id = 2;
   int64 sequence_number = 3;
   bytes encrypted_payload = 4;
+}
+
+message SignalingPayload {
+  int64 transfer_id = 1;
+  string action = 2;
+  string data = 3;
+}
+
+message RoutingTokenRegistrationPayload {
+  repeated string tokens = 1;
+}
+
+enum PeerSyncAction {
+  SYNC_UNKNOWN = 0;
+  SYNC_HELLO = 1;
+  SYNC_HELLO_ACK = 2;
+  SYNC_INVENTORY_REQ = 3;
+  SYNC_INVENTORY_RESP = 4;
+  SYNC_PULL_REQ = 5;
+  SYNC_PULL_RESP = 6;
+  SYNC_ACK = 7;
+}
+
+message PeerSyncPayload {
+  PeerSyncAction action = 1;
+  string session_id = 2;
+  string conversation_id = 3;
+  int64 cursor_timestamp = 4;
+  int64 cursor_sequence = 5;
+  repeated string message_ids = 6;
+  repeated bytes envelopes = 7;
+  int64 sync_timestamp = 8;
+  string error_message = 9;
 }

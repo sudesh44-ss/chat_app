@@ -58,13 +58,17 @@ data class BackupVaultHeader(
 
     companion object {
         const val MAGIC = "NXVAULT"
-        const val CURRENT_VERSION = 1
+        const val VERSION_1 = 1
+        const val VERSION_2 = 2
+        const val CURRENT_VERSION = VERSION_2
         const val MAGIC_SIZE = 7
         const val VERSION_SIZE = 4
         const val SALT_SIZE = 16
         const val IV_SIZE = 12
         const val HASH_SIZE = 32
         const val HEADER_SIZE = MAGIC_SIZE + VERSION_SIZE + SALT_SIZE + IV_SIZE + HASH_SIZE // 71 Bytes
+
+        fun isSupportedVersion(v: Int): Boolean = v in listOf(VERSION_1, VERSION_2)
 
         fun fromByteArray(bytes: ByteArray): BackupVaultHeader? {
             if (bytes.size < HEADER_SIZE) return null
@@ -76,6 +80,8 @@ data class BackupVaultHeader(
             if (magicStr != MAGIC) return null
 
             val version = buffer.int
+            if (!isSupportedVersion(version)) return null
+
             val salt = ByteArray(SALT_SIZE).also { buffer.get(it) }
             val iv = ByteArray(IV_SIZE).also { buffer.get(it) }
             val hash = ByteArray(HASH_SIZE).also { buffer.get(it) }

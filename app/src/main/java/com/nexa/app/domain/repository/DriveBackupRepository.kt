@@ -1,5 +1,6 @@
 package com.nexa.app.domain.repository
 
+import com.nexa.app.core.backup.BackupCategoryConfig
 import com.nexa.app.core.util.DriveResource
 import com.nexa.app.data.drive.DriveFile
 import kotlinx.coroutines.flow.Flow
@@ -10,10 +11,13 @@ import kotlinx.coroutines.flow.Flow
 interface DriveBackupRepository {
 
     /**
-     * Executes atomic snapshot, compression, AES-256-GCM encryption, split-brain check,
-     * and 256 KB chunked resumable upload to Google Drive `appDataFolder`.
+     * Executes atomic snapshot, key envelope sealing, compression, AES-256-GCM encryption,
+     * split-brain check, and 256 KB chunked resumable upload to Google Drive `appDataFolder`.
      */
-    fun createAndUploadBackup(passphraseWords: String): Flow<DriveResource<String>>
+    fun createAndUploadBackup(
+        passphraseWords: String,
+        categoryConfig: BackupCategoryConfig = BackupCategoryConfig()
+    ): Flow<DriveResource<String>>
 
     /**
      * Queries the hidden `appDataFolder` for an existing backup vault and returns its metadata.
@@ -22,9 +26,28 @@ interface DriveBackupRepository {
 
     /**
      * Downloads the remote encrypted vault, verifies the SHA-256 integrity tag, derives key,
-     * decrypts, decompresses, and performs an atomic database swap.
+     * unseals Key Envelope in RAM, decrypts, and performs an atomic database swap.
      */
-    fun downloadAndRestoreBackup(fileId: String, passphraseWords: String): Flow<DriveResource<Boolean>>
+    fun downloadAndRestoreBackup(
+        fileId: String,
+        passphraseWords: String,
+        restoreCategoryConfig: BackupCategoryConfig = BackupCategoryConfig()
+    ): Flow<DriveResource<Boolean>>
+
+    /**
+     * Deletes the cloud backup vault from Google Drive `appDataFolder`.
+     */
+    fun deleteRemoteBackup(fileId: String): Flow<DriveResource<Boolean>>
+
+    /**
+     * Verifies remote backup file integrity and header validity.
+     */
+    fun verifyRemoteBackupIntegrity(fileId: String): Flow<DriveResource<Boolean>>
+
+    /**
+     * Calculates estimated backup payload size based on selected category configuration.
+     */
+    fun calculateBackupSize(categoryConfig: BackupCategoryConfig): Long
 
     /**
      * Executes an unprompted background backup triggered by WorkManager.

@@ -56,3 +56,7 @@ NEXA_STARTUP_CRASH_FULL.txt
 *.tmp
 screen*.png
 uidump.xml
+*.zip
+
+*google-services.json
+*release.keystore

@@ -35,7 +35,8 @@ import com.nexa.app.domain.model.TransportType
 fun TransportSelectorMenu(
     selectedTransport: TransportType,
     onSelectTransport: (TransportType) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isSmsSupported: Boolean = false
 ) {
     Surface(
         shape = RoundedCornerShape(20.dp),
@@ -61,11 +62,12 @@ fun TransportSelectorMenu(
             Spacer(modifier = Modifier.width(4.dp))
 
             TransportOptionItem(
-                label = "Data SMS",
+                label = if (isSmsSupported) "Data SMS" else "Data SMS (Disabled)",
                 icon = Icons.Default.SignalCellularAlt,
                 isSelected = selectedTransport == TransportType.DATA_SMS,
                 activeColor = NexaWarningOrange,
-                onClick = { onSelectTransport(TransportType.DATA_SMS) },
+                enabled = isSmsSupported,
+                onClick = { if (isSmsSupported) onSelectTransport(TransportType.DATA_SMS) },
                 modifier = Modifier.weight(1f)
             )
 
@@ -89,17 +91,22 @@ private fun TransportOptionItem(
     icon: ImageVector,
     isSelected: Boolean,
     activeColor: androidx.compose.ui.graphics.Color,
+    enabled: Boolean = true,
     onClick: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val bg = if (isSelected) activeColor.copy(alpha = 0.2f) else androidx.compose.ui.graphics.Color.Transparent
-    val tint = if (isSelected) activeColor else MaterialTheme.colorScheme.outline
+    val tint = when {
+        !enabled -> MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+        isSelected -> activeColor
+        else -> MaterialTheme.colorScheme.outline
+    }
     val fw = if (isSelected) FontWeight.Bold else FontWeight.Normal
 
     Box(
         modifier = modifier
             .background(color = bg, shape = RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = 6.dp, horizontal = 8.dp),
         contentAlignment = Alignment.Center
     ) {

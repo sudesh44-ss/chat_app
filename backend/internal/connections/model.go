@@ -15,6 +15,11 @@ const (
 	ConnectionStatusActive  = "ACTIVE"
 	ConnectionStatusRemoved = "REMOVED"
 
+	ConnectionSourceAddressBook   = "ADDRESS_BOOK"
+	ConnectionSourceQrScan        = "QR_SCAN"
+	ConnectionSourceNexaID        = "NEXA_ID"
+	ConnectionSourceMeshProximity = "MESH_PROXIMITY"
+
 	DefaultRequestTTL = 7 * 24 * time.Hour // 7 days strict TTL
 )
 
@@ -56,8 +61,26 @@ type Connection struct {
 	UserANxID string `json:"user_a_nx_id"`
 	UserBNxID string `json:"user_b_nx_id"`
 	Status    string `json:"status"` // ACTIVE, REMOVED
+	Source    string `json:"source"` // ADDRESS_BOOK, QR_SCAN, NEXA_ID, MESH_PROXIMITY
 	CreatedAt int64  `json:"created_at"`
 	UpdatedAt int64  `json:"updated_at"`
+}
+
+// PhoneVisibilityGrant represents a directional grant from granter to grantee.
+type PhoneVisibilityGrant struct {
+	ID          string `json:"id"`
+	GranterNxID string `json:"granter_nx_id"`
+	GranteeNxID string `json:"grantee_nx_id"`
+	IsActive    bool   `json:"is_active"`
+	CreatedAt   int64  `json:"created_at"`
+	UpdatedAt   int64  `json:"updated_at"`
+}
+
+// MutualConnectionsResult summarizes shared connections between two users.
+type MutualConnectionsResult struct {
+	TargetNxID string           `json:"target_nx_id"`
+	Count      int              `json:"count"`
+	Mutual     []*PublicProfile `json:"mutual"`
 }
 
 // CanonicalPair returns users in strictly canonical lexicographical order: userA < userB.

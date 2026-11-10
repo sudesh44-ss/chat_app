@@ -30,7 +30,95 @@ enum class PeerLifecycleState {
 }
 
 /**
- * Managed WebRTC Session tracking atomic lifecycle states and safe disposal.
+ * Diagnostic status distinguishing direct P2P, TURN relay, and failure states.
+ */
+enum class ConnectionDiagnostic {
+    DIRECT_P2P,
+    TURN_RELAYED,
+    ICE_FAILED,
+    TURN_UNAVAILABLE,
+    CONNECTING,
+    DISCONNECTED
+}
+
+/**
+ * Configuration model for WebRTC TURN relay servers.
+ * Supports UDP, TCP, and TLS (TURNS) transports with secure credential handling and redaction.
+ */
+data class TurnServerConfig(
+    val url: String,
+    val username: String? = null,
+    val credential: String? = null,
+    val transport: String = "udp"
+) {
+    fun toIceServer(): PeerConnection.IceServer {
+        val cleanUrl = buildCleanUrl()
+        val builder = PeerConnection.IceServer.builder(cleanUrl)
+        if (!username.isNullOrBlank()) {
+            builder.setUsername(username)
+        }
+        if (!credential.isNullOrBlank()) {
+            builder.setPassword(credential)
+        }
+        return builder.createIceServer()
+    }
+
+    fun buildCleanUrl(): String {
+        var base = url.trim()
+        val isTurns = base.startsWith("turns:", ignoreCase = true)
+        val isTurn = base.startsWith("turn:", ignoreCase = true)
+        if (!isTurn && !isTurns) {
+            base = "turn:$base"
+        }
+        return if (!base.contains("?transport=", ignoreCase = true) &&
+            (transport.equals("tcp", ignoreCase = true) || transport.equals("udp", ignoreCase = true))
+        ) {
+            "$base?transport=${transport.lowercase()}"
+        } else {
+            base
+        }
+    }
+
+    /**
+     * Returns log-safe representation with credentials strictly redacted.
+     */
+    fun toRedactedString(): String {
+        val userPart = if (!username.isNullOrBlank()) "user=$username" else "no-user"
+        val credPart = if (!credential.isNullOrBlank()) "cred=***" else "no-cred"
+        val cleanUrl = buildCleanUrl()
+        return "TurnServerConfig(url=$cleanUrl, $userPart, $credPart)"
+    }
+}
+
+/**
+ * Thread-safe configuration manager for dynamic TURN relay registration.
+ */
+object TurnConfigManager {
+    private val _turnConfigs = mutableListOf<TurnServerConfig>()
+    val turnConfigs: List<TurnServerConfig> get() = synchronized(_turnConfigs) { _turnConfigs.toList() }
+
+    fun setTurnServers(configs: List<TurnServerConfig>) {
+        synchronized(_turnConfigs) {
+            _turnConfigs.clear()
+            _turnConfigs.addAll(configs)
+        }
+    }
+
+    fun addTurnServer(config: TurnServerConfig) {
+        synchronized(_turnConfigs) {
+            _turnConfigs.add(config)
+        }
+    }
+
+    fun clear() {
+        synchronized(_turnConfigs) {
+            _turnConfigs.clear()
+        }
+    }
+}
+
+/**
+ * Managed WebRTC Session tracking atomic lifecycle states, diagnostics, and safe disposal.
  */
 class WebRtcSession(
     val transferId: Long,
@@ -38,7 +126,13 @@ class WebRtcSession(
     var dataChannel: DataChannel? = null
 ) {
     val state = AtomicReference(PeerLifecycleState.NEW)
-    private val isClosed = AtomicBoolean(false)
+    val diagnostic = AtomicReference(ConnectionDiagnostic.CONNECTING)
+    var activeCandidateType: String? = null
+    val hasTurnConfig = AtomicBoolean(false)
+    val isRestartingIce = AtomicBoolean(false)
+    var lastRestartTimestamp: Long = 0L
+    var activeNetworkHandle: Long = 0L
+    val isClosed = AtomicBoolean(false)
 
     fun transitionTo(newState: PeerLifecycleState): Boolean {
         val current = state.get()
@@ -47,6 +141,10 @@ class WebRtcSession(
         }
         state.set(newState)
         return true
+    }
+
+    fun updateDiagnostic(diag: ConnectionDiagnostic) {
+        diagnostic.set(diag)
     }
 
     /**
@@ -70,7 +168,10 @@ class WebRtcSession(
  * WebRTC Client managing PeerConnectionFactory, STUN NAT Hole-Punching,
  * SDP Offer/Answer lifecycle, controlled ICE restarts, and SCTP DataChannels.
  */
-class WebRtcClient(private val context: Context) {
+class WebRtcClient(
+    private val context: Context,
+    private val turnConfigProvider: () -> List<TurnServerConfig> = { TurnConfigManager.turnConfigs }
+) {
 
     val peerConnectionFactory: PeerConnectionFactory
     private val isDisposed = AtomicBoolean(false)
@@ -87,16 +188,16 @@ class WebRtcClient(private val context: Context) {
     }
 
     /**
-     * Builds a WebRTC PeerConnection configured with Google STUN servers and Unified Plan semantics.
+     * Builds a WebRTC PeerConnection configured with STUN and configurable TURN relay servers.
      */
-    fun buildPeerConnection(observer: PeerConnection.Observer): PeerConnection? {
+    fun buildPeerConnection(
+        observer: PeerConnection.Observer,
+        customTurnConfigs: List<TurnServerConfig>? = null
+    ): PeerConnection? {
         if (isDisposed.get()) return null
 
-        val iceServers = listOf(
-            PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
-            PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer()
-        )
+        val activeTurnConfigs = customTurnConfigs ?: turnConfigProvider()
+        val iceServers = buildIceServerList(activeTurnConfigs)
 
         val rtcConfig = PeerConnection.RTCConfiguration(iceServers).apply {
             sdpSemantics = PeerConnection.SdpSemantics.UNIFIED_PLAN
@@ -251,6 +352,60 @@ class WebRtcClient(private val context: Context) {
     companion object {
         const val DATA_CHANNEL_LABEL = "file_stream"
         private const val TAG = "WebRtcClient"
+
+        /**
+         * Builds an ICE server list combining default Google STUN with configured TURN servers.
+         */
+        fun buildIceServerList(
+            turnConfigs: List<TurnServerConfig>? = null
+        ): List<PeerConnection.IceServer> {
+            val iceServers = mutableListOf(
+                PeerConnection.IceServer.builder("stun:stun.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun1.l.google.com:19302").createIceServer(),
+                PeerConnection.IceServer.builder("stun:stun2.l.google.com:19302").createIceServer()
+            )
+
+            turnConfigs?.forEach { config ->
+                try {
+                    iceServers.add(config.toIceServer())
+                    Log.d(TAG, "Configured ICE TURN server: ${config.toRedactedString()}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to parse ICE TURN server: ${config.toRedactedString()}", e)
+                }
+            }
+
+            return iceServers
+        }
+
+        /**
+         * Evaluates connection diagnostics distinguishing direct P2P vs TURN relayed vs failure modes.
+         */
+        fun determineDiagnostic(
+            iceState: PeerConnection.IceConnectionState,
+            candidateType: String?,
+            hasTurnConfig: Boolean
+        ): ConnectionDiagnostic {
+            return when (iceState) {
+                PeerConnection.IceConnectionState.CONNECTED,
+                PeerConnection.IceConnectionState.COMPLETED -> {
+                    if (candidateType?.equals("relay", ignoreCase = true) == true) {
+                        ConnectionDiagnostic.TURN_RELAYED
+                    } else {
+                        ConnectionDiagnostic.DIRECT_P2P
+                    }
+                }
+                PeerConnection.IceConnectionState.FAILED -> {
+                    if (!hasTurnConfig) {
+                        ConnectionDiagnostic.TURN_UNAVAILABLE
+                    } else {
+                        ConnectionDiagnostic.ICE_FAILED
+                    }
+                }
+                PeerConnection.IceConnectionState.CHECKING -> ConnectionDiagnostic.CONNECTING
+                PeerConnection.IceConnectionState.DISCONNECTED -> ConnectionDiagnostic.DISCONNECTED
+                else -> ConnectionDiagnostic.CONNECTING
+            }
+        }
 
         /**
          * Safely closes and disposes an SCTP DataChannel without crashing native C++ runtime.

@@ -60,6 +60,9 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/users/block", h.handleBlockUser)
 	mux.HandleFunc("/api/v1/users/unblock", h.handleUnblockUser)
 	mux.HandleFunc("/api/v1/users/blocked", h.handleListBlocked)
+	mux.HandleFunc("/api/v1/contacts/sync-qr", h.handleSyncQr)
+	mux.HandleFunc("/api/v1/users/phone-visibility", h.handlePhoneVisibility)
+	mux.HandleFunc("/api/v1/connections/mutual", h.handleMutualConnections)
 }
 
 func (h *Handler) authenticate(r *http.Request) (*identity.Session, *identity.UserAccount, error) {
@@ -199,12 +202,19 @@ func (h *Handler) handleSendRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+
 	var reqBody struct {
 		RecipientNxID string `json:"recipient_nx_id"`
 		IntroMessage  string `json:"intro_message,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		http.Error(w, "Invalid request body or size exceeded", http.StatusBadRequest)
+		return
+	}
+
+	if len(reqBody.IntroMessage) > 256 {
+		http.Error(w, "Intro message too long (maximum 256 characters)", http.StatusBadRequest)
 		return
 	}
 
@@ -610,5 +620,188 @@ func (h *Handler) handleListBlocked(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"blocked_users": blockedList,
 		"total":         len(blockedList),
+	})
+}
+
+// POST /api/v1/contacts/sync-qr
+func (h *Handler) handleSyncQr(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var reqBody struct {
+		ScannerNxID      string `json:"scanner_nx_id"`
+		ScannedNxID      string `json:"scanned_nx_id"`
+		ScannedSignature string `json:"scanned_signature,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	reqBody.ScannerNxID = strings.TrimSpace(reqBody.ScannerNxID)
+	reqBody.ScannedNxID = strings.TrimSpace(reqBody.ScannedNxID)
+
+	if reqBody.ScannerNxID == "" || reqBody.ScannedNxID == "" {
+		http.Error(w, "Both scanner_nx_id and scanned_nx_id are required", http.StatusBadRequest)
+		return
+	}
+
+	// Verify authenticated session if Authorization header is present
+	if r.Header.Get("Authorization") != "" {
+		session, _, err := h.authenticate(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		if session.NxID != reqBody.ScannerNxID && session.NxID != reqBody.ScannedNxID {
+			http.Error(w, "Authenticated user mismatch with QR participants", http.StatusForbidden)
+			return
+		}
+	}
+
+	conn, err := h.repo.SyncQrHandshake(r.Context(), reqBody.ScannerNxID, reqBody.ScannedNxID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrSelfRequest):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, ErrInvalidNxID):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		case errors.Is(err, ErrUserNotFound):
+			http.Error(w, "User not found", http.StatusNotFound)
+		case errors.Is(err, ErrBlockedByUser):
+			http.Error(w, "Cannot connect with blocked user", http.StatusForbidden)
+		default:
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	if h.hub != nil {
+		h.hub.BroadcastEventToNxID(reqBody.ScannerNxID, "CONNECTION_ESTABLISHED", conn)
+		h.hub.BroadcastEventToNxID(reqBody.ScannedNxID, "CONNECTION_ESTABLISHED", conn)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "SUCCESS",
+		"connection": conn,
+	})
+}
+
+// POST or GET /api/v1/users/phone-visibility
+func (h *Handler) handlePhoneVisibility(w http.ResponseWriter, r *http.Request) {
+	session, _, err := h.authenticate(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodPost:
+		var reqBody struct {
+			GranteeNxID string `json:"grantee_nx_id"`
+			IsActive    bool   `json:"is_active"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		reqBody.GranteeNxID = strings.TrimSpace(reqBody.GranteeNxID)
+		if !identity.IsValidNxID(reqBody.GranteeNxID) {
+			http.Error(w, "Invalid grantee NX-ID format", http.StatusBadRequest)
+			return
+		}
+
+		if err := h.repo.SetPhoneVisibility(r.Context(), session.NxID, reqBody.GranteeNxID, reqBody.IsActive); err != nil {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"status":        "SUCCESS",
+			"granter_nx_id": session.NxID,
+			"grantee_nx_id": reqBody.GranteeNxID,
+			"is_active":     reqBody.IsActive,
+		})
+
+	case http.MethodGet:
+		targetNxID := strings.TrimSpace(r.URL.Query().Get("target_nx_id"))
+		if targetNxID != "" {
+			hasVisibility, err := h.repo.HasPhoneVisibility(r.Context(), session.NxID, targetNxID)
+			if err != nil {
+				http.Error(w, "Internal server error", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"granter_nx_id": session.NxID,
+				"grantee_nx_id": targetNxID,
+				"is_active":     hasVisibility,
+			})
+			return
+		}
+
+		grantees, err := h.repo.ListPhoneVisibilityGrants(r.Context(), session.NxID)
+		if err != nil {
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+			return
+		}
+		if grantees == nil {
+			grantees = []string{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"granter_nx_id": session.NxID,
+			"grantees":      grantees,
+			"total":         len(grantees),
+		})
+
+	default:
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// GET /api/v1/connections/mutual
+func (h *Handler) handleMutualConnections(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	session, _, err := h.authenticate(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	targetNxID := strings.TrimSpace(r.URL.Query().Get("target_nx_id"))
+	if !identity.IsValidNxID(targetNxID) {
+		http.Error(w, "Invalid target NX-ID", http.StatusBadRequest)
+		return
+	}
+
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+
+	mutuals, total, err := h.repo.GetMutualConnections(r.Context(), session.NxID, targetNxID, limit, offset)
+	if err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+		return
+	}
+
+	if mutuals == nil {
+		mutuals = []*PublicProfile{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"target_nx_id":       targetNxID,
+		"mutual_connections": mutuals,
+		"total":              total,
 	})
 }

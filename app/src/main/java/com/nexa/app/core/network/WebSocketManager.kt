@@ -52,8 +52,14 @@ class WebSocketManager(
     private val _incomingPackets = MutableSharedFlow<NexaWirePacket>(extraBufferCapacity = 64)
     val incomingPackets: SharedFlow<NexaWirePacket> = _incomingPackets.asSharedFlow()
 
+    private var onAuthenticatedListener: (suspend () -> Unit)? = null
+
     fun setIdentitySigner(signer: (dataToSign: ByteArray) -> Pair<ByteArray, ByteArray>) {
         this.identitySigner = signer
+    }
+
+    fun setOnAuthenticatedListener(listener: suspend () -> Unit) {
+        this.onAuthenticatedListener = listener
     }
 
     fun connect(nxId: String, deviceId: String? = null) {
@@ -106,6 +112,13 @@ class WebSocketManager(
                                 Log.i(TAG, "Ed25519 authentication ACK confirmed by server for $nxId")
                                 _connectionState.value = ConnectionState.Connected
                                 startHeartbeatPing()
+                                scope.launch {
+                                    try {
+                                        onAuthenticatedListener?.invoke()
+                                    } catch (e: Exception) {
+                                        Log.w(TAG, "Error in onAuthenticatedListener: ${e.message}")
+                                    }
+                                }
                             }
                             PacketType.PACKET_AUTH_FAILURE -> {
                                 Log.e(TAG, "Server rejected Ed25519 authentication signature for $nxId")
@@ -281,6 +294,26 @@ class WebSocketManager(
             )
         )
         return sendPacket(packet)
+    }
+
+    /**
+     * Registers active pairwise rotating routing tokens with the server Hub (Phase C).
+     */
+    fun registerRoutingTokens(tokens: List<String>): Boolean {
+        if (tokens.isEmpty()) return false
+        val packet = NexaWirePacket(
+            packetId = "tokens_${UUID.randomUUID()}",
+            type = PacketType.PACKET_REGISTER_ROUTING_TOKENS,
+            senderNxId = currentNxId ?: "",
+            recipientNxId = "SERVER",
+            timestamp = System.currentTimeMillis(),
+            routingTokens = com.nexa.app.core.proto.RoutingTokenRegistrationPayload(tokens)
+        )
+        val success = sendPacket(packet)
+        if (success) {
+            Log.i(TAG, "Submitted ${tokens.size} active pairwise routing tokens to server")
+        }
+        return success
     }
 
     fun disconnect() {

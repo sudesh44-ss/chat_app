@@ -220,6 +220,76 @@ var migrations = []Migration{
 		CREATE INDEX IF NOT EXISTS idx_claims_status_exp ON prekey_claims(status, expires_at);
 		`,
 	},
+	{
+		Version: 4,
+		Name:    "004_create_relationship_graph_and_phone_privacy",
+		SQL: `
+		ALTER TABLE connections ADD COLUMN IF NOT EXISTS source VARCHAR(32) NOT NULL DEFAULT 'NEXA_ID';
+
+		CREATE TABLE IF NOT EXISTS phone_visibility_grants (
+			id VARCHAR(64) PRIMARY KEY,
+			granter_nx_id VARCHAR(32) NOT NULL REFERENCES accounts(nx_id) ON DELETE CASCADE,
+			grantee_nx_id VARCHAR(32) NOT NULL REFERENCES accounts(nx_id) ON DELETE CASCADE,
+			is_active BOOLEAN NOT NULL DEFAULT TRUE,
+			created_at BIGINT NOT NULL,
+			updated_at BIGINT NOT NULL,
+			CONSTRAINT uq_phone_grant UNIQUE(granter_nx_id, grantee_nx_id),
+			CONSTRAINT chk_different_parties CHECK (granter_nx_id <> grantee_nx_id)
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_phone_grants_granter ON phone_visibility_grants(granter_nx_id, is_active);
+		CREATE INDEX IF NOT EXISTS idx_phone_grants_grantee ON phone_visibility_grants(grantee_nx_id, is_active);
+		`,
+	},
+	{
+		Version: 5,
+		Name:    "005_create_message_idempotency_table",
+		SQL: `
+		CREATE TABLE IF NOT EXISTS message_idempotency (
+			packet_id VARCHAR(128) PRIMARY KEY,
+			sender_nx_id VARCHAR(32) NOT NULL,
+			recipient_nx_id VARCHAR(32) NOT NULL,
+			payload_sha256 VARCHAR(64) NOT NULL,
+			first_seen_at BIGINT NOT NULL,
+			expires_at BIGINT NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_message_idempotency_sender ON message_idempotency(sender_nx_id);
+		CREATE INDEX IF NOT EXISTS idx_message_idempotency_recipient ON message_idempotency(recipient_nx_id);
+		CREATE INDEX IF NOT EXISTS idx_message_idempotency_expires ON message_idempotency(expires_at);
+		`,
+	},
+	{
+		Version: 6,
+		Name:    "006_enforce_row_level_security_fail_closed",
+		SQL: `
+		-- 1. Explicitly enable Row-Level Security on all public tables (Fail-Closed Default)
+		DO $$
+		BEGIN
+			-- Enable RLS on all 13 core tables
+			EXECUTE 'ALTER TABLE accounts ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE devices ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE sessions ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE phone_verifications ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE connection_requests ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE connections ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE user_blocks ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE identity_key_bindings ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE signed_prekeys ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE one_time_prekeys ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE prekey_claims ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE phone_visibility_grants ENABLE ROW LEVEL SECURITY';
+			EXECUTE 'ALTER TABLE message_idempotency ENABLE ROW LEVEL SECURITY';
+
+			-- Revoke direct PostgREST anon and authenticated permissions if roles exist (Supabase environment)
+			IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+				EXECUTE 'REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon, authenticated';
+				EXECUTE 'REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM anon, authenticated';
+				EXECUTE 'REVOKE ALL ON ALL ROUTINES IN SCHEMA public FROM anon, authenticated';
+			END IF;
+		END $$;
+		`,
+	},
 }
 
 // RunMigrations applies pending database migrations transactionally.

@@ -22,6 +22,19 @@ class NexaDataSmsSender(
 ) {
 
     /**
+     * Determines whether binary Data SMS on Port 8901 is operational on this device.
+     * Always returns false on production builds where SEND_SMS and RECEIVE_SMS
+     * permissions are omitted for Google Play Protect and ECM anti-fraud compliance.
+     */
+    fun isSupported(): Boolean {
+        val hasPermission = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.SEND_SMS
+        ) == PackageManager.PERMISSION_GRANTED
+        return hasPermission
+    }
+
+    /**
      * Sends a chunked binary payload to [destinationPhone] over Port 8901.
      * @param destinationPhone E.164 formatted phone number (e.g., +919876543210)
      * @param messageId Unique numeric identifier for chunk reassembly
@@ -35,14 +48,13 @@ class NexaDataSmsSender(
         encryptedPayload: ByteArray,
         packetId: String? = null
     ): Result<Int> {
-        val hasPermission = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.SEND_SMS
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (!hasPermission) {
-            Log.e(TAG, "Cannot send Data SMS: SEND_SMS permission not granted")
-            return Result.failure(SecurityException("SEND_SMS permission not granted"))
+        if (!isSupported()) {
+            Log.w(TAG, "Data SMS transport blocked: SEND_SMS permission is omitted in this build for security compliance")
+            return Result.failure(
+                UnsupportedOperationException(
+                    "Data SMS transport is disabled in this build for Google Play Protect compliance. Please use Internet or DTN Mesh."
+                )
+            )
         }
 
         val cleanedPhone = destinationPhone.trim()

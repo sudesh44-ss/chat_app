@@ -2,10 +2,12 @@ package com.nexa.app.presentation.backup
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.nexa.app.core.backup.BackupCategoryConfig
 import com.nexa.app.core.backup.Bip39PassphraseHelper
 import com.nexa.app.core.util.DriveResource
 import com.nexa.app.data.drive.DriveFile
 import com.nexa.app.data.drive.GoogleDriveAuthManager
+import com.nexa.app.data.local.preferences.BackupFrequency
 import com.nexa.app.data.local.preferences.BackupPreferencesState
 import com.nexa.app.data.local.preferences.BackupPrefs
 import com.nexa.app.domain.repository.DriveBackupRepository
@@ -16,7 +18,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 /**
- * ViewModel managing backup creation, remote discovery, passphrase configuration, and multi-device restoration.
+ * ViewModel managing Google Drive account state, granular backup categories,
+ * scheduling, integrity verification, backup deletion, and selective cross-device restoration.
  */
 class BackupViewModel(
     private val backupRepository: DriveBackupRepository,
@@ -33,6 +36,9 @@ class BackupViewModel(
     private val _restoreResource = MutableStateFlow<DriveResource<Boolean>>(DriveResource.Idle)
     val restoreResource: StateFlow<DriveResource<Boolean>> = _restoreResource.asStateFlow()
 
+    private val _managementResource = MutableStateFlow<DriveResource<Boolean>>(DriveResource.Idle)
+    val managementResource: StateFlow<DriveResource<Boolean>> = _managementResource.asStateFlow()
+
     val preferencesState: StateFlow<BackupPreferencesState> = backupPrefs.state
 
     private val _isAuthorized = MutableStateFlow(authManager.isAuthorized())
@@ -44,6 +50,16 @@ class BackupViewModel(
     private val _isPassphraseRevealed = MutableStateFlow(false)
     val isPassphraseRevealed: StateFlow<Boolean> = _isPassphraseRevealed.asStateFlow()
 
+    private val _categoryConfig = MutableStateFlow(backupPrefs.categoryConfig)
+    val categoryConfig: StateFlow<BackupCategoryConfig> = _categoryConfig.asStateFlow()
+
+    private val _estimatedSize = MutableStateFlow(0L)
+    val estimatedSize: StateFlow<Long> = _estimatedSize.asStateFlow()
+
+    // Selective Restore Category Selection
+    private val _restoreCategoryConfig = MutableStateFlow(BackupCategoryConfig())
+    val restoreCategoryConfig: StateFlow<BackupCategoryConfig> = _restoreCategoryConfig.asStateFlow()
+
     private var activeBackupJob: Job? = null
     private var activeRestoreJob: Job? = null
 
@@ -53,6 +69,7 @@ class BackupViewModel(
             val generated = backupRepository.generateOrGetRecoveryPassphrase()
             _recoveryPassphrase.value = generated
         }
+        recalculateEstimatedSize()
     }
 
     fun refreshAuthState() {
@@ -60,8 +77,63 @@ class BackupViewModel(
         _isAuthorized.value = account != null
         if (account?.email != null) {
             backupPrefs.googleAccountEmail = account.email
+            backupPrefs.googleAccountAvatarUrl = account.photoUrl?.toString()
         }
     }
+
+    fun recalculateEstimatedSize() {
+        viewModelScope.launch {
+            val size = backupRepository.calculateBackupSize(_categoryConfig.value)
+            _estimatedSize.value = size
+        }
+    }
+
+    // --- Category Toggles ---
+
+    fun updateCategory(transform: (BackupCategoryConfig) -> BackupCategoryConfig) {
+        val updated = transform(_categoryConfig.value)
+        _categoryConfig.value = updated
+        backupPrefs.categoryConfig = updated
+        recalculateEstimatedSize()
+    }
+
+    fun selectAllCategories() {
+        val all = BackupCategoryConfig.allEnabled()
+        _categoryConfig.value = all
+        backupPrefs.categoryConfig = all
+        recalculateEstimatedSize()
+    }
+
+    fun deselectAllCategories() {
+        val none = BackupCategoryConfig.allDisabled()
+        _categoryConfig.value = none
+        backupPrefs.categoryConfig = none
+        recalculateEstimatedSize()
+    }
+
+    // --- Selective Restore Category Toggles ---
+
+    fun updateRestoreCategory(transform: (BackupCategoryConfig) -> BackupCategoryConfig) {
+        _restoreCategoryConfig.value = transform(_restoreCategoryConfig.value)
+    }
+
+    fun setAllRestoreCategories(enabled: Boolean) {
+        _restoreCategoryConfig.value = if (enabled) BackupCategoryConfig.allEnabled() else BackupCategoryConfig.allDisabled()
+    }
+
+    // --- Account Management ---
+
+    fun disconnectGoogleAccount() {
+        viewModelScope.launch {
+            authManager.signOut()
+            backupPrefs.googleAccountEmail = null
+            backupPrefs.googleAccountAvatarUrl = null
+            refreshAuthState()
+            _remoteBackupFile.value = DriveResource.Idle
+        }
+    }
+
+    // --- Backup Execution ---
 
     fun triggerBackup() {
         val passphrase = _recoveryPassphrase.value
@@ -69,8 +141,11 @@ class BackupViewModel(
 
         activeBackupJob?.cancel()
         activeBackupJob = viewModelScope.launch {
-            backupRepository.createAndUploadBackup(passphrase).collect { resource ->
+            backupRepository.createAndUploadBackup(passphrase, _categoryConfig.value).collect { resource ->
                 _backupResource.value = resource
+                if (resource is DriveResource.Success) {
+                    scanRemoteBackup()
+                }
             }
         }
     }
@@ -88,6 +163,27 @@ class BackupViewModel(
         }
     }
 
+    fun deleteRemoteBackup(fileId: String) {
+        viewModelScope.launch {
+            backupRepository.deleteRemoteBackup(fileId).collect { resource ->
+                _managementResource.value = resource
+                if (resource is DriveResource.Success) {
+                    _remoteBackupFile.value = DriveResource.Success(null)
+                }
+            }
+        }
+    }
+
+    fun verifyRemoteBackupIntegrity(fileId: String) {
+        viewModelScope.launch {
+            backupRepository.verifyRemoteBackupIntegrity(fileId).collect { resource ->
+                _managementResource.value = resource
+            }
+        }
+    }
+
+    // --- Restore Execution ---
+
     fun restoreBackup(fileId: String, mnemonicPhrase: String) {
         val normalized = Bip39PassphraseHelper.normalize(mnemonicPhrase)
         if (!Bip39PassphraseHelper.validateMnemonic(normalized)) {
@@ -97,7 +193,11 @@ class BackupViewModel(
 
         activeRestoreJob?.cancel()
         activeRestoreJob = viewModelScope.launch {
-            backupRepository.downloadAndRestoreBackup(fileId, normalized).collect { resource ->
+            backupRepository.downloadAndRestoreBackup(
+                fileId = fileId,
+                passphraseWords = normalized,
+                restoreCategoryConfig = _restoreCategoryConfig.value
+            ).collect { resource ->
                 _restoreResource.value = resource
                 if (resource is DriveResource.Success) {
                     _recoveryPassphrase.value = normalized
@@ -111,8 +211,14 @@ class BackupViewModel(
         _restoreResource.value = DriveResource.Idle
     }
 
+    // --- Preferences & Schedule ---
+
     fun setAutoBackupEnabled(enabled: Boolean) {
         backupPrefs.autoBackupEnabled = enabled
+    }
+
+    fun setFrequency(frequency: BackupFrequency) {
+        backupPrefs.backupFrequency = frequency
     }
 
     fun setWifiOnly(enabled: Boolean) {
@@ -121,6 +227,10 @@ class BackupViewModel(
 
     fun setChargingOnly(enabled: Boolean) {
         backupPrefs.backupWhenCharging = enabled
+    }
+
+    fun setNotificationsEnabled(enabled: Boolean) {
+        backupPrefs.backupNotificationsEnabled = enabled
     }
 
     fun toggleRevealPassphrase() {
@@ -133,5 +243,9 @@ class BackupViewModel(
 
     fun resetRestoreResource() {
         _restoreResource.value = DriveResource.Idle
+    }
+
+    fun resetManagementResource() {
+        _managementResource.value = DriveResource.Idle
     }
 }
