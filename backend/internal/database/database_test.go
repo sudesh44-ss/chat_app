@@ -134,8 +134,14 @@ func TestMigrationSchemaIntegrity(t *testing.T) {
 			if !strings.Contains(m.SQL, "DEFAULT gen_random_uuid()::text") {
 				t.Errorf("migration %s missing default UUID generator for id column", m.Name)
 			}
-			if !strings.Contains(m.SQL, "idx_phone_grants_granter") || !strings.Contains(m.SQL, "idx_phone_grants_grantee") {
+			if !strings.Contains(m.SQL, "uq_phone_grants_nx_pair") {
+				t.Errorf("migration %s missing unique constraint uq_phone_grants_nx_pair", m.Name)
+			}
+			if !strings.Contains(m.SQL, "idx_phone_grants_granter_nx") || !strings.Contains(m.SQL, "idx_phone_grants_grantee_nx") {
 				t.Errorf("migration %s missing performance indexes", m.Name)
+			}
+			if !strings.Contains(m.SQL, "legacy_uq_phone_grant") {
+				t.Errorf("migration %s missing legacy constraint rename to legacy_uq_phone_grant (SQLSTATE 42P07 defense)", m.Name)
 			}
 		case 5:
 			if !strings.Contains(m.SQL, "CREATE TABLE IF NOT EXISTS message_idempotency") {
@@ -195,6 +201,17 @@ func TestMigration004_SchemaReconciliationSQL(t *testing.T) {
 	// 4. Verify data preservation mapping query
 	if !strings.Contains(m4.SQL, "INSERT INTO phone_visibility_grants") || !strings.Contains(m4.SQL, "SELECT") {
 		t.Error("migration 4 must include data preservation transfer from legacy table to reconciled table")
+	}
+
+	// 5. Verify resolution of SQLSTATE 42P07 (relation "uq_phone_grant" already exists)
+	if !strings.Contains(m4.SQL, "legacy_uq_phone_grant") {
+		t.Error("migration 4 must safely rename legacy unique constraint/index uq_phone_grant to prevent 42P07 collisions")
+	}
+	if !strings.Contains(m4.SQL, "uq_phone_grants_nx_pair") {
+		t.Error("migration 4 must name new unique constraint with distinct canonical name uq_phone_grants_nx_pair")
+	}
+	if !strings.Contains(m4.SQL, "legacy_chk_different_parties") {
+		t.Error("migration 4 must safely rename legacy check constraint chk_different_parties")
 	}
 }
 

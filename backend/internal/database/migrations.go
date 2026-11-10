@@ -242,6 +242,72 @@ var migrations = []Migration{
 				-- Archive legacy table to preserve legacy data without namespace collision
 				ALTER TABLE public.phone_visibility_grants RENAME TO legacy_supabase_phone_visibility_grants;
 			END IF;
+
+			-- Safely rename legacy constraints and indexes on archived table to prevent 42P07 relation collisions
+			IF EXISTS (
+				SELECT 1 FROM pg_constraint 
+				WHERE conname = 'uq_phone_grant' 
+				  AND conrelid = 'public.legacy_supabase_phone_visibility_grants'::regclass
+			) THEN
+				ALTER TABLE public.legacy_supabase_phone_visibility_grants 
+					RENAME CONSTRAINT uq_phone_grant TO legacy_uq_phone_grant;
+			END IF;
+
+			IF EXISTS (
+				SELECT 1 FROM pg_constraint 
+				WHERE conname = 'chk_different_parties' 
+				  AND conrelid = 'public.legacy_supabase_phone_visibility_grants'::regclass
+			) THEN
+				ALTER TABLE public.legacy_supabase_phone_visibility_grants 
+					RENAME CONSTRAINT chk_different_parties TO legacy_chk_different_parties;
+			END IF;
+
+			IF EXISTS (
+				SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace 
+				WHERE n.nspname = 'public' AND c.relname = 'uq_phone_grant'
+			) THEN
+				ALTER INDEX public.uq_phone_grant RENAME TO legacy_uq_phone_grant;
+			END IF;
+
+			IF EXISTS (
+				SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace 
+				WHERE n.nspname = 'public' AND c.relname = 'idx_phone_grants_granter'
+			) THEN
+				ALTER INDEX public.idx_phone_grants_granter RENAME TO legacy_idx_phone_grants_granter;
+			END IF;
+
+			IF EXISTS (
+				SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace 
+				WHERE n.nspname = 'public' AND c.relname = 'idx_phone_grants_grantee'
+			) THEN
+				ALTER INDEX public.idx_phone_grants_grantee RENAME TO legacy_idx_phone_grants_grantee;
+			END IF;
+
+			-- Recreate backward-compatible safe_profiles view if legacy profiles table exists
+			IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'profiles') 
+			   AND EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'legacy_supabase_phone_visibility_grants') THEN
+				EXECUTE $v$
+				CREATE OR REPLACE VIEW public.safe_profiles WITH (security_invoker = true) AS
+				SELECT 
+					p.id,
+					p.nx_id,
+					p.full_name AS display_name,
+					p.bio,
+					p.profile_picture_url AS avatar_url,
+					p.created_at,
+					CASE 
+						WHEN auth.uid() = p.id THEN p.phone_number
+						WHEN EXISTS (
+							SELECT 1 FROM public.legacy_supabase_phone_visibility_grants g 
+							WHERE g.granter_id = p.id 
+							  AND g.grantee_id = auth.uid() 
+							  AND g.is_active = TRUE
+						) THEN p.phone_number
+						ELSE NULL 
+					END AS phone_number
+				FROM public.profiles p;
+				$v$;
+			END IF;
 		END $$;
 
 		CREATE TABLE IF NOT EXISTS phone_visibility_grants (
@@ -251,8 +317,8 @@ var migrations = []Migration{
 			is_active BOOLEAN NOT NULL DEFAULT TRUE,
 			created_at BIGINT NOT NULL,
 			updated_at BIGINT NOT NULL,
-			CONSTRAINT uq_phone_grant UNIQUE(granter_nx_id, grantee_nx_id),
-			CONSTRAINT chk_different_parties CHECK (granter_nx_id <> grantee_nx_id)
+			CONSTRAINT uq_phone_grants_nx_pair UNIQUE(granter_nx_id, grantee_nx_id),
+			CONSTRAINT chk_phone_grants_distinct_parties CHECK (granter_nx_id <> grantee_nx_id)
 		);
 
 		-- Preserve and migrate legacy grants if archived table exists and matching accounts exist
@@ -274,6 +340,7 @@ var migrations = []Migration{
 				FROM legacy_supabase_phone_visibility_grants l
 				JOIN accounts a1 ON (a1.id = l.granter_id::text OR a1.supabase_user_id = l.granter_id::text)
 				JOIN accounts a2 ON (a2.id = l.grantee_id::text OR a2.supabase_user_id = l.grantee_id::text)
+				WHERE a1.nx_id <> a2.nx_id
 				ON CONFLICT (granter_nx_id, grantee_nx_id) DO NOTHING;
 			END IF;
 		EXCEPTION WHEN OTHERS THEN
@@ -281,8 +348,8 @@ var migrations = []Migration{
 			RAISE NOTICE 'Legacy phone visibility grant migration skipped or partial: %', SQLERRM;
 		END $$;
 
-		CREATE INDEX IF NOT EXISTS idx_phone_grants_granter ON phone_visibility_grants(granter_nx_id, is_active);
-		CREATE INDEX IF NOT EXISTS idx_phone_grants_grantee ON phone_visibility_grants(grantee_nx_id, is_active);
+		CREATE INDEX IF NOT EXISTS idx_phone_grants_granter_nx ON phone_visibility_grants(granter_nx_id, is_active);
+		CREATE INDEX IF NOT EXISTS idx_phone_grants_grantee_nx ON phone_visibility_grants(grantee_nx_id, is_active);
 		`,
 	},
 	{
@@ -354,11 +421,27 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		return fmt.Errorf("failed to create schema_migrations table: %w", err)
 	}
 
-	// 2. Iterate and apply pending migrations
+	// 2. Acquire PostgreSQL session advisory lock to ensure serialized migration execution across replicas
+	const migrationAdvisoryLockID int64 = 8472910384729102 // unique 64-bit int for NEXA migration lock
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to acquire connection for migration advisory lock: %w", err)
+	}
+	defer conn.Release()
+
+	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationAdvisoryLockID); err != nil {
+		return fmt.Errorf("failed to acquire migration advisory lock: %w", err)
+	}
+	defer func() {
+		// Release advisory lock upon exit
+		_, _ = conn.Exec(context.Background(), "SELECT pg_advisory_unlock($1)", migrationAdvisoryLockID)
+	}()
+
+	// 3. Iterate and apply pending migrations
 	for _, m := range migrations {
 		var exists bool
 		checkSQL := `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)`
-		if err := pool.QueryRow(ctx, checkSQL, m.Version).Scan(&exists); err != nil {
+		if err := conn.QueryRow(ctx, checkSQL, m.Version).Scan(&exists); err != nil {
 			return fmt.Errorf("failed to check migration status for version %d: %w", m.Version, err)
 		}
 
@@ -368,7 +451,7 @@ func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 
 		log.Printf("[Database] Applying migration %d: %s...", m.Version, m.Name)
 
-		tx, err := pool.Begin(ctx)
+		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction for migration %d: %w", m.Version, err)
 		}
