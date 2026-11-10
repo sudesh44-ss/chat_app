@@ -226,8 +226,26 @@ var migrations = []Migration{
 		SQL: `
 		ALTER TABLE connections ADD COLUMN IF NOT EXISTS source VARCHAR(32) NOT NULL DEFAULT 'NEXA_ID';
 
+		DO $$
+		BEGIN
+			-- If legacy Supabase phone_visibility_grants table exists with granter_id column
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns 
+				WHERE table_schema = 'public' 
+				  AND table_name = 'phone_visibility_grants' 
+				  AND column_name = 'granter_id'
+			) THEN
+				-- Safely drop legacy dependent view and function if present
+				DROP VIEW IF EXISTS public.safe_profiles CASCADE;
+				DROP FUNCTION IF EXISTS public.toggle_phone_visibility() CASCADE;
+				
+				-- Archive legacy table to preserve legacy data without namespace collision
+				ALTER TABLE public.phone_visibility_grants RENAME TO legacy_supabase_phone_visibility_grants;
+			END IF;
+		END $$;
+
 		CREATE TABLE IF NOT EXISTS phone_visibility_grants (
-			id VARCHAR(64) PRIMARY KEY,
+			id VARCHAR(64) PRIMARY KEY DEFAULT gen_random_uuid()::text,
 			granter_nx_id VARCHAR(32) NOT NULL REFERENCES accounts(nx_id) ON DELETE CASCADE,
 			grantee_nx_id VARCHAR(32) NOT NULL REFERENCES accounts(nx_id) ON DELETE CASCADE,
 			is_active BOOLEAN NOT NULL DEFAULT TRUE,
@@ -236,6 +254,32 @@ var migrations = []Migration{
 			CONSTRAINT uq_phone_grant UNIQUE(granter_nx_id, grantee_nx_id),
 			CONSTRAINT chk_different_parties CHECK (granter_nx_id <> grantee_nx_id)
 		);
+
+		-- Preserve and migrate legacy grants if archived table exists and matching accounts exist
+		DO $$
+		BEGIN
+			IF EXISTS (
+				SELECT 1 FROM information_schema.tables 
+				WHERE table_schema = 'public' 
+				  AND table_name = 'legacy_supabase_phone_visibility_grants'
+			) THEN
+				INSERT INTO phone_visibility_grants (id, granter_nx_id, grantee_nx_id, is_active, created_at, updated_at)
+				SELECT 
+					'migrated_' || l.id::text,
+					a1.nx_id,
+					a2.nx_id,
+					l.is_active,
+					COALESCE(EXTRACT(EPOCH FROM l.granted_at)::BIGINT * 1000, EXTRACT(EPOCH FROM NOW())::BIGINT * 1000),
+					COALESCE(EXTRACT(EPOCH FROM l.updated_at)::BIGINT * 1000, EXTRACT(EPOCH FROM NOW())::BIGINT * 1000)
+				FROM legacy_supabase_phone_visibility_grants l
+				JOIN accounts a1 ON (a1.id = l.granter_id::text OR a1.supabase_user_id = l.granter_id::text)
+				JOIN accounts a2 ON (a2.id = l.grantee_id::text OR a2.supabase_user_id = l.grantee_id::text)
+				ON CONFLICT (granter_nx_id, grantee_nx_id) DO NOTHING;
+			END IF;
+		EXCEPTION WHEN OTHERS THEN
+			-- Non-fatal: if columns or types differ, legacy table remains safely archived
+			RAISE NOTICE 'Legacy phone visibility grant migration skipped or partial: %', SQLERRM;
+		END $$;
 
 		CREATE INDEX IF NOT EXISTS idx_phone_grants_granter ON phone_visibility_grants(granter_nx_id, is_active);
 		CREATE INDEX IF NOT EXISTS idx_phone_grants_grantee ON phone_visibility_grants(grantee_nx_id, is_active);
@@ -280,6 +324,11 @@ var migrations = []Migration{
 			EXECUTE 'ALTER TABLE prekey_claims ENABLE ROW LEVEL SECURITY';
 			EXECUTE 'ALTER TABLE phone_visibility_grants ENABLE ROW LEVEL SECURITY';
 			EXECUTE 'ALTER TABLE message_idempotency ENABLE ROW LEVEL SECURITY';
+
+			-- Also secure legacy archived table if it exists
+			IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'legacy_supabase_phone_visibility_grants') THEN
+				EXECUTE 'ALTER TABLE legacy_supabase_phone_visibility_grants ENABLE ROW LEVEL SECURITY';
+			END IF;
 
 			-- Revoke direct PostgREST anon and authenticated permissions if roles exist (Supabase environment)
 			IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN

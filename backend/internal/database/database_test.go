@@ -68,13 +68,14 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 func TestMigrationSchemaIntegrity(t *testing.T) {
-	if len(migrations) < 2 {
-		t.Fatalf("expected at least two migrations defined, got %d", len(migrations))
+	if len(migrations) != 6 {
+		t.Fatalf("expected exactly 6 migrations defined, got %d", len(migrations))
 	}
 
-	for _, m := range migrations {
-		if m.Version <= 0 {
-			t.Errorf("invalid migration version: %d", m.Version)
+	for i, m := range migrations {
+		expectedVersion := i + 1
+		if m.Version != expectedVersion {
+			t.Errorf("migration index %d expected version %d, got %d", i, expectedVersion, m.Version)
 		}
 		if m.Name == "" {
 			t.Errorf("migration version %d has empty name", m.Version)
@@ -107,7 +108,93 @@ func TestMigrationSchemaIntegrity(t *testing.T) {
 			if !strings.Contains(m.SQL, "chk_no_self_request") {
 				t.Errorf("migration %s missing no-self-request constraint chk_no_self_request", m.Name)
 			}
+		case 3:
+			prekeyTables := []string{"identity_key_bindings", "signed_prekeys", "one_time_prekeys", "prekey_claims"}
+			for _, tbl := range prekeyTables {
+				if !strings.Contains(m.SQL, "CREATE TABLE IF NOT EXISTS "+tbl) {
+					t.Errorf("migration %s missing table creation for %s", m.Name, tbl)
+				}
+			}
+		case 4:
+			if !strings.Contains(m.SQL, "ALTER TABLE connections ADD COLUMN IF NOT EXISTS source") {
+				t.Errorf("migration %s missing connections source column migration", m.Name)
+			}
+			if !strings.Contains(m.SQL, "granter_id") {
+				t.Errorf("migration %s missing legacy column detection for granter_id", m.Name)
+			}
+			if !strings.Contains(m.SQL, "legacy_supabase_phone_visibility_grants") {
+				t.Errorf("migration %s missing archive table name legacy_supabase_phone_visibility_grants", m.Name)
+			}
+			if !strings.Contains(m.SQL, "CREATE TABLE IF NOT EXISTS phone_visibility_grants") {
+				t.Errorf("migration %s missing phone_visibility_grants creation", m.Name)
+			}
+			if !strings.Contains(m.SQL, "granter_nx_id VARCHAR(32)") {
+				t.Errorf("migration %s missing granter_nx_id column definition", m.Name)
+			}
+			if !strings.Contains(m.SQL, "DEFAULT gen_random_uuid()::text") {
+				t.Errorf("migration %s missing default UUID generator for id column", m.Name)
+			}
+			if !strings.Contains(m.SQL, "idx_phone_grants_granter") || !strings.Contains(m.SQL, "idx_phone_grants_grantee") {
+				t.Errorf("migration %s missing performance indexes", m.Name)
+			}
+		case 5:
+			if !strings.Contains(m.SQL, "CREATE TABLE IF NOT EXISTS message_idempotency") {
+				t.Errorf("migration %s missing message_idempotency table creation", m.Name)
+			}
+			if !strings.Contains(m.SQL, "idx_message_idempotency_sender") {
+				t.Errorf("migration %s missing idempotency sender index", m.Name)
+			}
+		case 6:
+			if !strings.Contains(m.SQL, "ENABLE ROW LEVEL SECURITY") {
+				t.Errorf("migration %s missing RLS enablement", m.Name)
+			}
+			if !strings.Contains(m.SQL, "REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon, authenticated") {
+				t.Errorf("migration %s missing PostgREST permission revoking", m.Name)
+			}
+			if !strings.Contains(m.SQL, "legacy_supabase_phone_visibility_grants") {
+				t.Errorf("migration %s missing RLS protection for archived legacy table", m.Name)
+			}
 		}
+	}
+}
+
+func TestMigration004_SchemaReconciliationSQL(t *testing.T) {
+	var m4 *Migration
+	for _, m := range migrations {
+		if m.Version == 4 {
+			m4 = &m
+			break
+		}
+	}
+
+	if m4 == nil {
+		t.Fatal("migration 4 not found in migrations slice")
+	}
+
+	// 1. Verify safe dropping of legacy dependent view and function
+	if !strings.Contains(m4.SQL, "DROP VIEW IF EXISTS public.safe_profiles CASCADE") {
+		t.Error("migration 4 must safely drop legacy view safe_profiles to prevent dependency blocking")
+	}
+	if !strings.Contains(m4.SQL, "DROP FUNCTION IF EXISTS public.toggle_phone_visibility() CASCADE") {
+		t.Error("migration 4 must safely drop legacy function toggle_phone_visibility to prevent dependency blocking")
+	}
+
+	// 2. Verify table rename preserves legacy data
+	if !strings.Contains(m4.SQL, "ALTER TABLE public.phone_visibility_grants RENAME TO legacy_supabase_phone_visibility_grants") {
+		t.Error("migration 4 must rename legacy table to legacy_supabase_phone_visibility_grants rather than dropping it")
+	}
+
+	// 3. Verify zero DROP TABLE statements (destructive operations prohibited)
+	if strings.Contains(strings.ToUpper(m4.SQL), "DROP TABLE") {
+		t.Error("migration 4 violates data-preservation rule: DROP TABLE detected in SQL")
+	}
+	if strings.Contains(strings.ToUpper(m4.SQL), "TRUNCATE") {
+		t.Error("migration 4 violates data-preservation rule: TRUNCATE detected in SQL")
+	}
+
+	// 4. Verify data preservation mapping query
+	if !strings.Contains(m4.SQL, "INSERT INTO phone_visibility_grants") || !strings.Contains(m4.SQL, "SELECT") {
+		t.Error("migration 4 must include data preservation transfer from legacy table to reconciled table")
 	}
 }
 
