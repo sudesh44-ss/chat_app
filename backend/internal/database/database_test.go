@@ -68,8 +68,8 @@ func TestDefaultConfig(t *testing.T) {
 }
 
 func TestMigrationSchemaIntegrity(t *testing.T) {
-	if len(migrations) != 6 {
-		t.Fatalf("expected exactly 6 migrations defined, got %d", len(migrations))
+	if len(migrations) != 7 {
+		t.Fatalf("expected exactly 7 migrations defined, got %d", len(migrations))
 	}
 
 	for i, m := range migrations {

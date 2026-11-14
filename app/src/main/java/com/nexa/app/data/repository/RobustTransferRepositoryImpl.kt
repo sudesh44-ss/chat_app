@@ -55,6 +55,41 @@ class RobustTransferRepositoryImpl(
         return transferDao.getAllSessions()
     }
 
+    suspend fun getRecoverableTransfers(): List<TransferSessionEntity> = withContext(Dispatchers.IO) {
+        transferDao.getRecoverableSessions()
+    }
+
+    suspend fun updateTransferCheckpoint(
+        transferId: Long,
+        completedChunks: Int,
+        bitfield: ByteArray,
+        status: TransferSessionStatus = TransferSessionStatus.TRANSFERRING,
+        checkpointEpochMs: Long = System.currentTimeMillis(),
+        retryCount: Int = 0
+    ): Int = withContext(Dispatchers.IO) {
+        transferDao.updateCheckpoint(
+            transferId = transferId,
+            completed = completedChunks,
+            bitfield = bitfield,
+            status = status,
+            checkpoint = checkpointEpochMs,
+            retryCount = retryCount,
+            now = System.currentTimeMillis()
+        )
+    }
+
+    suspend fun transitionTransferState(transferId: Long, status: TransferSessionStatus): Int = withContext(Dispatchers.IO) {
+        transferDao.updateStatus(transferId, status)
+    }
+
+    suspend fun queueRetryForTransfer(transferId: Long, retryCount: Int): Int = withContext(Dispatchers.IO) {
+        transferDao.updateRetryState(
+            transferId = transferId,
+            status = TransferSessionStatus.RETRY_PENDING,
+            retryCount = retryCount
+        )
+    }
+
     suspend fun queueOutboundFile(
         uri: Uri,
         conversationId: String,

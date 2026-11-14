@@ -3,14 +3,17 @@ package com.nexa.app.presentation.chat.components
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -59,6 +62,7 @@ import kotlinx.coroutines.delay
  * 4. Reply preview header banner when replying to a message.
  * 5. Full voice recording mode with timer and cancel controls.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun NexaMessageComposer(
     text: String,
@@ -71,14 +75,19 @@ fun NexaMessageComposer(
     onCameraClicked: () -> Unit,
     selectedTransport: TransportType,
     replyingMessage: Message? = null,
+    replySenderName: String? = null,
     onCancelReply: () -> Unit = {},
     isRecordingVoice: Boolean = false,
     onStartVoiceRecording: () -> Unit = {},
     onCancelVoiceRecording: () -> Unit = {},
     onSendVoiceRecording: () -> Unit = {},
+    onScheduleClicked: (() -> Unit)? = null,
+    textScale: Float = 1f,
+    enterToSend: Boolean = true,
     modifier: Modifier = Modifier
 ) {
     val isDark = isSystemInDarkTheme()
+    val scale = textScale.coerceIn(0.8f, 1.5f)
 
     val surfaceColor = if (isDark) {
         Color(0xEE1E1E1E)
@@ -114,10 +123,18 @@ fun NexaMessageComposer(
         // Reply Preview Banner
         AnimatedVisibility(
             visible = replyingMessage != null,
-            enter = fadeIn(),
-            exit = fadeOut()
+            enter = androidx.compose.animation.expandVertically() + fadeIn(),
+            exit = androidx.compose.animation.shrinkVertically() + fadeOut()
         ) {
             if (replyingMessage != null) {
+                val displayInfo = remember(replyingMessage, replySenderName) {
+                    QuotedMessageHelper.resolveDisplayInfo(
+                        originalMessage = replyingMessage,
+                        fallbackSenderName = replySenderName,
+                        fallbackSnippet = null
+                    )
+                }
+
                 NexaGlassSurface(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -134,25 +151,39 @@ fun NexaMessageComposer(
                     ) {
                         Box(
                             modifier = Modifier
-                                .width(3.dp)
-                                .height(32.dp)
+                                .width(3.5.dp)
+                                .height(36.dp)
                                 .background(actionButtonTint, RoundedCornerShape(2.dp))
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (replyingMessage.isOutgoing) "Replying to yourself" else "Replying to message",
+                                text = "Replying to ${displayInfo.senderName}",
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = actionButtonTint
-                            )
-                            Text(
-                                text = replyingMessage.plainTextContent,
-                                fontSize = 13.sp,
-                                color = contentColor,
+                                color = actionButtonTint,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (displayInfo.iconRes != null) {
+                                    Icon(
+                                        painter = painterResource(id = displayInfo.iconRes),
+                                        contentDescription = null,
+                                        tint = contentColor.copy(alpha = 0.8f),
+                                        modifier = Modifier
+                                            .size(14.dp)
+                                            .padding(end = 4.dp)
+                                    )
+                                }
+                                Text(
+                                    text = displayInfo.previewText,
+                                    fontSize = 13.sp,
+                                    color = contentColor,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                         IconButton(
                             onClick = onCancelReply,
@@ -280,9 +311,21 @@ fun NexaMessageComposer(
                             onValueChange = onTextChanged,
                             textStyle = TextStyle(
                                 color = contentColor,
-                                fontSize = 15.sp
+                                fontSize = (15f * scale).sp
                             ),
                             cursorBrush = SolidColor(actionButtonTint),
+                            keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                                imeAction = if (enterToSend) {
+                                    androidx.compose.ui.text.input.ImeAction.Send
+                                } else {
+                                    androidx.compose.ui.text.input.ImeAction.Default
+                                }
+                            ),
+                            keyboardActions = androidx.compose.foundation.text.KeyboardActions(
+                                onSend = {
+                                    if (enterToSend && text.isNotBlank()) onSendClicked()
+                                }
+                            ),
                             modifier = Modifier
                                 .weight(1f)
                                 .padding(vertical = 8.dp),
@@ -291,7 +334,7 @@ fun NexaMessageComposer(
                                     Text(
                                         text = "Type a message...",
                                         color = hintColor,
-                                        fontSize = 15.sp
+                                        fontSize = (15f * scale).sp
                                     )
                                 }
                                 innerTextField()
@@ -326,7 +369,7 @@ fun NexaMessageComposer(
                     }
                 }
 
-                // 3. Right circular action button (Mic when empty, Send when text present)
+                // 3. Right circular action button (Mic when empty, Send when text present; Long-press to Schedule)
                 val isSendMode = text.isNotBlank()
                 NexaGlassSurface(
                     modifier = Modifier.size(46.dp),
@@ -334,21 +377,30 @@ fun NexaMessageComposer(
                     surfaceColor = actionButtonTint,
                     elevation = 4.dp
                 ) {
-                    IconButton(
-                        onClick = {
-                            if (isSendMode) {
-                                onSendClicked()
-                            } else {
-                                onStartVoiceRecording()
-                            }
-                        },
-                        modifier = Modifier.size(46.dp)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .combinedClickable(
+                                onClick = {
+                                    if (isSendMode) {
+                                        onSendClicked()
+                                    } else {
+                                        onStartVoiceRecording()
+                                    }
+                                },
+                                onLongClick = {
+                                    if (isSendMode && onScheduleClicked != null) {
+                                        onScheduleClicked()
+                                    }
+                                }
+                            ),
+                        contentAlignment = Alignment.Center
                     ) {
                         Icon(
                             painter = painterResource(
                                 id = if (isSendMode) R.drawable.ic_nexa_send else R.drawable.ic_nexa_mic
                             ),
-                            contentDescription = if (isSendMode) "Send" else "Record Voice",
+                            contentDescription = if (isSendMode) "Send (Hold to Schedule)" else "Record Voice",
                             tint = Color.Black,
                             modifier = Modifier.size(20.dp)
                         )

@@ -78,5 +78,8 @@ interface AuthRepository {
     suspend fun confirmPermanentDeletion(): Result<Boolean> = Result.success(true)
     suspend fun cancelDeletionRequest(): Result<Boolean> = Result.success(true)
 
+    suspend fun getDevices(): Result<List<com.nexa.app.data.remote.dto.DeviceInfoDto>> = Result.success(emptyList())
+    suspend fun revokeDevice(deviceId: String): Result<Boolean> = Result.success(false)
+
     suspend fun clearSession()
 }

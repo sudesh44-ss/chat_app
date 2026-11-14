@@ -114,7 +114,7 @@ func (m *Msg91Provider) Name() string { return "MSG91" }
 
 func (m *Msg91Provider) SendOtp(phone string, otp string) error {
 	cleanPhone := strings.TrimPrefix(strings.TrimSpace(phone), "+")
-	
+
 	// Construct request URL according to official MSG91 OTP v5 specification
 	reqURL, err := url.Parse(m.apiURL)
 	if err != nil {
@@ -196,7 +196,7 @@ func (m *MockSmsProvider) SendOtp(phone string, otp string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.SentMessages[phone] = append(m.SentMessages[phone], otp)
-	
+
 	env := strings.ToLower(os.Getenv("APP_ENV"))
 	if env == "production" {
 		log.Printf("[MockSmsProvider] SECURITY ALERT: Mock provider invoked in production environment!")

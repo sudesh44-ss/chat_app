@@ -89,15 +89,30 @@ private val EMOJI_DATA = mapOf(
     )
 )
 
+enum class PickerTab {
+    EMOJIS,
+    GIFS_MEMES
+}
+
+private val CURATED_GIF_PRESETS = listOf(
+    "👍 Thumbs Up", "👏 Applause", "😂 Laughing", "🔥 Fire",
+    "🎉 Celebration", "🤯 Mind Blown", "🚀 Let's Go", "👀 Looking",
+    "💯 Exactly", "🫡 Understood", "🤝 Agreed", "✨ Magic"
+)
+
 /**
- * Advanced Emoji Picker Panel with categories, search, and smooth glass layout.
+ * Advanced Emoji & GIF/Meme Picker Panel with categories, search, and smooth glass layout.
+ * Enforces zero third-party privacy leakage by operating entirely locally on curated presets or SAF selection.
  */
 @Composable
 fun NexaEmojiPicker(
     onEmojiSelected: (String) -> Unit,
+    onGifSelected: ((String) -> Unit)? = null,
+    onPickCustomGif: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val isDark = isSystemInDarkTheme()
+    var currentTab by remember { mutableStateOf(PickerTab.EMOJIS) }
     var selectedCategory by remember { mutableStateOf(EmojiCategory.RECENT) }
     var searchQuery by remember { mutableStateOf("") }
 
@@ -113,17 +128,14 @@ fun NexaEmojiPicker(
         if (searchQuery.isBlank()) {
             EMOJI_DATA[selectedCategory].orEmpty()
         } else {
-            EMOJI_DATA.values.flatten().distinct().filter {
-                // In actual production, keyword matching could be extended
-                true
-            }.take(40)
+            EMOJI_DATA.values.flatten().distinct().filter { true }.take(40)
         }
     }
 
     NexaGlassSurface(
         modifier = modifier
             .fillMaxWidth()
-            .height(280.dp),
+            .height(300.dp),
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
         surfaceColor = surfaceColor,
         elevation = 8.dp
@@ -131,59 +143,163 @@ fun NexaEmojiPicker(
         Column(
             modifier = Modifier.padding(12.dp)
         ) {
-            // Category Selector Tabs
+            // Main Tab Switcher [Emojis] [GIFs & Memes]
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(bottom = 8.dp),
+                horizontalArrangement = Arrangement.Center
             ) {
-                EmojiCategory.values().forEach { cat ->
-                    val isSelected = cat == selectedCategory
-                    val chipBg = if (isSelected) {
-                        MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.25f else 0.15f)
-                    } else {
-                        Color.Transparent
-                    }
-                    Box(
-                        modifier = Modifier
-                            .clickable { selectedCategory = cat }
-                            .background(chipBg, RoundedCornerShape(16.dp))
-                            .padding(horizontal = 10.dp, vertical = 6.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(text = cat.icon, fontSize = 14.sp)
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = cat.label,
-                                fontSize = 12.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSelected) MaterialTheme.colorScheme.primary else contentColor
-                            )
-                        }
-                    }
+                Box(
+                    modifier = Modifier
+                        .clickable { currentTab = PickerTab.EMOJIS }
+                        .background(
+                            if (currentTab == PickerTab.EMOJIS) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent,
+                            RoundedCornerShape(12.dp)
+                        )
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "😊 Emojis",
+                        fontWeight = if (currentTab == PickerTab.EMOJIS) FontWeight.Bold else FontWeight.Normal,
+                        color = if (currentTab == PickerTab.EMOJIS) MaterialTheme.colorScheme.primary else contentColor,
+                        fontSize = 13.sp
+                    )
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clickable { currentTab = PickerTab.GIFS_MEMES }
+                        .background(
+                            if (currentTab == PickerTab.GIFS_MEMES) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent,
+                            RoundedCornerShape(12.dp)
+                        )
+                        .padding(horizontal = 16.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "🎬 GIFs & Memes",
+                        fontWeight = if (currentTab == PickerTab.GIFS_MEMES) FontWeight.Bold else FontWeight.Normal,
+                        color = if (currentTab == PickerTab.GIFS_MEMES) MaterialTheme.colorScheme.primary else contentColor,
+                        fontSize = 13.sp
+                    )
                 }
             }
 
-            Spacer(modifier = Modifier.height(10.dp))
+            if (currentTab == PickerTab.EMOJIS) {
+                // Category Selector Tabs
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    EmojiCategory.values().forEach { cat ->
+                        val isSelected = cat == selectedCategory
+                        val chipBg = if (isSelected) {
+                            MaterialTheme.colorScheme.primary.copy(alpha = if (isDark) 0.25f else 0.15f)
+                        } else {
+                            Color.Transparent
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clickable { selectedCategory = cat }
+                                .background(chipBg, RoundedCornerShape(16.dp))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(text = cat.icon, fontSize = 14.sp)
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text(
+                                    text = cat.label,
+                                    fontSize = 12.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else contentColor
+                                )
+                            }
+                        }
+                    }
+                }
 
-            // Emoji Grid
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(8),
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(displayedEmojis) { emoji ->
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clickable { onEmojiSelected(emoji) },
-                        contentAlignment = Alignment.Center
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Emoji Grid
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(8),
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(displayedEmojis) { emoji ->
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clickable { onEmojiSelected(emoji) },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(text = emoji, fontSize = 22.sp)
+                        }
+                    }
+                }
+            } else {
+                // GIF & Meme Panel (Zero Leakage Local Selection)
+                Column(modifier = Modifier.weight(1f)) {
+                    if (onPickCustomGif != null) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { onPickCustomGif() }
+                                .background(
+                                    MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                    RoundedCornerShape(12.dp)
+                                )
+                                .padding(vertical = 10.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "📂 Select GIF / Meme from Device (SAF)",
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(10.dp))
+                    }
+
+                    Text(
+                        text = "Curated Presets (Privacy Safe)",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.Gray,
+                        modifier = Modifier.padding(bottom = 6.dp)
+                    )
+
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(3),
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(text = emoji, fontSize = 22.sp)
+                        items(CURATED_GIF_PRESETS) { preset ->
+                            Box(
+                                modifier = Modifier
+                                    .clickable { onGifSelected?.invoke(preset) }
+                                    .background(
+                                        if (isDark) Color(0xFF282828) else Color(0xFFE8E8E8),
+                                        RoundedCornerShape(10.dp)
+                                    )
+                                    .padding(vertical = 12.dp, horizontal = 8.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = preset,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = contentColor
+                                )
+                            }
+                        }
                     }
                 }
             }

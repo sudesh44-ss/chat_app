@@ -24,7 +24,8 @@ data class VerifyOtpRequest(
 data class RegistrationSuccessResponse(
     val nxId: String,
     val sessionAuthToken: String,
-    val registeredTimestamp: Long
+    val registeredTimestamp: Long,
+    val deviceId: String? = null
 )
 
 data class AuthResponse(

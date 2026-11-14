@@ -111,8 +111,8 @@ func (m *MemoryChallengeStore) ConsumeChallenge(_ context.Context, challengeKey 
 
 // RedisChallengeStore is an atomic Redis-backed implementation with Lua script single-use extraction.
 type RedisChallengeStore struct {
-	client    *redis.Client
-	keyPrefix string
+	client        *redis.Client
+	keyPrefix     string
 	consumeScript *redis.Script
 }
 

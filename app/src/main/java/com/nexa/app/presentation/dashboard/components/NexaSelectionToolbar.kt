@@ -27,10 +27,9 @@ import com.nexa.app.presentation.common.glass.NexaGlassSurface
 @Composable
 fun NexaSelectionToolbar(
     selectedCount: Int,
+    allSelected: Boolean,
     onCloseSelection: () -> Unit,
     onSelectAll: () -> Unit,
-    onBulkPin: () -> Unit,
-    onBulkMute: () -> Unit,
     onBulkArchive: () -> Unit,
     onBulkDelete: () -> Unit,
     modifier: Modifier = Modifier
@@ -76,25 +75,7 @@ fun NexaSelectionToolbar(
                 IconButton(onClick = onSelectAll) {
                     Icon(
                         painter = painterResource(id = R.drawable.ic_nexa_select),
-                        contentDescription = "Select All",
-                        tint = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                IconButton(onClick = onBulkPin) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_nexa_pin),
-                        contentDescription = "Pin Selected",
-                        tint = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.size(20.dp)
-                    )
-                }
-
-                IconButton(onClick = onBulkMute) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_nexa_mute),
-                        contentDescription = "Mute Selected",
+                        contentDescription = if (allSelected) "Deselect All" else "Select All",
                         tint = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(20.dp)
                     )

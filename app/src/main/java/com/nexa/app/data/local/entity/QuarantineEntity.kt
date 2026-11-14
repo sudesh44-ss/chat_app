@@ -7,7 +7,9 @@ enum class QuarantineStatus {
     ISOLATED,
     SHREDDED,
     OVERRIDDEN_SAFE,
-    VERIFIED_CLEAN
+    VERIFIED_CLEAN,
+    INCONCLUSIVE,
+    RELEASED
 }
 
 /**

@@ -145,10 +145,24 @@ class DemoConversationsAndBottomNavUnitTests {
         }
 
         override suspend fun resetUnreadCount(conversationId: String): Int = 0
+        override suspend fun markConversationUnread(conversationId: String, updatedAt: Long): Int {
+            val chat = chats[conversationId] ?: return 0
+            chats[conversationId] = chat.copy(hasManualUnread = true, updatedAt = updatedAt)
+            return 1
+        }
 
         override suspend fun updateParticipantName(nxId: String, newName: String): Int = 0
 
         override suspend fun clearLastMessageText(conversationId: String): Int = 1
+        override fun getArchivedChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.isArchived })
+        override fun getChatsByTypeFlow(chatType: String): Flow<List<ChatEntity>> =
+            flowOf(chats.values.filter { !it.isArchived && it.chatType == chatType })
+        override suspend fun updatePinStatus(conversationId: String, isPinned: Boolean, pinPosition: Int, pinnedAt: Long?, updatedAt: Long): Int = 1
+        override suspend fun updateArchiveStatus(conversationId: String, isArchived: Boolean, archivedAt: Long?, updatedAt: Long): Int = 1
+        override suspend fun updateMuteStatus(conversationId: String, isMuted: Boolean, mutedUntil: Long, updatedAt: Long): Int = 1
+        override suspend fun updateLastMessage(conversationId: String, text: String, timestamp: Long, lastMessageId: String?, lastSenderNxId: String?): Int = 1
+        override suspend fun incrementUnread(conversationId: String): Int = 1
+        override suspend fun countActiveChats(): Int = chats.values.count { !it.isArchived }
     }
 
     private class TestFakeMessageDao : MessageDao {
@@ -156,6 +170,14 @@ class DemoConversationsAndBottomNavUnitTests {
 
         override fun getMessagesFlow(conversationId: String): Flow<List<MessageEntity>> =
             flowOf(messages.filter { it.conversationId == conversationId })
+        override suspend fun getMessagesPaged(conversationId: String, limit: Int, offset: Int): List<MessageEntity> =
+            messages.filter { it.conversationId == conversationId && !it.isDeleted }
+                .sortedWith(compareByDescending<MessageEntity> { it.timestamp }.thenByDescending { it.localSequence })
+                .drop(offset).take(limit)
+        override suspend fun getNextLocalSequence(conversationId: String): Long =
+            (messages.filter { it.conversationId == conversationId }.maxOfOrNull { it.localSequence } ?: 0L) + 1L
+        override suspend fun softDeleteMessage(packetId: String): Int = 1
+        override suspend fun updateStarredStatus(packetId: String, isStarred: Boolean): Int = 1
         override suspend fun insertMessage(message: MessageEntity): Long {
             messages.add(message)
             return 1L
@@ -185,6 +207,16 @@ class DemoConversationsAndBottomNavUnitTests {
             messages.filter { it.conversationId == conversationId && it.timestamp > afterTimestamp }.take(limit).map { it.packetId }
         override suspend fun getMessagesAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int): List<MessageEntity> =
             messages.filter { it.conversationId == conversationId && it.timestamp > afterTimestamp }.take(limit)
+        override suspend fun searchMessagesInConversation(conversationId: String, query: String): List<MessageEntity> =
+            messages.filter { it.conversationId == conversationId && it.plainTextContent.contains(query, ignoreCase = true) }
+        override suspend fun getFirstMessageOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): MessageEntity? =
+            messages.filter { it.conversationId == conversationId && it.timestamp in startOfDay until endOfDay }.minByOrNull { it.timestamp }
+        override suspend fun getMessagesOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): List<MessageEntity> =
+            messages.filter { it.conversationId == conversationId && it.timestamp in startOfDay until endOfDay }
+        override suspend fun countMessagesOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): Int =
+            messages.count { it.conversationId == conversationId && it.timestamp in startOfDay until endOfDay }
+        override suspend fun countMessagesBeforeTimestamp(conversationId: String, timestamp: Long): Int =
+            messages.count { it.conversationId == conversationId && it.timestamp < timestamp }
     }
 
     private class TestFakeContactDao : ContactDao {
@@ -198,6 +230,11 @@ class DemoConversationsAndBottomNavUnitTests {
             flowOf(contacts.values.filter { it.status == status })
         override suspend fun getContact(nxId: String): ContactEntity? = contacts[nxId]
         override suspend fun updateStatus(nxId: String, newStatus: com.nexa.app.data.local.entity.ContactStatus): Int = 1
+        override suspend fun updateStatusMuted(nxId: String, isMuted: Boolean): Int {
+            val contact = contacts[nxId] ?: return 0
+            contacts[nxId] = contact.copy(isStatusMuted = isMuted)
+            return 1
+        }
         override suspend fun deleteContact(nxId: String): Int = 1
         override fun getPendingReceivedCount(): Flow<Int> = flowOf(0)
         override fun getAllContacts(): Flow<List<ContactEntity>> = flowOf(contacts.values.toList())

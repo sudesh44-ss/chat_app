@@ -19,6 +19,12 @@
     <!-- Notifications (Android 13+, API 33+) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- App Lock biometric unlock (API 28+); legacy alias for API 24-27 -->
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission
+        android:name="android.permission.USE_FINGERPRINT"
+        android:maxSdkVersion="27" />
+
     <!-- Bluetooth Legacy (Android 7.0 - 11, API 24-30) -->
     <uses-permission
         android:name="android.permission.BLUETOOTH"
@@ -99,6 +105,17 @@
             android:name=".data.service.P2PTransferForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Secure FileProvider for Verified & Released Files (Fail-Closed) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 

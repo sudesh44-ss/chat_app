@@ -30,7 +30,12 @@ interface AuthApiService {
     suspend fun getVerificationStatus(nonce: String): Result<com.nexa.app.data.remote.dto.VerificationStatusDto>
     suspend fun resolveUser(target: String, sessionToken: String? = null): Result<com.nexa.app.data.remote.dto.UserResolveDto>
     suspend fun updateFcmToken(sessionToken: String, deviceId: String, fcmToken: String): Result<Boolean>
+    suspend fun getDevices(sessionToken: String): Result<List<com.nexa.app.data.remote.dto.DeviceInfoDto>>
     suspend fun revokeDevice(sessionToken: String, deviceId: String): Result<Boolean>
+    suspend fun requestPhoneChange(sessionToken: String, newPhone: String): Result<Boolean>
+    suspend fun verifyPhoneChange(sessionToken: String, newPhone: String, otpCode: String): Result<Boolean>
+    suspend fun requestAccountDeletion(sessionToken: String): Result<Boolean>
+    suspend fun verifyAccountDeletion(sessionToken: String, otpCode: String): Result<Boolean>
     suspend fun lookupContacts(sessionToken: String, phoneNumbers: List<String>): Result<List<com.nexa.app.data.remote.dto.ContactMatchDto>>
     suspend fun fetchProfile(sessionToken: String): Result<com.nexa.app.data.remote.dto.RemoteUserProfileDto>
     suspend fun updateProfile(sessionToken: String, name: String? = null, bio: String? = null, gender: String? = null, age: Int? = null, avatarUrl: String? = null): Result<Boolean>
@@ -53,7 +58,8 @@ class AuthApiServiceImpl(
         .connectTimeout(15, TimeUnit.SECONDS)
         .readTimeout(15, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
-        .build()
+        .build(),
+    private val appContext: android.content.Context? = null
 ) : AuthApiService {
 
     companion object {
@@ -135,7 +141,8 @@ class AuthApiServiceImpl(
                 RegistrationSuccessResponse(
                     nxId = allocatedNxId,
                     sessionAuthToken = sessionToken,
-                    registeredTimestamp = System.currentTimeMillis()
+                    registeredTimestamp = System.currentTimeMillis(),
+                    deviceId = "dev_test_mode"
                 )
             )
         }
@@ -174,7 +181,7 @@ class AuthApiServiceImpl(
 
             // Step 2: Register account & bind cryptographic public keys to server-allocated NX-ID
             val registerUrl = "$baseUrl/api/v1/auth/register"
-            val deviceId = "dev_" + UUID.randomUUID().toString().take(12)
+            val deviceId = "dev_" + UUID.randomUUID().toString().replace("-", "").take(16)
             val deviceName = try {
                 "${Build.MANUFACTURER} ${Build.MODEL}"
             } catch (e: Throwable) {
@@ -182,7 +189,7 @@ class AuthApiServiceImpl(
             }
 
             val hardwareKeyHex = try {
-                com.nexa.app.core.keystore.NexaHardwareSecurity().getOrCreateDevicePublicKeyHex()
+                com.nexa.app.core.keystore.NexaHardwareSecurity(appContext).getOrCreateDevicePublicKeyHex()
             } catch (_: Throwable) { null }
 
             val registerJson = JSONObject().apply {
@@ -220,14 +227,16 @@ class AuthApiServiceImpl(
             val sessionToken = regJsonResp.optString("session_auth_token").takeIf { it.isNotEmpty() }
                 ?: regJsonResp.getString("session_token")
             val registeredTs = regJsonResp.optLong("registered_timestamp", System.currentTimeMillis())
+            val serverDeviceId = regJsonResp.optString("device_id").takeIf { it.isNotEmpty() }
 
-            Log.i(TAG, "Successfully registered identity with server: NX-ID=$allocatedNxId")
+            Log.i(TAG, "Successfully registered identity with server: NX-ID=$allocatedNxId, device=$serverDeviceId")
 
             Result.success(
                 RegistrationSuccessResponse(
                     nxId = allocatedNxId,
                     sessionAuthToken = sessionToken,
-                    registeredTimestamp = registeredTs
+                    registeredTimestamp = registeredTs,
+                    deviceId = serverDeviceId
                 )
             )
         } catch (e: Exception) {
@@ -301,6 +310,69 @@ class AuthApiServiceImpl(
         }
     }
 
+    override suspend fun getDevices(
+        sessionToken: String
+    ): Result<List<com.nexa.app.data.remote.dto.DeviceInfoDto>> = withContext(Dispatchers.IO) {
+        if (isTestMode) {
+            return@withContext Result.success(
+                listOf(
+                    com.nexa.app.data.remote.dto.DeviceInfoDto(
+                        deviceId = "test_device",
+                        deviceName = "Test Device",
+                        isRevoked = false
+                    )
+                )
+            )
+        }
+
+        try {
+            val url = "$baseUrl/api/v1/devices"
+            val req = Request.Builder()
+                .url(url)
+                .addHeader("Authorization", "Bearer $sessionToken")
+                .get()
+                .build()
+
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+
+            if (!resp.isSuccessful) {
+                return@withContext Result.failure(IOException("Device list failed (HTTP ${resp.code}): $body"))
+            }
+
+            val root = JSONObject(body)
+            val devices = mutableListOf<com.nexa.app.data.remote.dto.DeviceInfoDto>()
+
+            fun parseInto(array: org.json.JSONArray?) {
+                if (array == null) return
+                for (i in 0 until array.length()) {
+                    val item = array.optJSONObject(i) ?: continue
+                    devices.add(
+                        com.nexa.app.data.remote.dto.DeviceInfoDto(
+                            deviceId = item.optString("device_id"),
+                            deviceName = item.optString("device_name", "NEXA Device"),
+                            nxId = item.optString("nx_id").takeIf { it.isNotEmpty() },
+                            isRevoked = item.optBoolean("is_revoked", false),
+                            revokedAt = item.optLong("revoked_at", 0L),
+                            revokedReason = item.optString("revoked_reason").takeIf { it.isNotEmpty() },
+                            createdAt = item.optLong("created_at", 0L),
+                            lastActiveAt = item.optLong("last_active_at", 0L)
+                        )
+                    )
+                }
+            }
+
+            parseInto(root.optJSONArray("devices"))
+            // Revoked devices are returned separately for history. Keep them in
+            // the same list; callers must branch on isRevoked.
+            parseInto(root.optJSONArray("revoked_devices"))
+            Result.success(devices)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to list devices: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
     override suspend fun revokeDevice(
         sessionToken: String,
         deviceId: String
@@ -319,6 +391,89 @@ class AuthApiServiceImpl(
             Result.success(resp.isSuccessful)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to revoke device $deviceId: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun requestPhoneChange(
+        sessionToken: String,
+        newPhone: String
+    ): Result<Boolean> = authenticatedBooleanPost(
+        path = "/api/v1/auth/phone/change/request",
+        sessionToken = sessionToken,
+        body = JSONObject().put("new_phone", newPhone),
+        logLabel = "request phone change"
+    )
+
+    override suspend fun verifyPhoneChange(
+        sessionToken: String,
+        newPhone: String,
+        otpCode: String
+    ): Result<Boolean> = authenticatedBooleanPost(
+        path = "/api/v1/auth/phone/change/verify",
+        sessionToken = sessionToken,
+        body = JSONObject().apply {
+            put("new_phone", newPhone)
+            put("otp_code", otpCode)
+        },
+        logLabel = "verify phone change"
+    )
+
+    override suspend fun requestAccountDeletion(
+        sessionToken: String
+    ): Result<Boolean> = authenticatedBooleanPost(
+        path = "/api/v1/auth/account/deletion/request",
+        sessionToken = sessionToken,
+        body = JSONObject(),
+        logLabel = "request account deletion"
+    )
+
+    override suspend fun verifyAccountDeletion(
+        sessionToken: String,
+        otpCode: String
+    ): Result<Boolean> = authenticatedBooleanPost(
+        path = "/api/v1/auth/account/deletion/verify",
+        sessionToken = sessionToken,
+        body = JSONObject().put("otp_code", otpCode),
+        logLabel = "verify account deletion"
+    )
+
+    /**
+     * POSTs an authenticated JSON body and returns success only on a 2xx response.
+     * Server errors are surfaced as failures; there is no local success fallback.
+     */
+    private suspend fun authenticatedBooleanPost(
+        path: String,
+        sessionToken: String,
+        body: JSONObject,
+        logLabel: String
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        try {
+            if (sessionToken.isBlank()) {
+                Result.failure(SecurityException("Not signed in: missing session token"))
+            } else {
+                val req = Request.Builder()
+                    .url("$baseUrl$path")
+                    .addHeader("Authorization", "Bearer $sessionToken")
+                    .post(body.toString().toRequestBody(JSON_MEDIA))
+                    .build()
+
+                client.newCall(req).execute().use { resp ->
+                    if (resp.isSuccessful) {
+                        Result.success(true)
+                    } else {
+                        val payload = resp.body?.string().orEmpty()
+                        val message = try {
+                            JSONObject(payload).optString("error").takeIf { it.isNotBlank() }
+                        } catch (_: Exception) {
+                            null
+                        } ?: "HTTP ${resp.code}"
+                        Result.failure(SecurityException("Failed to $logLabel: $message"))
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to $logLabel: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -640,12 +795,11 @@ class AuthApiServiceImpl(
             val status = respJson.optString("status", "PENDING")
             val isVerified = respJson.optBoolean("is_verified", status == "VERIFIED")
 
-            val result = com.nexa.app.data.remote.dto.VerificationStatusDto(
+            val dto = com.nexa.app.data.remote.dto.VerificationStatusDto(
                 status = status,
                 isVerified = isVerified,
                 expiresInSeconds = respJson.optInt("expires_in_seconds").takeIf { it > 0 },
-                nxId = respJson.optString("nx_id").takeIf { it.isNotEmpty() }
-                    ?: userJson?.optString("nx_id"),
+                nxId = respJson.optString("nx_id").takeIf { it.isNotEmpty() } ?: userJson?.optString("nx_id"),
                 sessionAuthToken = respJson.optString("session_auth_token").takeIf { it.isNotEmpty() }
                     ?: respJson.optString("session_token").takeIf { it.isNotEmpty() },
                 name = respJson.optString("name").takeIf { it.isNotEmpty() }
@@ -654,17 +808,6 @@ class AuthApiServiceImpl(
                     ?: userJson?.optString("phone_number"),
                 avatarUrl = respJson.optString("avatar_url").takeIf { it.isNotEmpty() }
                     ?: userJson?.optString("avatar_url")
-            )
-
-            val dto = com.nexa.app.data.remote.dto.VerificationStatusDto(
-                status = status,
-                expiresInSeconds = respJson.optInt("expires_in_seconds"),
-                nxId = respJson.optString("nx_id").takeIf { it.isNotEmpty() } ?: userJson?.optString("nx_id"),
-                sessionAuthToken = respJson.optString("session_auth_token").takeIf { it.isNotEmpty() }
-                    ?: respJson.optString("session_token").takeIf { it.isNotEmpty() },
-                name = userJson?.optString("profile_name"),
-                phone = userJson?.optString("phone_number"),
-                avatarUrl = userJson?.optString("avatar_url")
             )
             Result.success(dto)
         } catch (e: Exception) {

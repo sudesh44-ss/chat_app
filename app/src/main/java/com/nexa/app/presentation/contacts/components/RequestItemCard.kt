@@ -1,5 +1,6 @@
 package com.nexa.app.presentation.contacts.components
 
+import android.text.format.DateUtils
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -43,6 +44,7 @@ fun RequestItemCard(
     contact: ContactEntity,
     onAccept: () -> Unit,
     onReject: () -> Unit,
+    requestTime: Long? = null,
     modifier: Modifier = Modifier,
     onPhotoClick: ((Any) -> Unit)? = null
 ) {
@@ -83,6 +85,19 @@ fun RequestItemCard(
                             color = MaterialTheme.colorScheme.primary
                         )
                     )
+                    requestTime
+                        ?.takeIf { it > 0L }
+                        ?.let {
+                            Text(
+                                text = DateUtils.getRelativeTimeSpanString(
+                                    it,
+                                    System.currentTimeMillis(),
+                                    DateUtils.MINUTE_IN_MILLIS
+                                ).toString(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
                 }
             }
 

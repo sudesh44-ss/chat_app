@@ -186,7 +186,7 @@ fun ContactOptions(
 
                 // Block Contact (Red accent)
                 OptionItem(
-                    title = if (isBlocked) "Unblock Contact" else "Block Contact",
+                    title = if (isBlocked) "Unblock" else "Block",
                     subtitle = if (isBlocked) "Tap to restore communication" else "Restrict calls, presence and messaging",
                     iconRes = R.drawable.ic_nexa_block_ban,
                     primaryTextColor = dangerColor,

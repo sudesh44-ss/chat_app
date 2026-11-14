@@ -773,7 +773,11 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 			CreatedAt:    now,
 			LastActiveAt: now,
 		}
-		s.store.RegisterDevice(device)
+		// Non-trusted re-verification is a real login: make the new device the
+		// account's single active device and revoke prior sessions.
+		if _, err := s.store.RegisterDeviceReplacingOthers(device, "replaced by SMS re-verification"); err != nil {
+			return nil, fmt.Errorf("failed to register device: %w", err)
+		}
 
 		// Create 30-day session
 		tokenBytes := make([]byte, 32)
@@ -854,7 +858,9 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 			CreatedAt:    now,
 			LastActiveAt: now,
 		}
-		s.store.RegisterDevice(device)
+		if _, err := s.store.RegisterDeviceReplacingOthers(device, "new account registration"); err != nil {
+			return nil, fmt.Errorf("failed to register device: %w", err)
+		}
 
 		// Create 30-Day Session Token
 		tokenBytes := make([]byte, 32)
@@ -950,10 +956,10 @@ func (s *ReverseSmsService) GetVerificationStatus(key string) (*VerificationStat
 			NxID:               record.AllocatedNxID,
 			SessionAuthToken:   record.SessionAuthToken,
 			SessionToken:       record.SessionAuthToken,
-			Name:             record.Name,
-			Phone:            record.PhoneNumber,
-			AvatarURL:        record.AvatarURL,
-			User:             account,
+			Name:               record.Name,
+			Phone:              record.PhoneNumber,
+			AvatarURL:          record.AvatarURL,
+			User:               account,
 		}
 
 		// Single-use token consumption: transition to CONSUMED so subsequent queries cannot leak token

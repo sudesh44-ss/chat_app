@@ -10,8 +10,23 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface MessageDao {
 
-    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY timestamp ASC, rowid ASC")
+    @Query("""
+        SELECT * FROM messages 
+        WHERE conversationId = :conversationId AND isDeleted = 0 
+        ORDER BY timestamp ASC, localSequence ASC, rowid ASC
+    """)
     fun getMessagesFlow(conversationId: String): Flow<List<MessageEntity>>
+
+    @Query("""
+        SELECT * FROM messages 
+        WHERE conversationId = :conversationId AND isDeleted = 0 
+        ORDER BY timestamp DESC, localSequence DESC, rowid DESC 
+        LIMIT :limit OFFSET :offset
+    """)
+    suspend fun getMessagesPaged(conversationId: String, limit: Int, offset: Int): List<MessageEntity>
+
+    @Query("SELECT COALESCE(MAX(localSequence), 0) + 1 FROM messages WHERE conversationId = :conversationId")
+    suspend fun getNextLocalSequence(conversationId: String): Long
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertMessage(message: MessageEntity): Long
@@ -22,6 +37,12 @@ interface MessageDao {
     @Query("UPDATE messages SET status = :status WHERE packetId = :packetId")
     suspend fun updateMessageStatus(packetId: String, status: String): Int
 
+    @Query("UPDATE messages SET isDeleted = 1 WHERE packetId = :packetId")
+    suspend fun softDeleteMessage(packetId: String): Int
+
+    @Query("UPDATE messages SET isStarred = :isStarred WHERE packetId = :packetId")
+    suspend fun updateStarredStatus(packetId: String, isStarred: Boolean): Int
+
     @Query("SELECT * FROM messages WHERE status = 'PENDING' AND isOutgoing = 1 ORDER BY timestamp ASC")
     suspend fun getPendingOutgoingMessages(): List<MessageEntity>
 
@@ -31,13 +52,14 @@ interface MessageDao {
     @Query("SELECT * FROM messages WHERE packetId = :packetId LIMIT 1")
     suspend fun getMessageByPacketId(packetId: String): MessageEntity?
 
-    @Query("SELECT * FROM messages WHERE conversationId = :conversationId ORDER BY timestamp DESC LIMIT 1")
+    @Query("SELECT * FROM messages WHERE conversationId = :conversationId AND isDeleted = 0 ORDER BY timestamp DESC, localSequence DESC LIMIT 1")
     suspend fun getLatestMessage(conversationId: String): MessageEntity?
 
     @Query("""
         SELECT * FROM messages 
         WHERE conversationId = :conversationId 
           AND isPinned = 1 
+          AND isDeleted = 0
           AND (pinnedExpiresAt IS NULL OR pinnedExpiresAt > :currentTimeMillis)
         ORDER BY pinnedAt DESC, timestamp DESC 
         LIMIT 4
@@ -48,6 +70,7 @@ interface MessageDao {
         SELECT * FROM messages 
         WHERE conversationId = :conversationId 
           AND isPinned = 1 
+          AND isDeleted = 0
           AND (pinnedExpiresAt IS NULL OR pinnedExpiresAt > :currentTimeMillis)
         ORDER BY pinnedAt DESC, timestamp DESC 
         LIMIT 4
@@ -58,6 +81,7 @@ interface MessageDao {
         SELECT COUNT(*) FROM messages 
         WHERE conversationId = :conversationId 
           AND isPinned = 1 
+          AND isDeleted = 0
           AND (pinnedExpiresAt IS NULL OR pinnedExpiresAt > :currentTimeMillis)
     """)
     suspend fun getPinnedMessagesCount(conversationId: String, currentTimeMillis: Long): Int
@@ -81,9 +105,56 @@ interface MessageDao {
     @Query("DELETE FROM messages WHERE conversationId = :conversationId")
     suspend fun deleteMessagesForConversation(conversationId: String): Int
 
-    @Query("SELECT packetId FROM messages WHERE conversationId = :conversationId AND timestamp > :afterTimestamp ORDER BY timestamp ASC LIMIT :limit")
-    suspend fun getMessageIdsAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int = 50): List<String>
+    @Query("SELECT packetId FROM messages WHERE conversationId = :conversationId AND timestamp > :afterTimestamp AND isDeleted = 0 ORDER BY timestamp ASC LIMIT :limit")
+    suspend fun getMessageIdsAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int): List<String>
 
-    @Query("SELECT * FROM messages WHERE conversationId = :conversationId AND timestamp > :afterTimestamp ORDER BY timestamp ASC LIMIT :limit")
-    suspend fun getMessagesAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int = 50): List<MessageEntity>
+    @Query("SELECT * FROM messages WHERE conversationId = :conversationId AND timestamp > :afterTimestamp AND isDeleted = 0 ORDER BY timestamp ASC LIMIT :limit")
+    suspend fun getMessagesAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int): List<MessageEntity>
+
+    @Query("""
+        SELECT * FROM messages 
+        WHERE conversationId = :conversationId 
+          AND isDeleted = 0
+          AND plainTextContent LIKE '%' || :query || '%' 
+        ORDER BY timestamp DESC, localSequence DESC
+    """)
+    suspend fun searchMessagesInConversation(conversationId: String, query: String): List<MessageEntity>
+
+    @Query("""
+        SELECT * FROM messages 
+        WHERE conversationId = :conversationId 
+          AND isDeleted = 0
+          AND timestamp >= :startOfDay 
+          AND timestamp < :endOfDay 
+        ORDER BY timestamp ASC, localSequence ASC 
+        LIMIT 1
+    """)
+    suspend fun getFirstMessageOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): MessageEntity?
+
+    @Query("""
+        SELECT * FROM messages 
+        WHERE conversationId = :conversationId 
+          AND isDeleted = 0
+          AND timestamp >= :startOfDay 
+          AND timestamp < :endOfDay 
+        ORDER BY timestamp ASC, localSequence ASC
+    """)
+    suspend fun getMessagesOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): List<MessageEntity>
+
+    @Query("""
+        SELECT COUNT(*) FROM messages 
+        WHERE conversationId = :conversationId 
+          AND isDeleted = 0
+          AND timestamp >= :startOfDay 
+          AND timestamp < :endOfDay
+    """)
+    suspend fun countMessagesOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): Int
+
+    @Query("""
+        SELECT COUNT(*) FROM messages 
+        WHERE conversationId = :conversationId 
+          AND isDeleted = 0
+          AND timestamp < :timestamp
+    """)
+    suspend fun countMessagesBeforeTimestamp(conversationId: String, timestamp: Long): Int
 }

@@ -2,18 +2,20 @@ package auth
 
 import (
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/big"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/redis/go-redis/v9"
+
+	"nexa/wire/internal/ratelimit"
 )
 
 var (
@@ -24,34 +26,48 @@ var (
 	ErrInvalidOtp             = errors.New("invalid verification code")
 	ErrOtpExpired             = errors.New("verification code expired")
 	ErrMaxAttemptsExceeded    = errors.New("maximum verification attempts exceeded")
+	ErrOtpSecretMissing       = errors.New("OTP server secret is not configured")
+	ErrOtpStateUnavailable    = errors.New("OTP state backend unavailable")
 )
 
 var e164Regex = regexp.MustCompile(`^\+[1-9]\d{7,14}$`)
 
 type otpRecord struct {
-	Salt       string
-	HashedOtp  string
-	ExpiresAt  int64
-	Attempts   int
-	LastSentAt int64
-	BoundUser  string
+	Salt       string `json:"salt"`
+	HashedOtp  string `json:"hashed_otp"`
+	ExpiresAt  int64  `json:"expires_at"`
+	Attempts   int    `json:"attempts"`
+	LastSentAt int64  `json:"last_sent_at"`
+	BoundUser  string `json:"bound_user,omitempty"`
 }
 
 type AuthTicket struct {
 	PhoneNumber string
-	BoundUser   string
+	// BoundUser is the verified external subject (Google `sub` or Supabase
+	// user id) that produced this ticket. It is never client-supplied.
+	BoundUser string
+	// Provider records which verifier issued the ticket so registration can
+	// bind the identity to the correct account column.
+	Provider    string // PHONE_OTP, GOOGLE, SUPABASE
+	Email       string
 	VerifiedAt  int64
 	ExpiresAt   int64
 	TicketToken string
 }
 
 type OtpService struct {
-	mu           sync.RWMutex
-	provider     SmsProvider
-	records      map[string]*otpRecord  // phone -> record
-	phoneRate    map[string][]int64     // phone -> timestamps
-	ipRate       map[string][]int64     // ip -> timestamps
-	tickets      map[string]*AuthTicket // ticketToken -> ticket
+	mu        sync.RWMutex
+	provider  SmsProvider
+	records   map[string]*otpRecord  // phone -> record
+	phoneRate map[string][]int64     // phone -> timestamps
+	ipRate    map[string][]int64     // ip -> timestamps
+	tickets   map[string]*AuthTicket // ticketToken -> ticket
+
+	// Distributed state (Phase 3). When redisClient is set, records, tickets and
+	// rate limits live in Redis; the maps above stay as the dev/test fallback.
+	redisClient  *redis.Client
+	limiter      ratelimit.Limiter
+	isProduction bool
 }
 
 func NewOtpService(provider SmsProvider) *OtpService {
@@ -88,15 +104,49 @@ func CanonicalizePhone(phone string) (string, error) {
 	return clean, nil
 }
 
-// hashOtp computes a Server-Secret Keyed HMAC-SHA256 hash of the OTP and salt.
-func (s *OtpService) hashOtp(otp string, salt string) string {
+// resolveOtpPepper returns the server-side HMAC pepper. In production a missing
+// secret is a hard failure: there is no shipped fallback that could be extracted
+// from the binary and used to forge OTP hashes.
+func resolveOtpPepper() (string, error) {
 	pepper := os.Getenv("OTP_SERVER_PEPPER")
-	if pepper == "" {
-		pepper = "nexa_production_otp_hmac_secret_pepper_2026_secured"
+	if pepper != "" {
+		return pepper, nil
+	}
+
+	env := strings.ToLower(os.Getenv("APP_ENV"))
+	if env == "" {
+		env = strings.ToLower(os.Getenv("ENV"))
+	}
+	if env == "production" {
+		return "", ErrOtpSecretMissing
+	}
+
+	// Development/test only. Never used when APP_ENV=production/ENV=production.
+	return "nexa_dev_only_otp_pepper_not_for_production", nil
+}
+
+// ValidateOtpConfig performs startup checks for OTP secrets. Without this, a
+// production deployment missing OTP_SERVER_PEPPER only discovers the problem on
+// the first OTP request instead of failing fast at boot.
+func ValidateOtpConfig(isProduction bool) error {
+	if !isProduction {
+		return nil
+	}
+	if strings.TrimSpace(os.Getenv("OTP_SERVER_PEPPER")) == "" {
+		return ErrOtpSecretMissing
+	}
+	return nil
+}
+
+// hashOtp computes a Server-Secret Keyed HMAC-SHA256 hash of the OTP and salt.
+func (s *OtpService) hashOtp(otp string, salt string) (string, error) {
+	pepper, err := resolveOtpPepper()
+	if err != nil {
+		return "", err
 	}
 	mac := hmac.New(sha256.New, []byte(pepper))
 	mac.Write([]byte(salt + ":" + otp + ":nexa_secure_otp_domain"))
-	return hex.EncodeToString(mac.Sum(nil))
+	return hex.EncodeToString(mac.Sum(nil)), nil
 }
 
 func (s *OtpService) checkRateLimit(key string, tracker map[string][]int64, maxPerHour int) bool {
@@ -134,6 +184,19 @@ func (s *OtpService) RequestOtpWithUser(phone string, clientIP string, boundUser
 		return 0, fmt.Errorf("%w: %s", ErrInvalidPhone, err.Error())
 	}
 
+	if client := s.stateBackend(); client != nil {
+		return s.requestOtpDistributed(canonicalPhone, clientIP, boundUser, client)
+	}
+	if s.inProduction() {
+		return 0, fmt.Errorf("%w: distributed OTP state is not configured", ErrOtpStateUnavailable)
+	}
+
+	return s.requestOtpMemory(canonicalPhone, clientIP, boundUser)
+}
+
+// requestOtpMemory is the single-instance dev/test fallback. Production never
+// reaches it when a Redis backend is required because the wrapper fails closed.
+func (s *OtpService) requestOtpMemory(canonicalPhone string, clientIP string, boundUser string) (int, error) {
 	s.mu.Lock()
 
 	// Rate limiting: Max 5 per phone per hour
@@ -159,33 +222,13 @@ func (s *OtpService) RequestOtpWithUser(phone string, clientIP string, boundUser
 		}
 	}
 
-	// Generate cryptographically secure random 6-digit OTP
-	n, err := rand.Int(rand.Reader, big.NewInt(900000))
+	// Generate a cryptographically secure OTP and its salted HMAC record.
+	otpCode, record, err := s.newOtpRecord(now, boundUser)
 	if err != nil {
 		s.mu.Unlock()
-		return 0, fmt.Errorf("failed to generate secure random OTP: %w", err)
+		return 0, err
 	}
-	otpCode := fmt.Sprintf("%06d", 100000+n.Int64())
-
-	// Generate 16-byte random salt
-	saltBytes := make([]byte, 16)
-	if _, err := rand.Read(saltBytes); err != nil {
-		s.mu.Unlock()
-		return 0, fmt.Errorf("failed to generate salt: %w", err)
-	}
-	salt := hex.EncodeToString(saltBytes)
-
-	hashedOtp := s.hashOtp(otpCode, salt)
-	expiresAt := now + (5 * 60 * 1000) // 5 minutes TTL
-
-	s.records[canonicalPhone] = &otpRecord{
-		Salt:       salt,
-		HashedOtp:  hashedOtp,
-		ExpiresAt:  expiresAt,
-		Attempts:   0,
-		LastSentAt: now,
-		BoundUser:  boundUser,
-	}
+	s.records[canonicalPhone] = record
 
 	provider := s.provider
 	s.mu.Unlock()
@@ -222,6 +265,18 @@ func (s *OtpService) VerifyOtp(phone string, submittedOtp string) (string, error
 		return "", fmt.Errorf("%w: OTP must be exactly 6 digits", ErrInvalidOtp)
 	}
 
+	if client := s.stateBackend(); client != nil {
+		return s.verifyOtpDistributed(canonicalPhone, cleanOtp, client)
+	}
+	if s.inProduction() {
+		return "", fmt.Errorf("%w: distributed OTP state is not configured", ErrOtpStateUnavailable)
+	}
+
+	return s.verifyOtpMemory(canonicalPhone, cleanOtp)
+}
+
+// verifyOtpMemory is the single-instance dev/test fallback.
+func (s *OtpService) verifyOtpMemory(canonicalPhone string, cleanOtp string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -242,7 +297,10 @@ func (s *OtpService) VerifyOtp(phone string, submittedOtp string) (string, error
 		return "", fmt.Errorf("%w: maximum verification attempts exceeded (3). OTP has been invalidated.", ErrMaxAttemptsExceeded)
 	}
 
-	expectedHash := s.hashOtp(cleanOtp, record.Salt)
+	expectedHash, err := s.hashOtp(cleanOtp, record.Salt)
+	if err != nil {
+		return "", err
+	}
 	// Cryptographically secure constant-time compare to mitigate timing attacks
 	if subtle.ConstantTimeCompare([]byte(expectedHash), []byte(record.HashedOtp)) != 1 {
 		remaining := 3 - record.Attempts
@@ -254,13 +312,15 @@ func (s *OtpService) VerifyOtp(phone string, submittedOtp string) (string, error
 	delete(s.records, canonicalPhone)
 
 	// Issue 10-minute AuthTicket for registration or account linking
-	ticketBytes := make([]byte, 32)
-	rand.Read(ticketBytes)
-	ticketToken := "ticket_" + hex.EncodeToString(ticketBytes)
+	ticketToken, err := generateTicketToken("ticket_")
+	if err != nil {
+		return "", err
+	}
 
 	s.tickets[ticketToken] = &AuthTicket{
 		PhoneNumber: canonicalPhone,
 		BoundUser:   boundUser,
+		Provider:    "PHONE_OTP",
 		VerifiedAt:  now,
 		ExpiresAt:   now + (10 * 60 * 1000), // 10 minutes
 		TicketToken: ticketToken,
@@ -271,6 +331,13 @@ func (s *OtpService) VerifyOtp(phone string, submittedOtp string) (string, error
 
 // ConsumeTicket validates and consumes an AuthTicket (single-use).
 func (s *OtpService) ConsumeTicket(ticketToken string) (*AuthTicket, error) {
+	if client := s.stateBackend(); client != nil {
+		return s.consumeTicketDistributed(ticketToken, client)
+	}
+	if s.inProduction() {
+		return nil, fmt.Errorf("%w: distributed auth ticket state is not configured", ErrOtpStateUnavailable)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

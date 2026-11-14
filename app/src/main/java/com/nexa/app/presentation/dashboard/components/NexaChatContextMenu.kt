@@ -30,33 +30,22 @@ import com.nexa.app.core.theme.NexaGlassTokens
 import com.nexa.app.domain.model.ChatConversation
 import com.nexa.app.presentation.common.glass.NexaGlassSurface
 
-/**
- * Individual Chat Context Menu (Long Press).
- *
- * Exact mandatory order:
- * 1. Pin / Unpin
- * 2. Archive
- * 3. View Contact
- * 4. Mute / Unmute
- * 5. Select
- * 6. Delete
- * 7. Mark as Read / Unread
- * 8. Block
- */
 @Composable
 fun NexaChatContextMenu(
     chat: ChatConversation,
     isPinned: Boolean = false,
     isMuted: Boolean = false,
+    isBlocked: Boolean = false,
     onDismiss: () -> Unit,
-    onTogglePin: () -> Unit,
-    onArchive: () -> Unit,
     onViewContact: () -> Unit,
+    onTogglePin: () -> Unit,
+    onSelectAll: () -> Unit,
+    onToggleBlock: () -> Unit,
     onToggleMute: () -> Unit,
-    onSelect: () -> Unit,
-    onDelete: () -> Unit,
-    onToggleRead: () -> Unit,
-    onBlock: () -> Unit
+    onViewStatus: () -> Unit,
+    onMarkUnread: () -> Unit,
+    onClearChat: () -> Unit,
+    onArchive: () -> Unit
 ) {
     Dialog(
         onDismissRequest = onDismiss,
@@ -77,7 +66,6 @@ fun NexaChatContextMenu(
                         .fillMaxWidth()
                         .padding(vertical = 8.dp)
                 ) {
-                    // Header: Chat Title
                     Text(
                         text = chat.participantName,
                         style = MaterialTheme.typography.titleSmall.copy(fontSize = 14.sp),
@@ -87,63 +75,49 @@ fun NexaChatContextMenu(
 
                     HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.3f))
 
-                    // 1. Pin / Unpin
+                    ContextMenuItemRow("View Contact", R.drawable.ic_nexa_view_contact) {
+                        onDismiss()
+                        onViewContact()
+                    }
+                    ContextMenuItemRow(if (isPinned) "Unpin" else "Pin", R.drawable.ic_nexa_pin) {
+                        onDismiss()
+                        onTogglePin()
+                    }
+                    ContextMenuItemRow("Select All", R.drawable.ic_nexa_select) {
+                        onDismiss()
+                        onSelectAll()
+                    }
                     ContextMenuItemRow(
-                        label = if (isPinned) "Unpin" else "Pin",
-                        iconRes = R.drawable.ic_nexa_pin,
-                        onClick = { onDismiss(); onTogglePin() }
-                    )
-
-                    // 2. Archive
+                        if (isBlocked) "Unblock" else "Block",
+                        R.drawable.ic_nexa_block,
+                        if (isBlocked) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.error
+                    ) {
+                        onDismiss()
+                        onToggleBlock()
+                    }
                     ContextMenuItemRow(
-                        label = "Archive",
-                        iconRes = R.drawable.ic_nexa_archive,
-                        onClick = { onDismiss(); onArchive() }
-                    )
-
-                    // 3. View Contact
-                    ContextMenuItemRow(
-                        label = "View Contact",
-                        iconRes = R.drawable.ic_nexa_view_contact,
-                        onClick = { onDismiss(); onViewContact() }
-                    )
-
-                    // 4. Mute / Unmute
-                    ContextMenuItemRow(
-                        label = if (isMuted) "Unmute" else "Mute",
-                        iconRes = if (isMuted) R.drawable.ic_nexa_bell else R.drawable.ic_nexa_mute,
-                        onClick = { onDismiss(); onToggleMute() }
-                    )
-
-                    // 5. Select
-                    ContextMenuItemRow(
-                        label = "Select",
-                        iconRes = R.drawable.ic_nexa_select,
-                        onClick = { onDismiss(); onSelect() }
-                    )
-
-                    // 6. Delete
-                    ContextMenuItemRow(
-                        label = "Delete",
-                        iconRes = R.drawable.ic_nexa_delete,
-                        tint = MaterialTheme.colorScheme.error,
-                        onClick = { onDismiss(); onDelete() }
-                    )
-
-                    // 7. Mark as Read / Unread
-                    ContextMenuItemRow(
-                        label = if (chat.unreadCount > 0) "Mark as Read" else "Mark as Unread",
-                        iconRes = R.drawable.ic_nexa_mark_read,
-                        onClick = { onDismiss(); onToggleRead() }
-                    )
-
-                    // 8. Block
-                    ContextMenuItemRow(
-                        label = "Block",
-                        iconRes = R.drawable.ic_nexa_block,
-                        tint = MaterialTheme.colorScheme.error,
-                        onClick = { onDismiss(); onBlock() }
-                    )
+                        if (isMuted) "Unmute Notifications" else "Silent Notifications",
+                        if (isMuted) R.drawable.ic_nexa_bell else R.drawable.ic_nexa_mute
+                    ) {
+                        onDismiss()
+                        onToggleMute()
+                    }
+                    ContextMenuItemRow("View Status", R.drawable.ic_nexa_clock_fading) {
+                        onDismiss()
+                        onViewStatus()
+                    }
+                    ContextMenuItemRow("Mark as Unread", R.drawable.ic_nexa_mark_read) {
+                        onDismiss()
+                        onMarkUnread()
+                    }
+                    ContextMenuItemRow("Clear Chat", R.drawable.ic_nexa_clear_chat) {
+                        onDismiss()
+                        onClearChat()
+                    }
+                    ContextMenuItemRow("Archive", R.drawable.ic_nexa_archive) {
+                        onDismiss()
+                        onArchive()
+                    }
                 }
             }
         }

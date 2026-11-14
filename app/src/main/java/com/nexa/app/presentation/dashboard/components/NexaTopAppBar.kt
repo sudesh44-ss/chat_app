@@ -48,7 +48,9 @@ fun NexaTopAppBar(
     avatarUrl: String? = null,
     displayName: String = "NEXA",
     onAudioHeadphonesClick: () -> Unit = {},
+    onBrandClick: () -> Unit = {},
     onProfileClick: () -> Unit = {},
+    onSettingsClick: () -> Unit = {},
     onNotificationSettingsClick: () -> Unit = {},
     onQrClick: () -> Unit = {},
     onLogoutClick: () -> Unit = {},
@@ -83,7 +85,7 @@ fun NexaTopAppBar(
             // Center: NEXA Branding
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
-                modifier = Modifier.clickable(onClick = onProfileClick)
+                modifier = Modifier.clickable(onClick = onBrandClick)
             ) {
                 Text(
                     text = "NEXA",
@@ -155,7 +157,7 @@ fun NexaTopAppBar(
                             },
                             onClick = {
                                 menuExpanded = false
-                                onProfileClick()
+                                onSettingsClick()
                             }
                         )
                         DropdownMenuItem(

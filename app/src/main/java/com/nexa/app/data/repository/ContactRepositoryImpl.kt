@@ -185,10 +185,19 @@ class ContactRepositoryImpl(
 
     override suspend fun rejectOrBlockContact(nxId: String, block: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
         try {
+            val existingContact = contactDao.getContact(nxId)
+            val restoreStatus = existingContact?.status ?: ContactStatus.MUTUAL_FRIEND
+
             if (block) {
                 contactDao.updateStatus(nxId, ContactStatus.BLOCKED)
             } else {
-                contactDao.deleteContact(nxId)
+                val fallbackStatus = when (restoreStatus) {
+                    ContactStatus.BLOCKED -> ContactStatus.MUTUAL_FRIEND
+                    else -> restoreStatus
+                }
+                if (existingContact != null) {
+                    contactDao.updateStatus(nxId, fallbackStatus)
+                }
             }
 
             // Synchronize with backend connection graph if authenticated

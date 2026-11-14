@@ -72,6 +72,9 @@ fun OnDemandFileCard(
             // File Icon with state-based background
             val (iconVector, iconTint) = when (fileMetadata.status) {
                 FileStatus.VERIFIED_SAFE -> Pair(Icons.Default.Security, NexaVerifiedGreen)
+                FileStatus.SCAN_PASSED -> Pair(Icons.Default.Security, NexaWarningOrange)
+                FileStatus.SCAN_INCONCLUSIVE -> Pair(Icons.Default.Warning, MaterialTheme.colorScheme.error)
+                FileStatus.OVERRIDDEN_RELEASED -> Pair(Icons.Default.Warning, NexaWarningOrange)
                 FileStatus.QUARANTINED_THREAT -> Pair(Icons.Default.Warning, MaterialTheme.colorScheme.error)
                 FileStatus.IN_QUARANTINE -> Pair(Icons.Default.Security, NexaBadgeMonospace)
                 else -> Pair(Icons.Default.Download, MaterialTheme.colorScheme.primary)
@@ -116,7 +119,10 @@ fun OnDemandFileCard(
                         FileStatus.METADATA_ONLY -> "On-Demand (0 MB Used)"
                         FileStatus.DOWNLOADING -> "Streaming from Swarm..."
                         FileStatus.IN_QUARANTINE -> "Gate 2 Sandbox Scanning..."
+                        FileStatus.SCAN_PASSED -> "Scan Passed • Release Required"
+                        FileStatus.SCAN_INCONCLUSIVE -> "Scan Incomplete • Restricted"
                         FileStatus.VERIFIED_SAFE -> "Verified Safe"
+                        FileStatus.OVERRIDDEN_RELEASED -> "Released After Warning"
                         FileStatus.QUARANTINED_THREAT -> "Threat Blocked ⚠️"
                     }
                     Text(
@@ -159,6 +165,24 @@ fun OnDemandFileCard(
                     )
                 }
 
+                FileStatus.SCAN_PASSED -> {
+                    Text(
+                        text = "Release confirmation required",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = NexaWarningOrange
+                    )
+                }
+
+                FileStatus.SCAN_INCONCLUSIVE -> {
+                    Button(
+                        onClick = onThreatDetailsClick,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text("Review", color = MaterialTheme.colorScheme.onError, fontSize = 12.sp)
+                    }
+                }
+
                 FileStatus.VERIFIED_SAFE -> {
                     Button(
                         onClick = onOpenClick,
@@ -172,6 +196,16 @@ fun OnDemandFileCard(
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
+                        Text("Open", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                    }
+                }
+
+                FileStatus.OVERRIDDEN_RELEASED -> {
+                    Button(
+                        onClick = onOpenClick,
+                        shape = RoundedCornerShape(8.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = NexaWarningOrange)
+                    ) {
                         Text("Open", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                     }
                 }

@@ -53,6 +53,8 @@ fun MessageBubble(
     message: Message,
     showTransportBadge: Boolean = true,
     isHighlighted: Boolean = false,
+    originalQuotedMessage: Message? = null,
+    onQuotedMessageClick: ((String) -> Unit)? = null,
     onFailedClick: ((Message) -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
@@ -120,6 +122,32 @@ fun MessageBubble(
                             fontSize = 11.sp
                         ),
                         modifier = Modifier.padding(bottom = 2.dp)
+                    )
+                }
+
+                // Quoted Message Card
+                if (message.replyToMessageId != null) {
+                    val quoteAccentColor = when (message.transportType) {
+                        TransportType.DATA_SMS -> NexaWarningOrange
+                        TransportType.DTN_MESH -> NexaBadgeMonospace
+                        TransportType.INTERNET -> MaterialTheme.colorScheme.primary
+                    }
+
+                    val displayInfo = remember(originalQuotedMessage, message.replyToSenderNxId, message.replyToSnippet) {
+                        QuotedMessageHelper.resolveDisplayInfo(
+                            originalMessage = originalQuotedMessage,
+                            fallbackSenderName = message.replyToSenderNxId,
+                            fallbackSnippet = message.replyToSnippet
+                        )
+                    }
+
+                    QuotedMessageBubbleCard(
+                        displayInfo = displayInfo,
+                        accentColor = quoteAccentColor,
+                        onQuoteClick = {
+                            onQuotedMessageClick?.invoke(message.replyToMessageId)
+                        },
+                        modifier = Modifier.padding(bottom = 6.dp)
                     )
                 }
 

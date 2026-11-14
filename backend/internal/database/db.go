@@ -14,13 +14,13 @@ import (
 
 // Config defines connection pool settings for PostgreSQL.
 type Config struct {
-	DatabaseURL        string
-	MaxConns           int32
-	MinConns           int32
-	MaxConnLifetime    time.Duration
-	MaxConnIdleTime    time.Duration
-	HealthCheckPeriod  time.Duration
-	ConnectTimeout     time.Duration
+	DatabaseURL       string
+	MaxConns          int32
+	MinConns          int32
+	MaxConnLifetime   time.Duration
+	MaxConnIdleTime   time.Duration
+	HealthCheckPeriod time.Duration
+	ConnectTimeout    time.Duration
 }
 
 // DefaultConfig returns production-tuned pool defaults.

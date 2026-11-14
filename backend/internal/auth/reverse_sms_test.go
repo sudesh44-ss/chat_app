@@ -34,12 +34,12 @@ func TestDomesticPhoneValidation(t *testing.T) {
 	}
 
 	invalidNumbers := []string{
-		"+14155552671", // US number (rejected)
+		"+14155552671",  // US number (rejected)
 		"+447911123456", // UK number (rejected)
-		"1234567890",   // Starts with 1 (not Indian mobile series 6-9)
-		"5555555555",   // Starts with 5
-		"abcdefghij",   // Not numeric
-		"+91123456789", // 9 digits
+		"1234567890",    // Starts with 1 (not Indian mobile series 6-9)
+		"5555555555",    // Starts with 5
+		"abcdefghij",    // Not numeric
+		"+91123456789",  // 9 digits
 	}
 
 	for _, num := range invalidNumbers {
@@ -387,5 +387,3 @@ func TestReverseSmsSingleUseTokenConsumption(t *testing.T) {
 		t.Fatalf("expected empty SessionAuthToken on second fetch, got %s", secondFetch.SessionAuthToken)
 	}
 }
-
-

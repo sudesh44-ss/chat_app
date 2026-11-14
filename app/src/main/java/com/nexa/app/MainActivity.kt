@@ -12,6 +12,7 @@ import androidx.compose.ui.Modifier
 import androidx.navigation.compose.rememberNavController
 import com.nexa.app.core.theme.NexaTheme
 import com.nexa.app.presentation.navigation.AuthNavGraph
+import com.nexa.app.presentation.security.AppLockGate
 
 class MainActivity : ComponentActivity() {
 
@@ -28,13 +29,15 @@ class MainActivity : ComponentActivity() {
             val appearanceMode by app.appearancePrefs.appearanceMode.collectAsState()
             NexaTheme(appearanceMode = appearanceMode) {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    val navController = rememberNavController()
-                    AuthNavGraph(
-                        navController = navController,
-                        authRepository = authRepository,
-                        chatRepository = chatRepository,
-                        p2pTransferRepository = p2pTransferRepository
-                    )
+                    AppLockGate(secureStorage = app.secureStorage) {
+                        val navController = rememberNavController()
+                        AuthNavGraph(
+                            navController = navController,
+                            authRepository = authRepository,
+                            chatRepository = chatRepository,
+                            p2pTransferRepository = p2pTransferRepository
+                        )
+                    }
                 }
             }
         }

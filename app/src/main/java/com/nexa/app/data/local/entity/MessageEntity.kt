@@ -5,13 +5,18 @@ import androidx.room.Index
 import androidx.room.PrimaryKey
 import com.nexa.app.domain.model.Message
 import com.nexa.app.domain.model.MessageStatus
+import com.nexa.app.domain.model.MessageType
 import com.nexa.app.domain.model.TransportType
 
 @Entity(
     tableName = "messages",
     indices = [
         Index(value = ["conversationId"]),
-        Index(value = ["packetId"], unique = true)
+        Index(value = ["conversationId", "localSequence"]),
+        Index(value = ["conversationId", "timestamp"]),
+        Index(value = ["packetId"], unique = true),
+        Index(value = ["replyToMessageId"]),
+        Index(value = ["messageType"])
     ]
 )
 data class MessageEntity(
@@ -23,11 +28,20 @@ data class MessageEntity(
     val plainTextContent: String,  // Decrypted locally; persisted securely in SQLCipher AES-256
     val status: String,            // PENDING, SENT, DELIVERED, READ, FAILED
     val timestamp: Long,
-    val isOutgoing: Boolean,
+    val isOutgoing: Boolean = false,
     val transportType: String = "INTERNET",
     val isPinned: Boolean = false,
     val pinnedExpiresAt: Long? = null,
-    val pinnedAt: Long? = null
+    val pinnedAt: Long? = null,
+    val replyToMessageId: String? = null,
+    val replyToSenderNxId: String? = null,
+    val replyToSnippet: String? = null,
+    val messageType: String = "TEXT",
+    val localSequence: Long = 0L,
+    val isDeleted: Boolean = false,
+    val isStarred: Boolean = false,
+    val editedAt: Long? = null,
+    val localState: String = "PERSISTED"
 )
 
 fun MessageEntity.toDomain(): Message {
@@ -47,7 +61,20 @@ fun MessageEntity.toDomain(): Message {
         },
         isPinned = isPinned,
         pinnedExpiresAt = pinnedExpiresAt,
-        pinnedAt = pinnedAt
+        pinnedAt = pinnedAt,
+        replyToMessageId = replyToMessageId,
+        replyToSenderNxId = replyToSenderNxId,
+        replyToSnippet = replyToSnippet,
+        messageType = try {
+            MessageType.valueOf(messageType)
+        } catch (e: Exception) {
+            MessageType.TEXT
+        },
+        localSequence = localSequence,
+        isDeleted = isDeleted,
+        isStarred = isStarred,
+        editedAt = editedAt,
+        localState = localState
     )
 }
 
@@ -64,6 +91,15 @@ fun Message.toEntity(): MessageEntity {
         transportType = transportType.name,
         isPinned = isPinned,
         pinnedExpiresAt = pinnedExpiresAt,
-        pinnedAt = pinnedAt
+        pinnedAt = pinnedAt,
+        replyToMessageId = replyToMessageId,
+        replyToSenderNxId = replyToSenderNxId,
+        replyToSnippet = replyToSnippet,
+        messageType = messageType.name,
+        localSequence = localSequence,
+        isDeleted = isDeleted,
+        isStarred = isStarred,
+        editedAt = editedAt,
+        localState = localState
     )
 }

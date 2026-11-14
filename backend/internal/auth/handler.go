@@ -144,11 +144,17 @@ func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/v1/auth/register", h.handleRegister)
 	mux.HandleFunc("/api/v1/auth/link", h.handleAccountLink)
 	mux.HandleFunc("/api/v1/auth/logout", h.handleLogout)
+	mux.HandleFunc("/api/v1/auth/session/rotate", h.handleSessionRotate)
+	mux.HandleFunc("/api/v1/auth/session/refresh", h.handleSessionRotate)
 	mux.HandleFunc("/api/v1/profile", h.handleProfile)
 	mux.HandleFunc("/api/v1/contacts/lookup", h.handleContactLookup)
-	mux.HandleFunc("/api/v1/devices", h.handleDevices)
+	mux.HandleFunc("/api/v1/auth/devices", h.handleDevices)
 	mux.HandleFunc("/api/v1/devices/", h.handleDeviceAction)
 	mux.HandleFunc("/api/v1/devices/fcm-token", h.handleUpdateFcmToken)
+	mux.HandleFunc("/api/v1/auth/phone/change/request", h.handlePhoneChangeRequest)
+	mux.HandleFunc("/api/v1/auth/phone/change/verify", h.handlePhoneChangeVerify)
+	mux.HandleFunc("/api/v1/auth/account/deletion/request", h.handleAccountDeletionRequest)
+	mux.HandleFunc("/api/v1/auth/account/deletion/verify", h.handleAccountDeletionVerify)
 }
 
 func getClientIP(r *http.Request) string {
@@ -161,6 +167,18 @@ func getClientIP(r *http.Request) string {
 		ip = ip[:colon]
 	}
 	return ip
+}
+
+// writeAuthStateUnavailable reports a distributed OTP/ticket backend outage.
+// Callers must not treat this as an authentication failure: retrying later is
+// expected to succeed, whereas an invalid ticket will not.
+func (h *AuthHandler) writeAuthStateUnavailable(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"error": "Verification service is temporarily unavailable",
+		"code":  "AUTH_STATE_UNAVAILABLE",
+	})
 }
 
 func (h *AuthHandler) handleOtpRequest(w http.ResponseWriter, r *http.Request) {
@@ -211,6 +229,12 @@ func (h *AuthHandler) handleOtpRequest(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"error": err.Error(),
 				"code":  "INVALID_PHONE",
+			})
+		case errors.Is(err, ErrOtpStateUnavailable):
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Verification service is temporarily unavailable",
+				"code":  "AUTH_STATE_UNAVAILABLE",
 			})
 		default:
 			w.WriteHeader(http.StatusInternalServerError)
@@ -268,6 +292,12 @@ func (h *AuthHandler) handleOtpVerify(w http.ResponseWriter, r *http.Request) {
 				"error": err.Error(),
 				"code":  "INVALID_OTP",
 			})
+		case errors.Is(err, ErrOtpStateUnavailable):
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Verification service is temporarily unavailable",
+				"code":  "AUTH_STATE_UNAVAILABLE",
+			})
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -310,6 +340,15 @@ func (h *AuthHandler) handleSupabaseVerify(w http.ResponseWriter, r *http.Reques
 
 	claims, err := h.supabaseVerifier.VerifyToken(req.AccessToken)
 	if err != nil {
+		if errors.Is(err, ErrSupabaseVerifierUnconfigured) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": "Supabase verification is not configured on this server",
+				"code":  "AUTH_CONFIG_UNAVAILABLE",
+			})
+			return
+		}
 		http.Error(w, "Supabase token verification failed: "+err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -317,19 +356,24 @@ func (h *AuthHandler) handleSupabaseVerify(w http.ResponseWriter, r *http.Reques
 	existingAcc, isExisting := h.store.GetAccountBySupabaseUID(claims.Subject)
 
 	// Issue AuthTicket for Supabase authenticated session
-	ticketBytes := make([]byte, 32)
-	rand.Read(ticketBytes)
-	ticketToken := "ticket_sb_" + hex.EncodeToString(ticketBytes)
+	ticketToken, err := generateTicketToken("ticket_sb_")
+	if err != nil {
+		http.Error(w, "Failed to issue auth ticket", http.StatusInternalServerError)
+		return
+	}
 
 	now := time.Now().UnixMilli()
-	h.otpService.mu.Lock()
-	h.otpService.tickets[ticketToken] = &AuthTicket{
-		PhoneNumber: claims.Email,
+	if err := h.otpService.IssueTicket(&AuthTicket{
+		BoundUser:   claims.Subject,
+		Provider:    "SUPABASE",
+		Email:       claims.Email,
 		VerifiedAt:  now,
 		ExpiresAt:   now + (10 * 60 * 1000),
 		TicketToken: ticketToken,
+	}); err != nil {
+		http.Error(w, "Failed to persist auth ticket", http.StatusInternalServerError)
+		return
 	}
-	h.otpService.mu.Unlock()
 
 	suggestedName := ""
 	if claims.UserMetadata != nil {
@@ -379,19 +423,24 @@ func (h *AuthHandler) handleGoogleVerify(w http.ResponseWriter, r *http.Request)
 	existingAcc, isExisting := h.store.GetAccountByGoogleID(claims.Subject)
 
 	// Issue AuthTicket for Google identity
-	ticketBytes := make([]byte, 32)
-	rand.Read(ticketBytes)
-	ticketToken := "ticket_g_" + hex.EncodeToString(ticketBytes)
+	ticketToken, err := generateTicketToken("ticket_g_")
+	if err != nil {
+		http.Error(w, "Failed to issue auth ticket", http.StatusInternalServerError)
+		return
+	}
 
 	now := time.Now().UnixMilli()
-	h.otpService.mu.Lock()
-	h.otpService.tickets[ticketToken] = &AuthTicket{
-		PhoneNumber: claims.Email,
+	if err := h.otpService.IssueTicket(&AuthTicket{
+		BoundUser:   claims.Subject,
+		Provider:    "GOOGLE",
+		Email:       claims.Email,
 		VerifiedAt:  now,
 		ExpiresAt:   now + (10 * 60 * 1000),
 		TicketToken: ticketToken,
+	}); err != nil {
+		http.Error(w, "Failed to persist auth ticket", http.StatusInternalServerError)
+		return
 	}
-	h.otpService.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	resp := map[string]interface{}{
@@ -415,6 +464,10 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Sessions already present when registration starts are "prior", even if
+	// they share a millisecond timestamp with the new session.
+	requestStartedAt := time.Now().UnixMilli()
+
 	var req RegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Malformed request body", http.StatusBadRequest)
@@ -424,7 +477,27 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 	// 1. Consume Auth Ticket (single use)
 	ticket, err := h.otpService.ConsumeTicket(req.AuthProofTicket)
 	if err != nil {
+		if errors.Is(err, ErrOtpStateUnavailable) {
+			h.writeAuthStateUnavailable(w)
+			return
+		}
 		http.Error(w, "Invalid or expired authentication proof: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	// 1a. Reject tickets that were issued for a different purpose. Phone-change
+	// and account-deletion OTPs are bound to a specific account and may only be
+	// redeemed by their own verify handlers; accepting them here would let a
+	// sensitive-operation ticket create or hijack a registration.
+	if strings.HasPrefix(ticket.BoundUser, phoneChangeBinding) ||
+		strings.HasPrefix(ticket.BoundUser, deletionBinding) {
+		http.Error(w, "Authentication proof is not valid for registration", http.StatusUnauthorized)
+		return
+	}
+	switch ticket.Provider {
+	case "PHONE_OTP", "GOOGLE", "SUPABASE":
+	default:
+		http.Error(w, "Authentication proof has an unsupported provider", http.StatusUnauthorized)
 		return
 	}
 
@@ -485,14 +558,27 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt:             now,
 		}
 
-		if strings.HasPrefix(ticket.PhoneNumber, "+") {
+		if ticket.PhoneNumber != "" && strings.HasPrefix(ticket.PhoneNumber, "+") {
 			account.PhoneNumber = ticket.PhoneNumber
 			account.PhoneVerified = true
-		} else if strings.Contains(ticket.PhoneNumber, "@") {
-			account.Email = ticket.PhoneNumber
 		}
-		if ticket.BoundUser != "" {
+		if ticket.Email != "" {
+			account.Email = ticket.Email
+		}
+
+		// Bind the server-verified external identity to the correct column.
+		// Never infer the provider from the shape of a client-supplied value.
+		switch ticket.Provider {
+		case "GOOGLE":
 			account.GoogleID = ticket.BoundUser
+		case "SUPABASE":
+			account.SupabaseUserID = ticket.BoundUser
+		default:
+			// Phone OTP tickets may additionally carry a verified Google UID
+			// obtained from a server-verified Google token at request time.
+			if ticket.BoundUser != "" {
+				account.GoogleID = ticket.BoundUser
+			}
 		}
 
 		if err := h.store.CreateAccount(account); err != nil {
@@ -501,7 +587,7 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 6. Register Device
+	// 6. Register Device (single active device per account)
 	deviceID := req.DeviceID
 	if deviceID == "" {
 		deviceID = fmt.Sprintf("dev_%d", now)
@@ -528,7 +614,21 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:    now,
 		LastActiveAt: now,
 	}
-	h.store.RegisterDevice(device)
+	revokedDevices, err := h.store.RegisterDeviceReplacingOthers(device, "replaced by new registration")
+	if err != nil {
+		http.Error(w, "Failed to register device: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if len(revokedDevices) > 0 {
+		log.Printf("[Auth] Single-active-device: revoked %d prior device(s) for %s", len(revokedDevices), account.NxID)
+		// Drop any live WebSocket for the replaced devices so the old device
+		// cannot keep receiving messages after its session is revoked.
+		if h.revoker != nil {
+			for _, revokedID := range revokedDevices {
+				_ = h.revoker.RevokeDeviceSession(account.NxID, revokedID, "replaced by new registration")
+			}
+		}
+	}
 
 	// 7. Create 30-Day Session Token
 	tokenBytes := make([]byte, 32)
@@ -544,7 +644,17 @@ func (h *AuthHandler) handleRegister(w http.ResponseWriter, r *http.Request) {
 		IsRevoked: false,
 		CreatedAt: now,
 	}
-	h.store.CreateSession(session)
+	if err := h.store.CreateSession(session); err != nil {
+		log.Printf("[Auth] Failed to create registration session for %s: %v", account.NxID, err)
+		http.Error(w, "Failed to create session", http.StatusInternalServerError)
+		return
+	}
+
+	// Session rotation: retire earlier sessions for this device, but never a
+	// token created at/after the new one (protects concurrent rotations).
+	if _, err := h.store.RevokeSessionsForDevice(account.NxID, deviceID, sessionToken, requestStartedAt+1); err != nil {
+		log.Printf("[Auth] WARNING: failed to revoke prior sessions for device %s: %v", deviceID, err)
+	}
 
 	log.Printf("[Auth] Successfully registered identity %s (Device: %s)", nxID, deviceID)
 
@@ -589,6 +699,10 @@ func (h *AuthHandler) handleAccountLink(w http.ResponseWriter, r *http.Request) 
 	case "PHONE_OTP":
 		ticket, err := h.otpService.ConsumeTicket(req.AuthProofTicket)
 		if err != nil {
+			if errors.Is(err, ErrOtpStateUnavailable) {
+				h.writeAuthStateUnavailable(w)
+				return
+			}
 			http.Error(w, "Invalid phone OTP ticket: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -618,6 +732,15 @@ func (h *AuthHandler) handleAccountLink(w http.ResponseWriter, r *http.Request) 
 	case "SUPABASE":
 		claims, err := h.supabaseVerifier.VerifyToken(req.SupabaseToken)
 		if err != nil {
+			if errors.Is(err, ErrSupabaseVerifierUnconfigured) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": "Supabase verification is not configured on this server",
+					"code":  "AUTH_CONFIG_UNAVAILABLE",
+				})
+				return
+			}
 			http.Error(w, "Invalid Supabase token: "+err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -770,6 +893,76 @@ func (h *AuthHandler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleSessionRotate exchanges a valid session token for a fresh one and
+// revokes every earlier session bound to the same account/device. This bounds
+// the blast radius of a leaked long-lived token without forcing a re-login.
+func (h *AuthHandler) handleSessionRotate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Sessions that existed when this request started are "prior", even if they
+	// share the same millisecond timestamp as the replacement.
+	requestStartedAt := time.Now().UnixMilli()
+
+	authHeader := r.Header.Get("Authorization")
+	sessionToken := strings.TrimPrefix(authHeader, "Bearer ")
+	if sessionToken == "" || sessionToken == authHeader {
+		http.Error(w, "Unauthorized: missing session token", http.StatusUnauthorized)
+		return
+	}
+
+	session, ok := h.store.GetSession(sessionToken)
+	if !ok || session == nil {
+		http.Error(w, "Unauthorized: invalid or expired session", http.StatusUnauthorized)
+		return
+	}
+
+	if session.DeviceID != "" {
+		if dev, found := h.store.GetDevice(session.DeviceID); found && (dev.IsRevoked || dev.NxID != session.NxID) {
+			http.Error(w, "Unauthorized: device revoked", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	now := time.Now().UnixMilli()
+	tokenBytes := make([]byte, 32)
+	rand.Read(tokenBytes)
+	newToken := "nexa_sess_" + hex.EncodeToString(tokenBytes)
+
+	newSession := &identity.Session{
+		Token:     newToken,
+		AccountID: session.AccountID,
+		NxID:      session.NxID,
+		DeviceID:  session.DeviceID,
+		ExpiresAt: now + (30 * 24 * 60 * 60 * 1000),
+		IsRevoked: false,
+		CreatedAt: now,
+	}
+	if err := h.store.CreateSession(newSession); err != nil {
+		http.Error(w, "Failed to rotate session", http.StatusInternalServerError)
+		return
+	}
+
+	// Revoke the presented token plus any sibling sessions that existed when the
+	// request started. Tokens created later by a concurrent rotation survive.
+	if _, err := h.store.RevokeSessionsForDevice(session.NxID, session.DeviceID, newToken, requestStartedAt+1); err != nil {
+		log.Printf("[Auth] WARNING: rotation created %s but failed to revoke prior sessions: %v", newToken, err)
+	}
+	_ = h.store.RevokeSession(sessionToken)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":             "SESSION_ROTATED",
+		"session_auth_token": newToken,
+		"session_token":      newToken,
+		"expires_at":         newSession.ExpiresAt,
+		"nx_id":              newSession.NxID,
+		"device_id":          newSession.DeviceID,
+	})
+}
+
 func (h *AuthHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	sessionToken := strings.TrimPrefix(authHeader, "Bearer ")
@@ -779,10 +972,27 @@ func (h *AuthHandler) handleDevices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	devices := h.store.GetDevicesForAccount(session.NxID)
+	active := h.store.GetDevicesForAccount(session.NxID)
+	all := h.store.GetAllDevicesForAccount(session.NxID)
+
+	revoked := make([]*identity.Device, 0)
+	for _, d := range all {
+		if d.IsRevoked {
+			revoked = append(revoked, d)
+		}
+	}
+
+	events, err := h.store.GetDeviceEvents(session.NxID, 50)
+	if err != nil {
+		log.Printf("[Auth] Could not load device events for %s: %v", session.NxID, err)
+		events = nil
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"devices": devices,
+		"devices":         active,
+		"revoked_devices": revoked,
+		"events":          events,
 	})
 }
 
@@ -1273,6 +1483,10 @@ func (h *AuthHandler) handleLoginVerify(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Sessions already present when login verification starts are "prior", even
+	// if they share a millisecond timestamp with the new session.
+	requestStartedAt := time.Now().UnixMilli()
+
 	var req LoginVerifyRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "Malformed request body", http.StatusBadRequest)
@@ -1415,6 +1629,7 @@ func (h *AuthHandler) handleLoginVerify(w http.ResponseWriter, r *http.Request) 
 
 	// 4. Issue authenticated 30-day session token
 	now := time.Now().UnixMilli()
+
 	tokenBytes := make([]byte, 32)
 	rand.Read(tokenBytes)
 	sessionToken := "nexa_sess_" + hex.EncodeToString(tokenBytes)
@@ -1428,7 +1643,25 @@ func (h *AuthHandler) handleLoginVerify(w http.ResponseWriter, r *http.Request) 
 		IsRevoked: false,
 		CreatedAt: now,
 	}
-	h.store.CreateSession(session)
+	if err := h.store.CreateSession(session); err != nil {
+		log.Printf("[Auth] Failed to create login session for %s: %v", account.NxID, err)
+		http.Error(w, "Failed to create session", http.StatusInternalServerError)
+		return
+	}
+
+	// Session rotation: a fresh re-authentication on this device revokes every
+	// earlier token for it, so a stolen old token stops working. Tokens created
+	// at/after the new one are left alone to survive concurrent rotations.
+	if _, err := h.store.RevokeSessionsForDevice(account.NxID, device.DeviceID, sessionToken, requestStartedAt+1); err != nil {
+		log.Printf("[Auth] WARNING: failed to revoke prior sessions for device %s: %v", device.DeviceID, err)
+	}
+
+	// Close any WebSocket still authenticated with the device's previous
+	// session. The client reconnects with the new token after this response.
+	if h.revoker != nil {
+		_ = h.revoker.RevokeDeviceSession(account.NxID, device.DeviceID, "session rotated on re-authentication")
+	}
+
 	device.LastActiveAt = now
 
 	w.Header().Set("Content-Type", "application/json")

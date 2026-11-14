@@ -260,23 +260,25 @@ fun NexaConversationItem(
                         modifier = Modifier.weight(1f)
                     )
 
-                    if (chat.unreadCount > 0) {
+                    if (chat.unreadCount > 0 || chat.hasManualUnread) {
                         Spacer(modifier = Modifier.width(8.dp))
                         Box(
                             modifier = Modifier
-                                .size(20.dp)
+                                .size(if (chat.unreadCount > 0) 20.dp else 8.dp)
                                 .clip(CircleShape)
                                 .background(MaterialTheme.colorScheme.primary),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = chat.unreadCount.toString(),
-                                style = MaterialTheme.typography.labelSmall.copy(
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 10.sp,
-                                    color = MaterialTheme.colorScheme.onPrimary
+                            if (chat.unreadCount > 0) {
+                                Text(
+                                    text = chat.unreadCount.toString(),
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontWeight = FontWeight.Bold,
+                                        fontSize = 10.sp,
+                                        color = MaterialTheme.colorScheme.onPrimary
+                                    )
                                 )
-                            )
+                            }
                         }
                     }
                 }

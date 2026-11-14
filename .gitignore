@@ -2,8 +2,6 @@
 # NEXA Project — Production .gitignore
 # ==========================================
 config/
-
-docs/
 # 1. Android & Gradle Build Artifacts
 .gradle/
 build/
@@ -24,7 +22,7 @@ backend/server_linux
 *.so
 *.dylib
 backend/data/
-data/
+/data/
 
 # 3. APK & AAB Packages
 *.apk

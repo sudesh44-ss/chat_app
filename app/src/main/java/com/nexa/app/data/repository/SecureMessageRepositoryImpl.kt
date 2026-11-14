@@ -33,11 +33,34 @@ class SecureMessageRepositoryImpl(
         recipientNxId: String,
         text: String,
         targetRoute: OutboundRoute,
-        recipientPhone: String?
+        recipientPhone: String?,
+        replyToMessageId: String?
     ): Result<EncryptedEnvelope> = withContext(Dispatchers.IO) {
         try {
             val myNxId = secureStorage.getActiveNxId() ?: "NX-ANONYMOUS"
-            val plaintextBytes = text.toByteArray(Charsets.UTF_8)
+            if (myNxId.isBlank() || recipientNxId.isBlank() || recipientNxId == myNxId) {
+                return@withContext Result.failure(IllegalArgumentException("Invalid conversation routing: sender=$myNxId recipient=$recipientNxId"))
+            }
+
+            val conversationId = deriveConversationId(myNxId, recipientNxId)
+
+            var replyToSender: String? = null
+            var replyToSnippet: String? = null
+            if (!replyToMessageId.isNullOrBlank()) {
+                val orig = messageDao.getMessageByPacketId(replyToMessageId)
+                if (orig != null) {
+                    replyToSender = orig.senderNxId
+                    replyToSnippet = orig.plainTextContent.take(120)
+                }
+            }
+
+            val payload = com.nexa.app.core.util.SafeMessageParser.formatOutgoingPayload(
+                text = text,
+                replyToMessageId = replyToMessageId,
+                replyToSenderNxId = replyToSender,
+                replyToSnippet = replyToSnippet
+            )
+            val plaintextBytes = payload.toByteArray(Charsets.UTF_8)
 
             // 1. Double Ratchet Encryption: Generates 49-byte overhead EncryptedEnvelope
             val envelope = doubleRatchetEngine.ratchetEncrypt(recipientNxId, plaintextBytes)
@@ -47,19 +70,22 @@ class SecureMessageRepositoryImpl(
             val now = System.currentTimeMillis()
             val messageEntity = MessageEntity(
                 packetId = packetId,
-                conversationId = recipientNxId,
+                conversationId = conversationId,
                 senderNxId = myNxId,
                 recipientNxId = recipientNxId,
                 plainTextContent = text,
                 status = "SENT",
                 timestamp = now,
                 isOutgoing = true,
-                transportType = targetRoute.name
+                transportType = targetRoute.name,
+                replyToMessageId = replyToMessageId,
+                replyToSenderNxId = replyToSender,
+                replyToSnippet = replyToSnippet
             )
             messageDao.insertMessage(messageEntity)
 
             val chat = ChatEntity(
-                conversationId = recipientNxId,
+                conversationId = conversationId,
                 participantNxId = recipientNxId,
                 participantName = recipientNxId,
                 lastMessageText = text,
@@ -95,37 +121,48 @@ class SecureMessageRepositoryImpl(
         envelope: EncryptedEnvelope
     ): Result<String> = withContext(Dispatchers.IO) {
         try {
+            val activeNxId = secureStorage.getActiveNxId() ?: "NX-ANONYMOUS"
+            if (senderNxId.isBlank() || senderNxId == activeNxId) {
+                return@withContext Result.failure(IllegalArgumentException("Invalid sender identity for inbound message: sender=$senderNxId local=$activeNxId"))
+            }
+
+            val conversationId = deriveConversationId(activeNxId, senderNxId)
+
             val decryptedBytes = doubleRatchetEngine.ratchetDecrypt(senderNxId, envelope)
                 ?: return@withContext Result.failure(SecurityException("AEAD authentication or ratchet decryption failed"))
 
             val plainText = String(decryptedBytes, Charsets.UTF_8)
+            val parsed = com.nexa.app.core.util.SafeMessageParser.parseIncomingPayload(plainText)
             val packetId = UUID.randomUUID().toString()
             val now = System.currentTimeMillis()
 
             val entity = MessageEntity(
                 packetId = packetId,
-                conversationId = senderNxId,
+                conversationId = conversationId,
                 senderNxId = senderNxId,
-                recipientNxId = secureStorage.getActiveNxId() ?: "NX-ANONYMOUS",
-                plainTextContent = plainText,
+                recipientNxId = activeNxId,
+                plainTextContent = parsed.plainText,
                 status = "DELIVERED",
                 timestamp = now,
                 isOutgoing = false,
-                transportType = "E2EE"
+                transportType = "E2EE",
+                replyToMessageId = parsed.replyToMessageId,
+                replyToSenderNxId = parsed.replyToSenderNxId,
+                replyToSnippet = parsed.replyToSnippet
             )
             messageDao.insertMessage(entity)
 
             val chat = ChatEntity(
-                conversationId = senderNxId,
+                conversationId = conversationId,
                 participantNxId = senderNxId,
                 participantName = senderNxId,
-                lastMessageText = plainText,
+                lastMessageText = parsed.plainText,
                 lastMessageTimestamp = now,
                 unreadCount = 1
             )
             chatDao.upsertChat(chat)
 
-            Result.success(plainText)
+            Result.success(parsed.plainText)
         } catch (e: Exception) {
             Log.e(TAG, "Error decrypting incoming wire envelope", e)
             Result.failure(e)
@@ -148,6 +185,10 @@ class SecureMessageRepositoryImpl(
             }
         }
         sb.toString().ifBlank { "8492-1049-3920-5819-3902-1948" }
+    }
+
+    private fun deriveConversationId(id1: String, id2: String): String {
+        return if (id1 < id2) "${id1}_$id2" else "${id2}_$id1"
     }
 
     private fun computeBlindToken(recipientNxId: String): String {

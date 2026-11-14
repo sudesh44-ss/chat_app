@@ -110,7 +110,7 @@ fun BlockContactDialog(
         containerColor = surfaceColor,
         title = {
             Text(
-                text = if (isCurrentlyBlocked) "Unblock $contactName?" else "Block Contact?",
+                text = if (isCurrentlyBlocked) "Unblock this person?" else "Block this person?",
                 style = MaterialTheme.typography.titleLarge.copy(
                     fontWeight = FontWeight.Bold,
                     fontSize = 20.sp
@@ -121,9 +121,9 @@ fun BlockContactDialog(
         text = {
             Text(
                 text = if (isCurrentlyBlocked) {
-                    "Unblocking will restore calls, messages, and presence indicators with this contact."
+                    "This person will be able to contact you again through NEXA, subject to your other privacy and communication settings."
                 } else {
-                    "You will restrict communication with this contact according to NEXA's blocking policy. Packets from blocked peers are silently discarded at the cryptographic firewall."
+                    "They won't be able to send you messages, call you, or interact with you through NEXA. Your existing chat will not be deleted."
                 },
                 style = MaterialTheme.typography.bodyMedium.copy(fontSize = 14.sp),
                 color = if (isCurrentlyBlocked) primaryTextColor else secondaryTextColor
@@ -142,7 +142,7 @@ fun BlockContactDialog(
                 ),
                 shape = RoundedCornerShape(20.dp)
             ) {
-                Text(if (isCurrentlyBlocked) "Unblock" else "Block Contact", color = Color.White)
+                Text(if (isCurrentlyBlocked) "Unblock" else "Block", color = Color.White)
             }
         },
         dismissButton = {

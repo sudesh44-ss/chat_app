@@ -33,7 +33,9 @@ data class InternalAddressState(
     val isSearchingUser: Boolean = false,
     val blockedUsers: List<com.nexa.app.data.remote.dto.BlockedUserItemDto> = emptyList(),
     val outgoingRequests: List<com.nexa.app.data.remote.dto.ConnectionRequestItemDto> = emptyList(),
-    val incomingRequests: List<com.nexa.app.data.remote.dto.ConnectionRequestItemDto> = emptyList()
+    val incomingRequests: List<com.nexa.app.data.remote.dto.ConnectionRequestItemDto> = emptyList(),
+    val isLoadingIncomingRequests: Boolean = false,
+    val incomingRequestsError: String? = null
 )
 
 /**
@@ -104,7 +106,9 @@ class ContactViewModel(
             isSearchingUser = addr.isSearchingUser,
             blockedUsers = addr.blockedUsers,
             outgoingRequests = addr.outgoingRequests,
-            incomingRequests = addr.incomingRequests
+            incomingRequests = addr.incomingRequests,
+            isLoadingIncomingRequests = addr.isLoadingIncomingRequests,
+            incomingRequestsError = addr.incomingRequestsError
         )
     }.catch { e ->
         android.util.Log.e("ContactViewModel", "Error in uiState combine", e)
@@ -266,9 +270,25 @@ class ContactViewModel(
 
     fun loadIncomingRequests() {
         viewModelScope.launch {
+            _addressState.update {
+                it.copy(isLoadingIncomingRequests = true, incomingRequestsError = null)
+            }
             val result = contactRepository.getIncomingConnectionRequests()
             result.onSuccess { requests ->
-                _addressState.update { it.copy(incomingRequests = requests) }
+                _addressState.update {
+                    it.copy(
+                        incomingRequests = requests,
+                        isLoadingIncomingRequests = false,
+                        incomingRequestsError = null
+                    )
+                }
+            }.onFailure { error ->
+                _addressState.update {
+                    it.copy(
+                        isLoadingIncomingRequests = false,
+                        incomingRequestsError = error.localizedMessage ?: "Failed to load incoming requests"
+                    )
+                }
             }
         }
     }
@@ -284,7 +304,7 @@ class ContactViewModel(
 
     fun acceptConnectionRequest(requestId: String, contact: ContactEntity) {
         viewModelScope.launch {
-            _addressState.update { it.copy(error = null) }
+            _addressState.update { it.copy(incomingRequestsError = null) }
             val result = contactRepository.acceptConnectionRequestById(requestId, contact)
             result.onSuccess {
                 _addressState.update {
@@ -293,7 +313,7 @@ class ContactViewModel(
                 loadIncomingRequests()
             }.onFailure { err ->
                 _addressState.update {
-                    it.copy(error = err.localizedMessage ?: "Failed to accept connection request")
+                    it.copy(incomingRequestsError = err.localizedMessage ?: "Failed to accept connection request")
                 }
             }
         }
@@ -301,12 +321,13 @@ class ContactViewModel(
 
     fun rejectConnectionRequest(requestId: String, nxId: String) {
         viewModelScope.launch {
+            _addressState.update { it.copy(incomingRequestsError = null) }
             val result = contactRepository.rejectConnectionRequestById(requestId, nxId)
             result.onSuccess {
                 loadIncomingRequests()
             }.onFailure { err ->
                 _addressState.update {
-                    it.copy(error = err.localizedMessage ?: "Failed to reject connection request")
+                    it.copy(incomingRequestsError = err.localizedMessage ?: "Failed to reject connection request")
                 }
             }
         }

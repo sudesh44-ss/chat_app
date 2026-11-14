@@ -9,12 +9,22 @@ import com.nexa.app.presentation.chat.components.ContextMenuAction
 import com.nexa.app.presentation.chat.components.EmojiCategory
 import com.nexa.app.presentation.chat.components.NexaReactions
 import com.nexa.app.presentation.chat.components.NexaTransportOption
+import com.nexa.app.presentation.navigation.Screen
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ChatScreenRedesignUnitTests {
+
+    @Test
+    fun testChatRoute_replacesBlankConversationArgumentsWithSafeFallbacks() {
+        val route = Screen.Chat.createRoute("", "", "")
+
+        assertTrue(route.startsWith("chat/"))
+        assertTrue(route.count { it == '/' } >= 3)
+        assertFalse(route.endsWith("//"))
+    }
 
     // ==========================================
     // 1. Message Long-Press Context Menu (Exact 6 Actions)
@@ -90,14 +100,14 @@ class ChatScreenRedesignUnitTests {
     fun testChatOverflowMenu_exactEightItemsInExactOrder() {
         val items = ChatOverflowAction.values()
         assertEquals(8, items.size)
-        assertEquals(ChatOverflowAction.VIEW_CONTACT, items[0])
+        assertEquals(ChatOverflowAction.VIEW_PROFILE, items[0])
         assertEquals(ChatOverflowAction.SEARCH_CHAT, items[1])
-        assertEquals(ChatOverflowAction.MEDIA_LINKS_FILES, items[2])
-        assertEquals(ChatOverflowAction.GHOST_MODE, items[3])
-        assertEquals(ChatOverflowAction.PINNED_MESSAGES, items[4])
-        assertEquals(ChatOverflowAction.CHAT_WALLPAPER, items[5])
-        assertEquals(ChatOverflowAction.CLEAR_CHAT, items[6])
-        assertEquals(ChatOverflowAction.BLOCK_CONTACT, items[7])
+        assertEquals(ChatOverflowAction.DELETE_CHAT, items[2])
+        assertEquals(ChatOverflowAction.CLEAR_CHAT, items[3])
+        assertEquals(ChatOverflowAction.SHARED_FILES, items[4])
+        assertEquals(ChatOverflowAction.PINNED_MESSAGES, items[5])
+        assertEquals(ChatOverflowAction.MUTE_NOTIFICATIONS, items[6])
+        assertEquals(ChatOverflowAction.ARCHIVE_CHAT, items[7])
     }
 
     // ==========================================

@@ -3,8 +3,10 @@ package com.nexa.app.data.repository
 import android.content.Context
 import android.net.Uri
 import android.util.Log
+import com.nexa.app.core.media.AttachmentMediaType
 import com.nexa.app.core.media.CompressionProgress
 import com.nexa.app.core.media.FastStartMuxerHelper
+import com.nexa.app.core.media.MediaCompressionOrchestrator
 import com.nexa.app.core.media.VideoCompressionEngine
 import com.nexa.app.core.media.VideoMetadata
 import com.nexa.app.core.media.VideoMetadataProbe
@@ -161,6 +163,30 @@ class MediaProcessingRepositoryImpl(
                 }
             }
         }.flowOn(Dispatchers.Default)
+    }
+
+    override suspend fun classifyAttachment(uri: Uri, fileName: String, mimeType: String?): AttachmentMediaType {
+        val actualMime = mimeType ?: context.contentResolver.getType(uri)
+        return MediaCompressionOrchestrator.classify(fileName, actualMime)
+    }
+
+    override suspend fun optimizeAttachment(uri: Uri, fileName: String, maxBytes: Long): File? {
+        val mimeType = context.contentResolver.getType(uri)
+        val mediaType = MediaCompressionOrchestrator.classify(fileName, mimeType)
+        return when (mediaType) {
+            AttachmentMediaType.PDF,
+            AttachmentMediaType.DOCUMENT,
+            AttachmentMediaType.ARCHIVE,
+            AttachmentMediaType.UNKNOWN -> {
+                val stagingDir = File(context.cacheDir, "raw_media").apply { if (!exists()) mkdirs() }
+                val target = File(stagingDir, fileName.ifBlank { "attachment_${System.currentTimeMillis()}" })
+                context.contentResolver.openInputStream(uri)?.use { input ->
+                    FileOutputStream(target).use { output -> input.copyTo(output) }
+                }
+                target.takeIf { it.exists() && it.length() > 0L }
+            }
+            else -> MediaCompressionOrchestrator.optimizeAttachment(context, uri, fileName, maxBytes, File(context.cacheDir, "media_optimized").apply { mkdirs() })
+        }
     }
 
     override fun cleanupTranscodeCache(file: File): Boolean {

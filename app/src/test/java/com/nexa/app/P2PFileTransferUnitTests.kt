@@ -4,6 +4,8 @@ import com.nexa.app.core.crypto.ChunkEncryptor
 import com.nexa.app.core.webrtc.FileChunk
 import com.nexa.app.core.webrtc.FileDataChannelBridge
 import com.nexa.app.data.local.entity.TransferEntity
+import com.nexa.app.data.local.entity.TransferSessionEntity
+import com.nexa.app.data.local.entity.TransferSessionStatus
 import com.nexa.app.data.remote.signaling.SignalingMessage
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -201,6 +203,47 @@ class P2PFileTransferUnitTests {
 
         val percent = (entity.chunksCompleted * 100) / entity.totalChunks
         assertEquals(49, percent)
+    }
+
+    @Test
+    fun transferSession_statusMappingsCoverBackgroundRecoveryStates() {
+        assertEquals(TransferSessionStatus.QUEUED, TransferSessionStatus.fromLegacyOrNormalized("PENDING_PEER_ONLINE"))
+        assertEquals(TransferSessionStatus.TRANSFERRING, TransferSessionStatus.fromLegacyOrNormalized("ACTIVE"))
+        assertEquals(TransferSessionStatus.PAUSED, TransferSessionStatus.fromLegacyOrNormalized("PAUSED_OFFLINE"))
+        assertEquals(TransferSessionStatus.CANCELLED, TransferSessionStatus.fromLegacyOrNormalized("ABORTED"))
+
+        assertTrue(TransferSessionStatus.values().contains(TransferSessionStatus.CREATED))
+        assertTrue(TransferSessionStatus.values().contains(TransferSessionStatus.QUEUED))
+        assertTrue(TransferSessionStatus.values().contains(TransferSessionStatus.BACKGROUND_RESTRICTED))
+        assertTrue(TransferSessionStatus.values().contains(TransferSessionStatus.RETRY_PENDING))
+        assertTrue(TransferSessionStatus.values().contains(TransferSessionStatus.RESUMING))
+        assertTrue(TransferSessionStatus.values().contains(TransferSessionStatus.VERIFYING))
+
+        val session = TransferSessionEntity(
+            transferId = 99L,
+            conversationId = "conv-1",
+            fileName = "report.pdf",
+            fileSizeBytes = 42L,
+            localFilePath = "file:///tmp/report.pdf",
+            fileHash = "hash",
+            chunksCompleted = 1,
+            totalChunks = 2,
+            bitfieldBytes = byteArrayOf(0x03),
+            status = TransferSessionStatus.RETRY_PENDING,
+            senderId = "sender",
+            receiverId = "receiver",
+            transferDirection = "OUTBOUND",
+            transportType = "WEBRTC",
+            retryCount = 2,
+            uploadedBytes = 12L,
+            receivedBytes = 18L,
+            lastSuccessfulCheckpoint = 123L
+        )
+
+        assertEquals(TransferSessionStatus.RETRY_PENDING, session.normalizedStatus())
+        assertEquals(2, session.retryCount)
+        assertEquals(12L, session.toCheckpoint().uploadedBytes)
+        assertEquals(18L, session.toCheckpoint().receivedBytes)
     }
 
     @Test

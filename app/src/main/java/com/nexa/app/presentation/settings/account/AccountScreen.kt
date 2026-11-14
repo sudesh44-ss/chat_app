@@ -69,6 +69,8 @@ import com.nexa.app.domain.model.UserProfile
 import com.nexa.app.domain.repository.AuthRepository
 import com.nexa.app.presentation.common.avatar.NexaAvatar
 import com.nexa.app.presentation.common.glass.NexaGlassSurface
+import com.nexa.app.presentation.dashboard.components.BottomNavDestination
+import com.nexa.app.presentation.dashboard.components.NexaFloatingBottomNavigation
 import com.nexa.app.presentation.settings.components.NexaSettingsItem
 import com.nexa.app.presentation.settings.components.SettingsHeader
 import kotlinx.coroutines.launch
@@ -83,6 +85,8 @@ import kotlinx.coroutines.launch
 fun AccountScreen(
     authRepository: AuthRepository,
     onNavigateBack: () -> Unit,
+    onNavigateHome: () -> Unit,
+    onNavigateProfile: () -> Unit,
     onNavigateChangePhone: () -> Unit,
     onNavigateSecurity: () -> Unit,
     onNavigateAccountStatus: () -> Unit,
@@ -197,6 +201,14 @@ fun AccountScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         containerColor = backgroundColor,
+        bottomBar = {
+            NexaFloatingBottomNavigation(
+                currentDestination = BottomNavDestination.PROFILE,
+                showPlusButton = false,
+                onNavigateHome = onNavigateHome,
+                onNavigateProfile = onNavigateProfile
+            )
+        },
         topBar = {
             SettingsHeader(
                 title = "Account",

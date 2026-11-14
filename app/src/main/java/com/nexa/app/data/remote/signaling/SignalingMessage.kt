@@ -12,7 +12,8 @@ sealed class SignalingMessage(val action: String) {
         val fileSizeBytes: Long,
         val fileHash: String,
         val senderNxId: String,
-        val recipientNxId: String
+        val recipientNxId: String,
+        val senderScanStatus: String? = null
     ) : SignalingMessage(ACTION_OFFER) {
         override fun toJson(): JSONObject = JSONObject().apply {
             put("action", action)
@@ -22,6 +23,7 @@ sealed class SignalingMessage(val action: String) {
             put("file_hash", fileHash)
             put("sender_nx_id", senderNxId)
             put("recipient_nx_id", recipientNxId)
+            senderScanStatus?.let { put("sender_scan_status", it) }
         }
     }
 
@@ -120,7 +122,8 @@ sealed class SignalingMessage(val action: String) {
                         fileSizeBytes = json.getLong("file_size_bytes"),
                         fileHash = json.optString("file_hash", ""),
                         senderNxId = json.getString("sender_nx_id"),
-                        recipientNxId = json.getString("recipient_nx_id")
+                        recipientNxId = json.getString("recipient_nx_id"),
+                        senderScanStatus = json.optString("sender_scan_status").takeIf { it.isNotBlank() }
                     )
                     ACTION_ACCEPT -> AcceptTransfer(
                         transferId = json.getLong("transfer_id"),

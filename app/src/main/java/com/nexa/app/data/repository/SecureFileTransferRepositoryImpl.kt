@@ -5,6 +5,13 @@ import android.net.Uri
 import android.util.Log
 import com.nexa.app.core.security.MagicByteDetector
 import com.nexa.app.core.security.MalwareBloomFilter
+import com.nexa.app.core.security.ArchiveScanVerdict
+import com.nexa.app.core.security.ArchiveScanner
+import com.nexa.app.core.security.FileClassification
+import com.nexa.app.core.security.FileReleaseClassifier
+import com.nexa.app.core.security.FileReleasePolicy
+import com.nexa.app.core.security.ReleaseAuthorization
+import com.nexa.app.core.security.FileSecurityManager
 import com.nexa.app.core.security.SecurityVerdict
 import com.nexa.app.core.security.SecureStorage
 import com.nexa.app.core.security.YaraScannerBridge
@@ -105,6 +112,11 @@ class SecureFileTransferRepositoryImpl(
     override suspend fun startOnDemandPull(fileHash: String): Result<Unit> = withContext(Dispatchers.IO) {
         val metadata = swarmCacheDao.getByHash(fileHash)
             ?: return@withContext Result.failure(IllegalArgumentException("Metadata not found for hash $fileHash"))
+        if (!fileHash.matches(Regex("(?i)[0-9a-f]{64}")) ||
+            metadata.fileSizeBytes !in 1..FileSecurityManager.MAX_FILE_SIZE_BYTES
+        ) {
+            return@withContext Result.failure(SecurityException("Invalid file transfer metadata"))
+        }
 
         val myNxId = secureStorage.getActiveNxId() ?: "NX-ANONYMOUS"
 
@@ -126,7 +138,7 @@ class SecureFileTransferRepositoryImpl(
         val metadata = swarmCacheDao.getByHash(fileHash) ?: return@withContext SecurityVerdict.DANGEROUS_EXECUTABLE
         val tempFile = quarantineSandbox.getTempFile(fileHash)
 
-        if (!tempFile.exists()) {
+        if (!tempFile.isFile || tempFile.length() != metadata.fileSizeBytes) {
             return@withContext SecurityVerdict.DANGEROUS_EXECUTABLE
         }
 
@@ -140,43 +152,94 @@ class SecureFileTransferRepositoryImpl(
             return@withContext SecurityVerdict.SPOOFED_EXTENSION
         }
 
-        // 2. Magic Byte Re-inspection
-        val extension = metadata.fileName.substringAfterLast('.', "")
-        val fis = FileInputStream(tempFile)
-        val magicVerdict = MagicByteDetector.inspect(fis, extension)
-        fis.close()
-
-        if (magicVerdict != SecurityVerdict.CLEAN) {
-            Log.w(TAG, "Gate 2 Failed: Magic bytes flagged as $magicVerdict")
-            swarmCacheDao.updateStatus(fileHash, FileStatus.QUARANTINED_THREAT)
-            return@withContext magicVerdict
+        val classification = FileReleaseClassifier.classify(tempFile, metadata.fileName)
+        val extension = metadata.fileName.substringAfterLast('.', "").lowercase()
+        when (classification) {
+            FileClassification.APK -> {
+                if (extension != "apk" || ArchiveScanner.scanAndroidPackage(tempFile) is ArchiveScanVerdict.Blocked) {
+                    swarmCacheDao.updateStatus(fileHash, FileStatus.QUARANTINED_THREAT, tempFile.absolutePath)
+                    return@withContext SecurityVerdict.DANGEROUS_EXECUTABLE
+                }
+            }
+            FileClassification.EXECUTABLE -> {
+                yaraScannerBridge.scanFile(tempFile)
+                swarmCacheDao.updateStatus(fileHash, FileStatus.QUARANTINED_THREAT, tempFile.absolutePath)
+                return@withContext SecurityVerdict.DANGEROUS_EXECUTABLE
+            }
+            FileClassification.UNSUPPORTED -> {
+                swarmCacheDao.updateStatus(fileHash, FileStatus.SCAN_INCONCLUSIVE, tempFile.absolutePath)
+                return@withContext SecurityVerdict.SPOOFED_EXTENSION
+            }
+            FileClassification.NORMAL -> {
+                val magicVerdict = FileInputStream(tempFile).use { MagicByteDetector.inspect(it, extension) }
+                if (magicVerdict != SecurityVerdict.CLEAN) {
+                    Log.w(TAG, "Gate 2 rejected file type or signature")
+                    swarmCacheDao.updateStatus(fileHash, FileStatus.QUARANTINED_THREAT, tempFile.absolutePath)
+                    return@withContext magicVerdict
+                }
+                if (extension == "zip" && ArchiveScanner.scanArchive(tempFile) is ArchiveScanVerdict.Blocked) {
+                    swarmCacheDao.updateStatus(fileHash, FileStatus.QUARANTINED_THREAT, tempFile.absolutePath)
+                    return@withContext SecurityVerdict.DANGEROUS_EXECUTABLE
+                }
+            }
         }
 
         // 3. LibYARA Heuristic Pattern Scan
         val yaraResult = yaraScannerBridge.scanFile(tempFile)
         if (!yaraResult.isClean) {
             Log.w(TAG, "Gate 2 Failed: YARA rule matched: ${yaraResult.ruleName}")
-            swarmCacheDao.updateStatus(fileHash, FileStatus.QUARANTINED_THREAT)
+            swarmCacheDao.updateStatus(fileHash, FileStatus.QUARANTINED_THREAT, tempFile.absolutePath)
             return@withContext SecurityVerdict.DANGEROUS_EXECUTABLE
         }
 
-        // 4. Verified Safe! Promote from Sandbox to Safe Vault
-        enforceLruCacheLimits()
-        val safeFile = quarantineSandbox.promoteToSafeStorage(fileHash, metadata.fileName)
-        swarmCacheDao.updateStatus(fileHash, FileStatus.VERIFIED_SAFE, safeFile.absolutePath)
-
-        // 5. Node registers as Active Seeder for Peers
-        val myNxId = secureStorage.getActiveNxId() ?: "NX-ANONYMOUS"
-        swarmCoordinator.advertiseSeeding(fileHash, myNxId, metadata.totalChunks)
-
-        Log.i(TAG, "Gate 2 Passed! Promoted to safe vault: ${safeFile.absolutePath}")
+        swarmCacheDao.updateStatus(fileHash, FileStatus.SCAN_PASSED, tempFile.absolutePath)
+        Log.i(TAG, "Receiver scan passed for file hash ${fileHash.take(12)}; file remains quarantined pending release")
         SecurityVerdict.CLEAN
     }
 
-    override suspend fun forceOpenQuarantined(fileHash: String): File? = withContext(Dispatchers.IO) {
+    override suspend fun releaseQuarantined(
+        fileHash: String,
+        authorization: ReleaseAuthorization
+    ): File? = withContext(Dispatchers.IO) {
         val metadata = swarmCacheDao.getByHash(fileHash) ?: return@withContext null
+        val tempFile = quarantineSandbox.getTempFile(fileHash)
+        if (!tempFile.isFile) return@withContext null
+
+        val classification = FileReleaseClassifier.classify(tempFile, metadata.fileName)
+        val scanStatus = when (metadata.status) {
+            FileStatus.SCAN_PASSED -> "SCAN_PASSED"
+            FileStatus.QUARANTINED_THREAT -> "REJECTED_MALICIOUS"
+            else -> return@withContext null
+        }
+        val scanResult = if (scanStatus == "SCAN_PASSED") "SAFE" else "MALICIOUS"
+        if (!FileReleasePolicy.isAuthorized(classification, scanStatus, scanResult, authorization)) {
+            return@withContext null
+        }
+        if (computeDiskFileHash(tempFile).equals(fileHash, ignoreCase = true).not()) {
+            swarmCacheDao.updateStatus(fileHash, FileStatus.SCAN_INCONCLUSIVE, tempFile.absolutePath)
+            return@withContext null
+        }
+
+        enforceLruCacheLimits()
         val safeFile = quarantineSandbox.promoteToSafeStorage(fileHash, metadata.fileName)
-        swarmCacheDao.updateStatus(fileHash, FileStatus.VERIFIED_SAFE, safeFile.absolutePath)
+        val releasedStatus = if (scanStatus == "SCAN_PASSED") {
+            FileStatus.VERIFIED_SAFE
+        } else {
+            FileStatus.OVERRIDDEN_RELEASED
+        }
+        if (swarmCacheDao.updateStatus(fileHash, releasedStatus, safeFile.absolutePath) != 1) {
+            safeFile.delete()
+            return@withContext null
+        }
+        try {
+            quarantineSandbox.shredQuarantine(fileHash)
+        } catch (e: Exception) {
+            Log.w(TAG, "Released file but retained a private quarantine copy")
+        }
+        if (releasedStatus == FileStatus.VERIFIED_SAFE) {
+            val myNxId = secureStorage.getActiveNxId() ?: "NX-ANONYMOUS"
+            swarmCoordinator.advertiseSeeding(fileHash, myNxId, metadata.totalChunks)
+        }
         safeFile
     }
 

@@ -24,6 +24,9 @@ interface ContactDao {
     @Query("UPDATE contacts SET status = :newStatus WHERE nxId = :nxId")
     suspend fun updateStatus(nxId: String, newStatus: ContactStatus): Int
 
+    @Query("UPDATE contacts SET isStatusMuted = :isMuted WHERE nxId = :nxId")
+    suspend fun updateStatusMuted(nxId: String, isMuted: Boolean): Int
+
     @Query("DELETE FROM contacts WHERE nxId = :nxId")
     suspend fun deleteContact(nxId: String): Int
 

@@ -40,6 +40,17 @@ import java.security.MessageDigest
 import com.nexa.app.core.network.NetworkChangeEvent
 import com.nexa.app.core.network.NetworkMonitor
 import com.nexa.app.core.network.NetworkTypeState
+import com.nexa.app.core.security.ChunkIntegrityVerifier
+import com.nexa.app.core.security.ChunkVerificationResult
+import com.nexa.app.core.security.FileClassification
+import com.nexa.app.core.security.FileReleasePolicy
+import com.nexa.app.core.security.FileReleaseClassifier
+import com.nexa.app.core.security.FileSecurityManager
+import com.nexa.app.core.security.ReleaseAuthorization
+import com.nexa.app.core.security.SecurityScanResult
+import com.nexa.app.core.security.ThreatType
+import com.nexa.app.core.security.TransferCompletionResult
+import com.nexa.app.core.util.FileShredder
 import com.nexa.app.data.remote.media.R2MediaFallbackService
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -52,7 +63,9 @@ class P2PTransferRepositoryImpl(
     private val webRtcClient: WebRtcClient,
     private val secureStorage: SecureStorage,
     private val networkMonitor: NetworkMonitor? = null,
-    private val r2FallbackService: R2MediaFallbackService? = null
+    private val r2FallbackService: R2MediaFallbackService? = null,
+    private val fileSecurityManager: FileSecurityManager = FileSecurityManager(context),
+    private val chunkIntegrityVerifier: ChunkIntegrityVerifier = ChunkIntegrityVerifier()
 ) : P2PTransferRepository {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -70,6 +83,7 @@ class P2PTransferRepositoryImpl(
     init {
         observeSignalingMessages()
         observeNetworkChanges()
+        recoverInterruptedQuarantineScans()
     }
 
     override fun observeTransfer(transferId: Long): Flow<TransferEntity?> {
@@ -96,8 +110,46 @@ class P2PTransferRepositoryImpl(
             val transferId = System.currentTimeMillis()
             val totalChunks = ((fileSizeBytes + FileChunk.DEFAULT_CHUNK_SIZE - 1) / FileChunk.DEFAULT_CHUNK_SIZE).toInt()
 
-            // 1. Calculate file integrity hash
-            val fileHash = computeFastHash(fileUri)
+            // 1. GATE 1: SENDER PRE-DISPATCH LOCAL SECURITY SCAN
+            val scanVerdict = fileSecurityManager.scanOutbound(
+                uri = fileUri,
+                declaredName = fileName,
+                fileSizeBytes = fileSizeBytes
+            )
+
+            val fileHash = when (scanVerdict) {
+                is SecurityScanResult.Safe -> scanVerdict.hash
+                is SecurityScanResult.Rejected -> {
+                    Log.w(TAG, "Gate 1 rejected file '$fileName': ${scanVerdict.reason} (threat=${scanVerdict.threatType})")
+                    val entity = TransferEntity(
+                        transferId = transferId,
+                        conversationId = conversationId,
+                        fileName = fileName,
+                        fileSizeBytes = fileSizeBytes,
+                        localUri = fileUri.toString(),
+                        fileHash = "BLOCKED_${scanVerdict.threatType}",
+                        chunksCompleted = 0,
+                        totalChunks = 0,
+                        status = "REJECTED_SENDER",
+                        isIncoming = false
+                    )
+                    transferDao.insertTransfer(entity)
+                    return@withContext Result.failure(
+                        SecurityException("File transfer blocked by security policy: ${scanVerdict.reason}")
+                    )
+                }
+                is SecurityScanResult.Corrupted -> {
+                    Log.w(TAG, "Gate 1 corrupted source file '$fileName': ${scanVerdict.message}")
+                    return@withContext Result.failure(
+                        IllegalArgumentException("Cannot send corrupted file: ${scanVerdict.message}")
+                    )
+                }
+                is SecurityScanResult.Inconclusive -> {
+                    return@withContext Result.failure(
+                        IllegalStateException("Pre-dispatch scan inconclusive: ${scanVerdict.reason}")
+                    )
+                }
+            }
 
             // 2. Persist in local SQLCipher DB
             val entity = TransferEntity(
@@ -110,7 +162,11 @@ class P2PTransferRepositoryImpl(
                 chunksCompleted = 0,
                 totalChunks = totalChunks,
                 status = "PENDING",
-                isIncoming = false
+                isIncoming = false,
+                securityState = "WAITING_FOR_RECEIVER",
+                scanResult = "SAFE",
+                senderScanReported = "SAFE",
+                isExplicitlyAccepted = true
             )
             transferDao.insertTransfer(entity)
 
@@ -127,7 +183,8 @@ class P2PTransferRepositoryImpl(
                 fileSizeBytes = fileSizeBytes,
                 fileHash = fileHash,
                 senderNxId = myNxId,
-                recipientNxId = recipientNxId
+                recipientNxId = recipientNxId,
+                senderScanStatus = "PASSED"
             )
             signalingClient.sendMessage(offer)
 
@@ -147,11 +204,22 @@ class P2PTransferRepositoryImpl(
             ?: return@withContext Result.failure(IllegalArgumentException("Transfer not found"))
 
         val myNxId = getMyNxId()
+        chunkIntegrityVerifier.registerSession(
+            transferId = transferId,
+            senderNxId = transfer.conversationId,
+            recipientNxId = myNxId,
+            expectedTotalChunks = transfer.totalChunks,
+            expectedTotalBytes = transfer.fileSizeBytes,
+            expectedFileHash = transfer.fileHash
+        )
+
+        transferDao.updateSecurityState(transferId, "TRANSFERRING")
         transferDao.updateStatus(transferId, "CONNECTING")
 
         // 1. Initialize WebRTC PeerConnection for Receiver
         val pc = setupReceiverPeerConnection(transferId, transfer)
         if (pc == null) {
+            transferDao.updateSecurityState(transferId, "FAILED")
             transferDao.updateStatus(transferId, "FAILED")
             return@withContext Result.failure(IllegalStateException("Failed to create PeerConnection"))
         }
@@ -174,7 +242,8 @@ class P2PTransferRepositoryImpl(
     override suspend fun declineTransfer(transferId: Long): Result<Unit> = withContext(Dispatchers.IO) {
         val transfer = transferDao.getTransferById(transferId) ?: return@withContext Result.success(Unit)
         val myNxId = getMyNxId()
-        transferDao.updateStatus(transferId, "CANCELLED")
+        transferDao.updateSecurityState(transferId, "DECLINED")
+        transferDao.updateStatus(transferId, "DECLINED")
 
         val declineMsg = SignalingMessage.DeclineTransfer(
             transferId = transferId,
@@ -183,6 +252,7 @@ class P2PTransferRepositoryImpl(
         )
         signalingClient.sendMessage(declineMsg)
         cleanupTransfer(transferId)
+        shredTransferQuarantine(transferId)
         Result.success(Unit)
     }
 
@@ -208,8 +278,17 @@ class P2PTransferRepositoryImpl(
     }
 
     override suspend fun cancelTransfer(transferId: Long): Result<Unit> = withContext(Dispatchers.IO) {
+        val transfer = transferDao.getTransferById(transferId)
         transferDao.updateStatus(transferId, "CANCELLED")
         cleanupTransfer(transferId)
+        if (transfer?.isIncoming == true) {
+            val quarantineFile = File(incomingQuarantineDirectory(), "quarantine_${transferId}.tmp")
+            if (quarantineFile.exists() && !FileShredder.shred(quarantineFile)) {
+                return@withContext Result.failure(IllegalStateException("Unable to purge cancelled transfer quarantine"))
+            }
+            transferDao.updateQuarantinePath(transferId, null)
+            transferDao.updateScanResult(transferId, "CANCELLED", "CANCELLED", "Receiver cancelled the transfer")
+        }
         Result.success(Unit)
     }
 
@@ -233,6 +312,17 @@ class P2PTransferRepositoryImpl(
     }
 
     private suspend fun handleIncomingOffer(offer: SignalingMessage.OfferTransfer) {
+        if (transferDao.getTransferById(offer.transferId) != null) {
+            Log.w(TAG, "Rejected duplicate incoming transfer id ${offer.transferId}")
+            return
+        }
+        if (offer.transferId <= 0L ||
+            offer.fileSizeBytes !in 1..FileSecurityManager.MAX_FILE_SIZE_BYTES ||
+            !offer.fileHash.matches(Regex("(?i)[0-9a-f]{64}"))
+        ) {
+            Log.w(TAG, "Rejected incoming transfer offer with invalid metadata")
+            return
+        }
         val totalChunks = ((offer.fileSizeBytes + FileChunk.DEFAULT_CHUNK_SIZE - 1) / FileChunk.DEFAULT_CHUNK_SIZE).toInt()
         val entity = TransferEntity(
             transferId = offer.transferId,
@@ -244,7 +334,14 @@ class P2PTransferRepositoryImpl(
             chunksCompleted = 0,
             totalChunks = totalChunks,
             status = "OFFERED",
-            isIncoming = true
+            isIncoming = true,
+            securityState = "OFFERED",
+            scanResult = "SCANNING",
+            senderScanReported = offer.senderScanStatus
+                ?.uppercase()
+                ?.takeIf { it in setOf("PASSED", "FAILED", "UNKNOWN") }
+                ?: "UNKNOWN",
+            isExplicitlyAccepted = false
         )
         transferDao.insertTransfer(entity)
         _incomingOffers.emit(offer)
@@ -497,8 +594,13 @@ class P2PTransferRepositoryImpl(
     }
 
     private fun setupReceiverPeerConnection(transferId: Long, transfer: TransferEntity): PeerConnection? {
-        val tmpFile = File(context.cacheDir, "transfer_${transferId}.tmp")
+        require(fileSecurityManager.validateFileSize(transfer.fileSizeBytes))
+        val quarantineDir = incomingQuarantineDirectory().apply {
+            check(exists() || mkdirs()) { "Unable to create private quarantine storage" }
+        }
+        val tmpFile = File(quarantineDir, "quarantine_${transferId}.tmp")
         val randomAccessFile = RandomAccessFile(tmpFile, "rw")
+        randomAccessFile.setLength(transfer.fileSizeBytes)
         activeRandomAccessFiles[transferId] = randomAccessFile
 
         val pc = webRtcClient.buildPeerConnection(object : SimplePeerConnectionObserver() {
@@ -573,6 +675,43 @@ class P2PTransferRepositoryImpl(
                         scope.launch {
                             try {
                                 val chunk = FileChunk.deserialize(buffer.data)
+
+                                // CHECKPOINT 2: TRANSFER-TIME CHUNK INTEGRITY VERIFICATION
+                                val verifyResult = chunkIntegrityVerifier.verifyChunk(
+                                    chunk = chunk,
+                                    senderNxId = transfer.conversationId,
+                                    recipientNxId = getMyNxId()
+                                )
+
+                                when (verifyResult) {
+                                    is ChunkVerificationResult.DuplicateOrReplayed -> {
+                                        Log.w(TAG, "Transfer #$transferId duplicate/replayed chunk #${chunk.chunkIndex} received. Dropping.")
+                                        return@launch
+                                    }
+                                    is ChunkVerificationResult.Rejected -> {
+                                        Log.e(TAG, "Transfer #$transferId Checkpoint 2 rejection on chunk #${chunk.chunkIndex}: ${verifyResult.reason} (${verifyResult.threatCategory})")
+                                        try {
+                                            activeRandomAccessFiles.remove(transferId)?.close()
+                                        } catch (e: Exception) {
+                                            Log.w(TAG, "Error closing RAF", e)
+                                        }
+                                        FileShredder.shred(tmpFile)
+                                        chunkIntegrityVerifier.unregisterSession(transferId)
+                                        transferDao.updateScanResult(
+                                            transferId = transferId,
+                                            securityState = "REJECTED_TRANSFER",
+                                            scanResult = "MALICIOUS",
+                                            threatDetails = verifyResult.reason
+                                        )
+                                        transferDao.updateStatus(transferId, "REJECTED_CORRUPTED")
+                                        cleanupTransfer(transferId)
+                                        return@launch
+                                    }
+                                    is ChunkVerificationResult.Valid -> {
+                                        // Proceed to write chunk to disk
+                                    }
+                                }
+
                                 val offset = chunk.chunkIndex.toLong() * FileChunk.DEFAULT_CHUNK_SIZE
                                 randomAccessFile.seek(offset)
                                 randomAccessFile.write(chunk.data)
@@ -590,7 +729,43 @@ class P2PTransferRepositoryImpl(
                                     } catch (e: Exception) {
                                         Log.w(TAG, "Error closing RAF on EOF", e)
                                     }
-                                    finalizeIncomingFile(transferId, transfer, tmpFile)
+
+                                    // CHECKPOINT 2: Finalize session and verify completeness
+                                    val completionResult = chunkIntegrityVerifier.finalizeSession(transferId)
+                                    chunkIntegrityVerifier.unregisterSession(transferId)
+
+                                    when (completionResult) {
+                                        is TransferCompletionResult.Incomplete -> {
+                                            Log.e(TAG, "Transfer #$transferId EOF reached but missing ${completionResult.missingChunks.size} chunks")
+                                            FileShredder.shred(tmpFile)
+                                            transferDao.updateScanResult(
+                                                transferId = transferId,
+                                                securityState = "FAILED",
+                                                scanResult = "CORRUPTED",
+                                                threatDetails = "Incomplete transfer: missing ${completionResult.missingChunks.size} chunks"
+                                            )
+                                            transferDao.updateStatus(transferId, "REJECTED_CORRUPTED")
+                                            cleanupTransfer(transferId)
+                                            return@launch
+                                        }
+                                        is TransferCompletionResult.Corrupted -> {
+                                            Log.e(TAG, "Transfer #$transferId verification corrupted: ${completionResult.reason}")
+                                            FileShredder.shred(tmpFile)
+                                            transferDao.updateScanResult(
+                                                transferId = transferId,
+                                                securityState = "FAILED",
+                                                scanResult = "CORRUPTED",
+                                                threatDetails = completionResult.reason
+                                            )
+                                            transferDao.updateStatus(transferId, "REJECTED_CORRUPTED")
+                                            cleanupTransfer(transferId)
+                                            return@launch
+                                        }
+                                        is TransferCompletionResult.Verified -> {
+                                            Log.i(TAG, "Transfer #$transferId Checkpoint 2 passed (${completionResult.totalBytes} bytes, ${completionResult.totalChunks} chunks). Proceeding to Checkpoint 3...")
+                                            finalizeIncomingFile(transferId, transfer, tmpFile)
+                                        }
+                                    }
                                 }
                             } catch (e: Exception) {
                                 Log.e(TAG, "Error writing incoming file chunk", e)
@@ -655,25 +830,249 @@ class P2PTransferRepositoryImpl(
         tmpFile: File
     ) = withContext(Dispatchers.IO) {
         try {
-            transferDao.updateStatus(transferId, "VERIFYING")
+            transferDao.markScanning(transferId)
+            if (tmpFile.length() != transfer.fileSizeBytes) {
+                FileShredder.shred(tmpFile)
+                transferDao.updateScanResult(
+                    transferId,
+                    "FAILED",
+                    "CORRUPTED",
+                    "Received file size does not match the offered size"
+                )
+                transferDao.updateStatus(transferId, "REJECTED_CORRUPTED")
+                P2PTransferService.stop(context, transferId)
+                return@withContext
+            }
+            var classification = FileReleaseClassifier.classify(tmpFile, transfer.fileName)
+            transferDao.updateFileClassification(transferId, classification.name)
 
-            // Atomic move to app downloads directory
-            val downloadsDir = File(context.getExternalFilesDir(null), "NEXA_Transfers").apply { mkdirs() }
-            val destinationFile = File(downloadsDir, transfer.fileName)
-            tmpFile.copyTo(destinationFile, overwrite = true)
-            tmpFile.delete()
+            // GATE 2: INBOUND QUARANTINE SCAN & INTEGRITY VERIFICATION
+            val verdict = fileSecurityManager.scanInboundQuarantine(
+                tempFile = tmpFile,
+                expectedHash = transfer.fileHash,
+                declaredName = transfer.fileName
+            )
 
-            transferDao.updateStatus(transferId, "COMPLETED")
-            P2PTransferService.stop(context, transferId)
-            Log.i(TAG, "Incoming file #$transferId successfully verified and saved to: ${destinationFile.absolutePath}")
+            when (verdict) {
+                is SecurityScanResult.Safe -> {
+                    // Retain in quarantine awaiting explicit receiver acceptance (Save to NEXA)
+                    transferDao.updateQuarantinePath(transferId, tmpFile.absolutePath)
+                    transferDao.updateScanResult(
+                        transferId = transferId,
+                        securityState = "WAITING_FOR_USER_ACCEPTANCE",
+                        scanResult = "SAFE",
+                        threatDetails = null
+                    )
+                    transferDao.updateFileClassification(transferId, classification.name)
+                    transferDao.updateStatus(transferId, "SCAN_PASSED")
+                    P2PTransferService.stop(context, transferId)
+                    Log.i(TAG, "Incoming file #$transferId passed the receiver scan; awaiting its type-specific release gate.")
+                }
+                is SecurityScanResult.Corrupted -> {
+                    Log.e(TAG, "Quarantined file #$transferId integrity verification failed: ${verdict.message}")
+                    FileShredder.shred(tmpFile)
+                    transferDao.updateScanResult(
+                        transferId = transferId,
+                        securityState = "FAILED",
+                        scanResult = "MALICIOUS",
+                        threatDetails = verdict.message
+                    )
+                    transferDao.updateStatus(transferId, "REJECTED_CORRUPTED")
+                    P2PTransferService.stop(context, transferId)
+                }
+                is SecurityScanResult.Rejected -> {
+                    Log.w(TAG, "Quarantined file #$transferId security scan rejected: ${verdict.reason}")
+                    if (verdict.threatType == ThreatType.ARCHIVE_EXECUTABLE_CONTENT) {
+                        classification = FileClassification.EXECUTABLE
+                    }
+                    transferDao.updateFileClassification(transferId, classification.name)
+                    transferDao.updateQuarantinePath(transferId, tmpFile.absolutePath)
+                    transferDao.updateScanResult(
+                        transferId = transferId,
+                        securityState = "SCAN_REJECTED",
+                        scanResult = "MALICIOUS",
+                        threatDetails = verdict.reason
+                    )
+                    transferDao.updateStatus(transferId, "REJECTED_MALICIOUS")
+                    P2PTransferService.stop(context, transferId)
+                }
+                is SecurityScanResult.Inconclusive -> {
+                    Log.w(TAG, "Quarantined file #$transferId scan inconclusive: ${verdict.reason}")
+                    transferDao.updateQuarantinePath(transferId, tmpFile.absolutePath)
+                    transferDao.updateScanResult(
+                        transferId,
+                        "RESTRICTED",
+                        "INCONCLUSIVE",
+                        threatDetails = verdict.reason
+                    )
+                    transferDao.updateStatus(transferId, "SCAN_INCONCLUSIVE")
+                    P2PTransferService.stop(context, transferId)
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Error finalizing incoming file", e)
-            transferDao.updateStatus(transferId, "FAILED")
+            if (tmpFile.exists()) transferDao.updateQuarantinePath(transferId, tmpFile.absolutePath)
+            transferDao.updateScanResult(
+                transferId,
+                "RESTRICTED",
+                "INCONCLUSIVE",
+                e.localizedMessage ?: "Receiver scan failed"
+            )
+            transferDao.updateStatus(transferId, "SCAN_ERROR")
             P2PTransferService.stop(context, transferId)
         }
     }
 
+    override suspend fun releaseTransfer(
+        transferId: Long,
+        authorization: ReleaseAuthorization
+    ): Result<File> = withContext(Dispatchers.IO) {
+        val transfer = transferDao.getTransferById(transferId)
+            ?: return@withContext Result.failure(IllegalArgumentException("Transfer #$transferId not found"))
+
+        if (!transfer.isIncoming) {
+            return@withContext Result.failure(SecurityException("Only received files can be released from quarantine"))
+        }
+
+        val quarantineDir = incomingQuarantineDirectory()
+        val tmpFile = File(quarantineDir, "quarantine_${transferId}.tmp")
+        if (!tmpFile.exists() || !tmpFile.isFile || tmpFile.length() != transfer.fileSizeBytes) {
+            return@withContext Result.failure(IllegalStateException("Quarantined payload missing or incomplete for transfer #$transferId"))
+        }
+
+        try {
+            val classification = FileReleaseClassifier.classify(tmpFile, transfer.fileName)
+            if (classification.name != transfer.fileClassification) {
+                return@withContext Result.failure(SecurityException("File type changed after the receiver scan"))
+            }
+
+            if (!FileReleasePolicy.isAuthorized(
+                    classification,
+                    transfer.status,
+                    transfer.scanResult,
+                    authorization
+                )
+            ) {
+                return@withContext Result.failure(
+                    SecurityException("The scan result, file type, or confirmation policy does not permit release")
+                )
+            }
+
+            val actualHash = fileSecurityManager.computeSha256(tmpFile)
+            if (!actualHash.equals(transfer.fileHash, ignoreCase = true)) {
+                FileShredder.shred(tmpFile)
+                transferDao.updateScanResult(transferId, "SCAN_INVALIDATED", "INCONCLUSIVE", "File changed after scanning")
+                transferDao.updateStatus(transferId, "REJECTED_CORRUPTED")
+                return@withContext Result.failure(SecurityException("File changed after scanning; release was blocked"))
+            }
+
+            val safeVaultDir = File(context.filesDir, "vault/safe")
+            check(safeVaultDir.exists() || safeVaultDir.mkdirs()) { "Unable to create the safe vault" }
+            val safeName = transfer.fileName
+                .substringAfterLast('/')
+                .substringAfterLast('\\')
+                .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+                .trim('.')
+                .take(100)
+                .ifBlank { "received-file" }
+            val safeDestination = File(safeVaultDir, "${transferId}_${safeName}")
+            check(safeDestination.canonicalFile.parentFile == safeVaultDir.canonicalFile) {
+                "Release destination escaped the safe vault"
+            }
+            if (safeDestination.exists()) {
+                return@withContext Result.failure(IllegalStateException("A released file already exists for this transfer"))
+            }
+
+            val stagingFile = File.createTempFile("release_${transferId}_", ".tmp", safeVaultDir)
+            try {
+                FileInputStream(tmpFile).use { input ->
+                    java.io.FileOutputStream(stagingFile).use { output ->
+                        input.copyTo(output)
+                        output.fd.sync()
+                    }
+                }
+                if (!fileSecurityManager.computeSha256(stagingFile).equals(actualHash, ignoreCase = true)) {
+                    throw SecurityException("File content changed while being released")
+                }
+                check(stagingFile.renameTo(safeDestination)) { "Unable to atomically move file into the safe vault" }
+            } finally {
+                if (stagingFile.exists()) stagingFile.delete()
+            }
+
+            if (transferDao.markReleased(transferId, safeDestination.absolutePath) != 1) {
+                safeDestination.delete()
+                return@withContext Result.failure(IllegalStateException("Transfer state changed before release could be recorded"))
+            }
+            if (!FileShredder.shred(tmpFile)) {
+                Log.w(TAG, "Released transfer #$transferId but could not fully remove its quarantine copy")
+            }
+            Log.i(TAG, "Transfer #$transferId was explicitly released to the private safe vault")
+            Result.success(safeDestination)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to release transfer #$transferId", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun shredTransferQuarantine(transferId: Long): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            cleanupTransfer(transferId)
+            val quarantineDir = incomingQuarantineDirectory()
+            val tmpFile = File(quarantineDir, "quarantine_${transferId}.tmp")
+            if (tmpFile.exists() && !FileShredder.shred(tmpFile)) {
+                return@withContext Result.failure(IllegalStateException("Unable to purge quarantined file #$transferId"))
+            }
+            transferDao.deleteTransfer(transferId)
+            Log.i(TAG, "Shredded quarantined payload and deleted transfer #$transferId")
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error shredding quarantine for transfer #$transferId", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun getVerifiedSafeFile(transferId: Long): File? = withContext(Dispatchers.IO) {
+        val transfer = transferDao.getTransferById(transferId) ?: return@withContext null
+        if (transfer.isIncoming &&
+            (transfer.status != "COMPLETED" ||
+                transfer.securityState != "RELEASED" ||
+                !transfer.isExplicitlyAccepted)
+        ) {
+            Log.w(TAG, "Attempted to access unreleased transfer #$transferId")
+            return@withContext null
+        }
+        val file = File(transfer.localUri)
+        val safeVault = File(context.filesDir, "vault/safe").canonicalFile
+        if (file.exists() && file.isFile && file.canonicalFile.parentFile == safeVault) file else null
+    }
+
+    private fun incomingQuarantineDirectory(): File =
+        File(context.filesDir, "security/incoming_quarantine")
+
+    private fun recoverInterruptedQuarantineScans() {
+        scope.launch {
+            val interrupted = transferDao.getTransfersBySecurityState("SCANNING")
+            for (transfer in interrupted) {
+                if (!transfer.isIncoming || transfer.status != "VERIFYING") continue
+                val file = File(incomingQuarantineDirectory(), "quarantine_${transfer.transferId}.tmp")
+                if (file.isFile && file.length() == transfer.fileSizeBytes) {
+                    Log.i(TAG, "Resuming receiver scan for interrupted transfer #${transfer.transferId}")
+                    finalizeIncomingFile(transfer.transferId, transfer, file)
+                } else {
+                    transferDao.updateScanResult(
+                        transfer.transferId,
+                        "RESTRICTED",
+                        "INCONCLUSIVE",
+                        "Incomplete quarantine file after interrupted scan"
+                    )
+                    transferDao.updateStatus(transfer.transferId, "SCAN_ERROR")
+                }
+            }
+        }
+    }
+
     private fun cleanupTransfer(transferId: Long) {
+        chunkIntegrityVerifier.unregisterSession(transferId)
         val session = activeSessions.remove(transferId)
         if (session != null) {
             session.close()

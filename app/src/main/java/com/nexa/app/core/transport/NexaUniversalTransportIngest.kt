@@ -92,6 +92,12 @@ class NexaUniversalTransportIngest(
             return@withContext false
         }
 
+        val myNxId = getMyNxId()
+        if (!validateRoutingContext(packet, myNxId)) {
+            Log.w(TAG, "[$medium] Dropped packet ${packet.packetId}: route validation failed for local recipient $myNxId")
+            return@withContext false
+        }
+
         when (packet.type) {
             PacketType.PACKET_ACK -> handleAckPacket(packet, medium)
             PacketType.PACKET_CUSTODY_ACK -> handleCustodyAckPacket(packet, medium)
@@ -403,46 +409,71 @@ class NexaUniversalTransportIngest(
 
         val messageStatus = if (decryptedBytes != null) MessageStatus.DELIVERED else MessageStatus.FAILED
 
+        val parsedMessage = if (decryptedBytes != null) {
+            com.nexa.app.core.util.SafeMessageParser.parseIncomingPayload(decryptedText)
+        } else {
+            com.nexa.app.core.util.SafeMessageParser.DecryptedChatMessage(plainText = decryptedText)
+        }
+
         // --- 5. Atomic Local Persistence with Inbound Transport Metadata ---
+        val nextSeq = messageDao.getNextLocalSequence(conversationId)
         val messageEntity = MessageEntity(
             packetId = packet.packetId,
             conversationId = conversationId,
             senderNxId = senderNxId,
             recipientNxId = myNxId,
-            plainTextContent = decryptedText,
+            plainTextContent = parsedMessage.plainText,
             status = messageStatus.name,
             timestamp = packet.timestamp,
             isOutgoing = false,
-            transportType = medium.toDomainTransportType().name
+            transportType = medium.toDomainTransportType().name,
+            replyToMessageId = parsedMessage.replyToMessageId,
+            replyToSenderNxId = parsedMessage.replyToSenderNxId,
+            replyToSnippet = parsedMessage.replyToSnippet,
+            localSequence = nextSeq
         )
         messageDao.insertMessageIfNotExists(messageEntity)
 
         // Update reservation to PROCESSED
         messageDedupDao?.updateStatus(packet.packetId, MessageDedupEntity.STATUS_PROCESSED)
 
-        // --- 6. Upsert Chat Conversation ---
+        // --- 6. Upsert Chat Conversation preserving pin/archive/mute metadata ---
         val existingChat = chatDao.getChatById(conversationId)
         val unread = (existingChat?.unreadCount ?: 0) + 1
-        chatDao.upsertChat(
-            ChatEntity(
-                conversationId = conversationId,
-                participantNxId = senderNxId,
-                participantName = existingChat?.participantName ?: senderNxId,
-                lastMessageText = decryptedText,
-                lastMessageTimestamp = packet.timestamp,
-                unreadCount = unread
-            )
+        val updated = chatDao.updateLastMessage(
+            conversationId = conversationId,
+            text = parsedMessage.plainText,
+            timestamp = packet.timestamp,
+            lastMessageId = packet.packetId,
+            lastSenderNxId = senderNxId
         )
+        if (updated > 0) {
+            chatDao.incrementUnread(conversationId)
+        } else {
+            chatDao.upsertChat(
+                ChatEntity(
+                    conversationId = conversationId,
+                    participantNxId = senderNxId,
+                    participantName = existingChat?.participantName ?: senderNxId,
+                    lastMessageText = parsedMessage.plainText,
+                    lastMessageTimestamp = packet.timestamp,
+                    lastMessageId = packet.packetId,
+                    lastMessageSenderNxId = senderNxId,
+                    unreadCount = unread
+                )
+            )
+        }
 
-        // --- 7. Privacy-Preserving Local Notification ---
-        if (decryptedBytes != null) {
+        // --- 7. Privacy-Preserving Local Notification (respects mute status) ---
+        val isMuted = existingChat?.isMuted == true && (existingChat.mutedUntil == 0L || existingChat.mutedUntil > System.currentTimeMillis())
+        if (decryptedBytes != null && !isMuted) {
             val contact = contactDao?.getContact(senderNxId)
             val resolvedName = contact?.effectiveDisplayName ?: existingChat?.participantName ?: senderNxId
             notificationDispatcher?.postDirectMessageNotification(
                 conversationId = conversationId,
                 senderNxId = senderNxId,
                 senderDisplayName = resolvedName,
-                decryptedText = decryptedText,
+                decryptedText = parsedMessage.plainText,
                 messageId = packet.packetId
             )
 
@@ -731,6 +762,33 @@ class NexaUniversalTransportIngest(
 
     private fun validatePacket(packet: NexaWirePacket): Boolean {
         return packet.packetId.isNotBlank() && packet.type != null
+    }
+
+    private fun validateRoutingContext(packet: NexaWirePacket, myNxId: String): Boolean {
+        if (packet.senderNxId.isBlank()) {
+            Log.w(TAG, "Rejected packet with blank sender_nx_id (recipient=$myNxId)")
+            return false
+        }
+
+        if (packet.recipientNxId.isNotBlank() &&
+            packet.recipientNxId != myNxId &&
+            packet.recipientNxId != "PEER" &&
+            packet.recipientNxId != "BROADCAST"
+        ) {
+            Log.w(TAG, "SECURITY REJECTION: Packet ${packet.packetId} is intended for ${packet.recipientNxId}, but local account is $myNxId")
+            return false
+        }
+
+        if (packet.type == PacketType.PACKET_TYPING) {
+            val expectedConversationId = deriveConversationId(myNxId, packet.senderNxId)
+            val claimedConversationId = packet.typing?.conversationId
+            if (!claimedConversationId.isNullOrBlank() && claimedConversationId != expectedConversationId) {
+                Log.w(TAG, "SECURITY REJECTION: Typing packet ${packet.packetId} claimed conversation '$claimedConversationId' but expected '$expectedConversationId'")
+                return false
+            }
+        }
+
+        return true
     }
 
     private suspend fun getMyNxId(): String {

@@ -2,6 +2,8 @@ package com.nexa.app.presentation.transfer
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.nexa.app.core.security.FileSecurityManager
+import com.nexa.app.core.security.SecurityScanResult
 import com.nexa.app.core.webrtc.FileChunk
 import com.nexa.app.data.local.entity.TransferEntity
 import com.nexa.app.domain.repository.P2PTransferRepository
@@ -13,7 +15,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 class TransferViewModel(
-    private val p2pTransferRepository: P2PTransferRepository
+    private val p2pTransferRepository: P2PTransferRepository,
+    private val fileSecurityManager: FileSecurityManager? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(TransferUiState())
@@ -57,6 +60,66 @@ class TransferViewModel(
                 }
             }
 
+            is TransferUiEvent.SelectFileForPreview -> {
+                _uiState.update {
+                    it.copy(
+                        pendingPreview = PendingFilePreview(
+                            conversationId = event.conversationId,
+                            recipientNxId = event.recipientNxId,
+                            uri = event.uri,
+                            fileName = event.fileName,
+                            fileSizeBytes = event.fileSizeBytes,
+                            isScanning = true,
+                            scanVerdict = null
+                        )
+                    )
+                }
+                viewModelScope.launch {
+                    val manager = fileSecurityManager ?: FileSecurityManager()
+                    val verdict = manager.scanOutbound(
+                        uri = event.uri,
+                        declaredName = event.fileName,
+                        fileSizeBytes = event.fileSizeBytes
+                    )
+                    _uiState.update {
+                        it.copy(
+                            pendingPreview = it.pendingPreview?.copy(
+                                isScanning = false,
+                                scanVerdict = verdict
+                            )
+                        )
+                    }
+                }
+            }
+
+            is TransferUiEvent.ConfirmSendPreview -> {
+                val preview = _uiState.value.pendingPreview ?: return
+                if (preview.scanVerdict !is SecurityScanResult.Safe) return
+                _uiState.update { it.copy(pendingPreview = null) }
+                viewModelScope.launch {
+                    val result = p2pTransferRepository.initiateTransfer(
+                        conversationId = preview.conversationId,
+                        recipientNxId = preview.recipientNxId,
+                        fileUri = preview.uri,
+                        fileName = preview.fileName,
+                        fileSizeBytes = preview.fileSizeBytes
+                    )
+                    result.onFailure { error ->
+                        _uiState.update { it.copy(errorMessage = error.localizedMessage ?: "Failed to initiate file transfer") }
+                    }
+                }
+            }
+
+            is TransferUiEvent.DismissPreview -> {
+                _uiState.update { it.copy(pendingPreview = null) }
+            }
+
+            is TransferUiEvent.ShredQuarantine -> {
+                viewModelScope.launch {
+                    p2pTransferRepository.shredTransferQuarantine(event.transferId)
+                }
+            }
+
             is TransferUiEvent.AcceptOffer -> {
                 viewModelScope.launch {
                     val result = p2pTransferRepository.acceptTransfer(event.transferId)
@@ -72,6 +135,15 @@ class TransferViewModel(
                 viewModelScope.launch {
                     p2pTransferRepository.declineTransfer(event.transferId)
                     _uiState.update { it.copy(incomingOffer = null) }
+                }
+            }
+
+            is TransferUiEvent.ReleaseTransfer -> {
+                viewModelScope.launch {
+                    val result = p2pTransferRepository.releaseTransfer(event.transferId, event.authorization)
+                    result.onFailure { error ->
+                        _uiState.update { it.copy(errorMessage = error.localizedMessage ?: "Failed to release transfer to vault") }
+                    }
                 }
             }
 

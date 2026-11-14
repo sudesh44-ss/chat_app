@@ -64,7 +64,8 @@ object DemoDataSeeder {
             chatDao = database.chatDao(),
             messageDao = database.messageDao(),
             contactDao = database.contactDao(),
-            fileTransferDao = database.fileTransferDao()
+            fileTransferDao = database.fileTransferDao(),
+            userDao = database.userDao()
         )
     }
 
@@ -72,7 +73,8 @@ object DemoDataSeeder {
         chatDao: com.nexa.app.data.local.dao.ChatDao,
         messageDao: com.nexa.app.data.local.dao.MessageDao,
         contactDao: com.nexa.app.data.local.dao.ContactDao,
-        fileTransferDao: com.nexa.app.data.local.dao.FileTransferDao? = null
+        fileTransferDao: com.nexa.app.data.local.dao.FileTransferDao? = null,
+        userDao: com.nexa.app.data.local.dao.UserDao? = null
     ) {
         if (!com.nexa.app.BuildConfig.DEBUG && !AppLaunchConfig.isBypassAuthToHomeScreenEnabled) {
             Log.d(TAG, "Neither debug nor bypass mode active; skipping demo data seeding")
@@ -81,6 +83,27 @@ object DemoDataSeeder {
 
         try {
             val now = System.currentTimeMillis()
+
+            // 0a. Seed active local user profile if not present
+            try {
+                if (userDao != null && userDao.getLocalProfile() == null) {
+                    userDao.saveUserProfile(
+                        com.nexa.app.data.local.entity.UserEntity(
+                            nxId = "NX-DEV-USER",
+                            fullName = "You",
+                            phoneNumber = "+1234567890",
+                            age = 25,
+                            gender = "O",
+                            bio = "NEXA Encrypted Vault",
+                            publicKeyHex = "00".repeat(32),
+                            isVerified = true
+                        )
+                    )
+                    Log.d(TAG, "Successfully seeded Dev Local User Profile (NX-DEV-USER)")
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Local user profile seeding ignored: ${e.message}")
+            }
 
             // 0. Clean up legacy obsolete demo chat if present
             try {

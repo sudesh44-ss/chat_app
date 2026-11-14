@@ -10,14 +10,17 @@ import com.nexa.app.data.local.dao.UserDao
 import com.nexa.app.data.local.entity.ContactStatus
 import com.nexa.app.data.local.preferences.ChatPrivacyPrefs
 import com.nexa.app.data.local.preferences.ConversationPreferences
+import com.nexa.app.data.local.preferences.OfflinePresenceMode
 import com.nexa.app.data.local.preferences.OnlinePrivacyMode
 import com.nexa.app.data.local.preferences.TypingPrivacyMode
 import com.nexa.app.domain.repository.ChatRepository
 import com.nexa.app.domain.repository.ContactRepository
+import com.nexa.app.domain.repository.StatusRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,7 +36,8 @@ class ContactProfileViewModel(
     private val fileTransferDao: FileTransferDao,
     private val userDao: UserDao,
     private val chatPrivacyPrefs: ChatPrivacyPrefs,
-    private val conversationPreferences: ConversationPreferences
+    private val conversationPreferences: ConversationPreferences,
+    private val statusRepository: StatusRepository? = null
 ) : ViewModel() {
 
     private val _uiState = MutableStateFlow(
@@ -48,6 +52,7 @@ class ContactProfileViewModel(
         loadContactProfile()
         observePinnedMessages()
         observeMedia()
+        observeStatuses()
     }
 
     private fun loadContactProfile() {
@@ -98,15 +103,22 @@ class ContactProfileViewModel(
                         aboutText = about,
                         avatarUrl = avatar,
                         deviceContactPhotoUri = photoUri,
-                        isOnline = true, // Connected via E2EE / Mesh
-                        lastSeenText = "Active Now",
+                        isOnline = chatPrivacyPrefs.showOnlineStatus && chatPrivacyPrefs.onlinePresenceMode != OnlinePrivacyMode.NOBODY,
+                        lastSeenText = when (chatPrivacyPrefs.offlinePresenceMode) {
+                            OfflinePresenceMode.SHOW_OFFLINE -> "Offline"
+                            OfflinePresenceMode.LAST_SEEN_RECENTLY -> "Last seen recently"
+                            OfflinePresenceMode.TAKING_A_BREAK -> "${effectiveName} is taking a break — back soon"
+                        },
                         isMuted = isMuted,
                         muteUntil = muteUntil,
                         wallpaper = wallpaper,
                         customTone = customTone,
                         isVibrationEnabled = isVibration,
                         isBlocked = isBlocked,
+                        showOnlineStatus = chatPrivacyPrefs.showOnlineStatus,
                         onlinePrivacyMode = chatPrivacyPrefs.onlinePresenceMode,
+                        offlinePresenceMode = chatPrivacyPrefs.offlinePresenceMode,
+                        selectedOnlineStatusContacts = chatPrivacyPrefs.selectedOnlineStatusContacts.toList(),
                         typingPrivacyMode = chatPrivacyPrefs.typingIndicatorMode,
                         isPhoneInAddressBook = contact?.isPhoneInLocalAddressBook ?: false
                     )
@@ -139,6 +151,27 @@ class ContactProfileViewModel(
         }
     }
 
+    private fun observeStatuses() {
+        val repository = statusRepository ?: return
+        viewModelScope.launch {
+            repository.getStatusesForUserFlow(participantNxId).collect { statuses ->
+                _uiState.update { it.copy(activeStatuses = statuses) }
+            }
+        }
+    }
+
+    fun markStatusViewed(statusId: String) {
+        viewModelScope.launch {
+            statusRepository?.markStatusViewed(statusId)
+        }
+    }
+
+    fun refreshStatusAvailability() {
+        viewModelScope.launch {
+            statusRepository?.refreshAvailability()
+        }
+    }
+
     fun saveCustomNickname(nickname: String?) {
         viewModelScope.launch {
             withContext(Dispatchers.IO) {
@@ -158,6 +191,13 @@ class ContactProfileViewModel(
         }
         val isMuted = durationMillis != 0L
         conversationPreferences.setMuted(initialConversationId, isMuted, until)
+        viewModelScope.launch {
+            chatRepository.muteConversation(
+                initialConversationId,
+                isMuted,
+                if (until == -1L) 0L else until
+            )
+        }
         _uiState.update {
             it.copy(
                 isMuted = isMuted,
@@ -179,9 +219,19 @@ class ContactProfileViewModel(
         }
     }
 
+    fun setShowOnlineStatus(show: Boolean) {
+        chatPrivacyPrefs.showOnlineStatus = show
+        _uiState.update { it.copy(showOnlineStatus = show, isOnline = show && it.onlinePrivacyMode != OnlinePrivacyMode.NOBODY) }
+    }
+
     fun setPresenceMode(mode: OnlinePrivacyMode) {
         chatPrivacyPrefs.onlinePresenceMode = mode
-        _uiState.update { it.copy(onlinePrivacyMode = mode) }
+        _uiState.update { it.copy(onlinePrivacyMode = mode, isOnline = it.showOnlineStatus && mode != OnlinePrivacyMode.NOBODY) }
+    }
+
+    fun setOfflinePresenceMode(mode: OfflinePresenceMode) {
+        chatPrivacyPrefs.offlinePresenceMode = mode
+        _uiState.update { it.copy(offlinePresenceMode = mode) }
     }
 
     fun setTypingMode(mode: TypingPrivacyMode) {

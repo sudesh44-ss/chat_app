@@ -3,7 +3,7 @@ package com.nexa.app.presentation.security
 import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import com.nexa.app.core.security.ScanResult
+import com.nexa.app.core.security.DualScanResult
 import com.nexa.app.domain.repository.SecurityScannerRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,38 +33,45 @@ class SecurityViewModel(
             _uiState.value = SecurityUiState.Scanning(fileName)
             val verdict = securityRepository.scanOutboundFile(uri, declaredExtension)
             when (verdict) {
-                is ScanResult.Clean -> {
+                is DualScanResult.Clean -> {
                     _uiState.value = SecurityUiState.Clean(fileName, verdict.hash)
                     onClean(verdict.hash)
                 }
-                is ScanResult.Malicious -> {
+                is DualScanResult.Malicious -> {
                     _uiState.value = SecurityUiState.QuarantinedThreat(fileName, "", verdict.reason)
                     onBlocked(verdict.reason)
                 }
-                is ScanResult.Corrupted -> {
+                is DualScanResult.Corrupted -> {
                     _uiState.value = SecurityUiState.Corrupted(fileName, verdict.message)
                     onBlocked(verdict.message)
+                }
+                is DualScanResult.Inconclusive -> {
+                    _uiState.value = SecurityUiState.Corrupted(fileName, verdict.reason)
+                    onBlocked(verdict.reason)
                 }
             }
         }
     }
 
     fun handleInboundScanResult(
-        result: ScanResult,
+        result: DualScanResult,
         fileName: String,
         fileHash: String,
-        onCleanPromoted: (safePath: String) -> Unit
+        onCleanQuarantined: (quarantinePath: String) -> Unit
     ) {
         when (result) {
-            is ScanResult.Clean -> {
+            is DualScanResult.Clean -> {
                 _uiState.value = SecurityUiState.Clean(fileName, fileHash)
-                onCleanPromoted(result.hash)
+                onCleanQuarantined(result.hash)
             }
-            is ScanResult.Malicious -> {
+            is DualScanResult.Malicious -> {
                 _uiState.value = SecurityUiState.QuarantinedThreat(fileName, fileHash, result.reason)
             }
-            is ScanResult.Corrupted -> {
+            is DualScanResult.Corrupted -> {
                 _uiState.value = SecurityUiState.Corrupted(fileName, result.message)
+            }
+            is DualScanResult.Inconclusive -> {
+                _uiState.value = SecurityUiState.Corrupted(fileName, result.reason)
             }
         }
     }
@@ -76,12 +83,23 @@ class SecurityViewModel(
         }
     }
 
-    fun forceOverrideQuarantine(fileHash: String, fileName: String, onPromoted: (File) -> Unit) {
+    fun forceOverrideQuarantine(
+        fileHash: String,
+        fileName: String,
+        authorization: com.nexa.app.core.security.ReleaseAuthorization,
+        onReleased: (File) -> Unit
+    ) {
         viewModelScope.launch {
-            val file = securityRepository.forceOverrideQuarantine(fileHash, fileName)
-            _uiState.value = SecurityUiState.Clean(fileName, fileHash)
+            val file = securityRepository.forceOverrideQuarantine(fileHash, fileName, authorization)
             if (file != null) {
-                onPromoted(file)
+                _uiState.value = SecurityUiState.Clean(fileName, fileHash)
+                onReleased(file)
+            } else {
+                _uiState.value = SecurityUiState.QuarantinedThreat(
+                    fileName,
+                    fileHash,
+                    "Release was blocked by the security gate"
+                )
             }
         }
     }

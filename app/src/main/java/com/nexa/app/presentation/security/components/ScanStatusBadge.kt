@@ -72,7 +72,7 @@ fun ScanStatusBadge(
                 )
                 Spacer(modifier = Modifier.width(4.dp))
                 Text(
-                    text = "🛡️ Verified Safe",
+                    text = "Scan Passed • Release Required",
                     fontSize = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color(0xFF2E7D32)

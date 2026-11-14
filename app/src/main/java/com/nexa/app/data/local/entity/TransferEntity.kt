@@ -8,7 +8,8 @@ import androidx.room.PrimaryKey
     tableName = "file_transfers",
     indices = [
         Index(value = ["conversationId"]),
-        Index(value = ["status"])
+        Index(value = ["status"]),
+        Index(value = ["securityState"])
     ]
 )
 data class TransferEntity(
@@ -23,5 +24,13 @@ data class TransferEntity(
     val totalChunks: Int,
     val status: String,              // PENDING, ACTIVE, PAUSED, COMPLETED, FAILED
     val isIncoming: Boolean,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val securityState: String = "OFFERED",
+    val scanResult: String = "SCANNING",
+    val quarantinePath: String? = null,
+    val senderScanReported: String? = null,
+    val threatDetails: String? = null,
+    val isExplicitlyAccepted: Boolean = false,
+    val expiryTimestamp: Long = 0L,
+    val fileClassification: String = "UNKNOWN"
 )

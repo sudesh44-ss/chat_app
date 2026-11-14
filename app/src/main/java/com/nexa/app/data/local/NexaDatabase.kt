@@ -7,33 +7,47 @@ import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.nexa.app.data.local.dao.ChatDao
+import com.nexa.app.data.local.dao.ChatDraftDao
+import com.nexa.app.data.local.dao.ChatMemberDao
 import com.nexa.app.data.local.dao.ContactDao
 import com.nexa.app.data.local.dao.DeviceSyncDao
 import com.nexa.app.data.local.dao.DtnEnvelopeDao
 import com.nexa.app.data.local.dao.FileTransferDao
 import com.nexa.app.data.local.dao.MeshOutboxDao
+import com.nexa.app.data.local.dao.MessageAttachmentDao
 import com.nexa.app.data.local.dao.MessageDao
 import com.nexa.app.data.local.dao.MessageDedupDao
+import com.nexa.app.data.local.dao.MessageReactionDao
 import com.nexa.app.data.local.dao.MessageTransportDao
 import com.nexa.app.data.local.dao.PeerSyncCursorDao
 import com.nexa.app.data.local.dao.QuarantineDao
 import com.nexa.app.data.local.dao.RatchetDao
+import com.nexa.app.data.local.dao.ScheduledMessageDao
+import com.nexa.app.data.local.dao.StatusUpdateDao
+import com.nexa.app.data.local.dao.StatusViewDao
 import com.nexa.app.data.local.dao.SwarmCacheDao
 import com.nexa.app.data.local.dao.TransferSessionDao
 import com.nexa.app.data.local.dao.UserDao
+import com.nexa.app.data.local.entity.ChatDraftEntity
 import com.nexa.app.data.local.entity.ChatEntity
+import com.nexa.app.data.local.entity.ChatMemberEntity
 import com.nexa.app.data.local.entity.ContactEntity
 import com.nexa.app.data.local.entity.DeviceSyncEntity
 import com.nexa.app.data.local.entity.DtnEnvelopeEntity
 import com.nexa.app.data.local.entity.FileMetadataEntity
 import com.nexa.app.data.local.entity.MeshEnvelopeEntity
+import com.nexa.app.data.local.entity.MessageAttachmentEntity
 import com.nexa.app.data.local.entity.MessageDedupEntity
 import com.nexa.app.data.local.entity.MessageEntity
+import com.nexa.app.data.local.entity.MessageReactionEntity
 import com.nexa.app.data.local.entity.MessageTransportEntity
 import com.nexa.app.data.local.entity.PeerSyncCursorEntity
 import com.nexa.app.data.local.entity.QuarantineEntity
 import com.nexa.app.data.local.entity.RatchetStateEntity
+import com.nexa.app.data.local.entity.ScheduledMessageEntity
 import com.nexa.app.data.local.entity.SkippedKeyEntity
+import com.nexa.app.data.local.entity.StatusUpdateEntity
+import com.nexa.app.data.local.entity.StatusViewEntity
 import com.nexa.app.data.local.entity.TransferEntity
 import com.nexa.app.data.local.entity.TransferSessionEntity
 import com.nexa.app.data.local.entity.UserEntity
@@ -56,9 +70,16 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         DeviceSyncEntity::class,
         MessageDedupEntity::class,
         MessageTransportEntity::class,
-        PeerSyncCursorEntity::class
+        PeerSyncCursorEntity::class,
+        ScheduledMessageEntity::class,
+        ChatMemberEntity::class,
+        MessageAttachmentEntity::class,
+        ChatDraftEntity::class,
+        MessageReactionEntity::class,
+        StatusUpdateEntity::class,
+        StatusViewEntity::class
     ],
-    version = 20,
+    version = 27,
     exportSchema = false
 )
 abstract class NexaDatabase : RoomDatabase() {
@@ -78,6 +99,13 @@ abstract class NexaDatabase : RoomDatabase() {
     abstract fun transferSessionDao(): TransferSessionDao
     abstract fun meshOutboxDao(): MeshOutboxDao
     abstract fun deviceSyncDao(): DeviceSyncDao
+    abstract fun scheduledMessageDao(): ScheduledMessageDao
+    abstract fun chatMemberDao(): ChatMemberDao
+    abstract fun messageAttachmentDao(): MessageAttachmentDao
+    abstract fun chatDraftDao(): ChatDraftDao
+    abstract fun messageReactionDao(): MessageReactionDao
+    abstract fun statusUpdateDao(): StatusUpdateDao
+    abstract fun statusViewDao(): StatusViewDao
 
     /**
      * Exposes the underlying SupportSQLiteDatabase handle for zero-lock snapshots (VACUUM INTO).
@@ -442,6 +470,248 @@ abstract class NexaDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_20_21 = object : Migration(20, 21) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfNotExists(db, "messages", "replyToMessageId", "TEXT DEFAULT NULL")
+                addColumnIfNotExists(db, "messages", "replyToSenderNxId", "TEXT DEFAULT NULL")
+                addColumnIfNotExists(db, "messages", "replyToSnippet", "TEXT DEFAULT NULL")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_messages_replyToMessageId` ON `messages` (`replyToMessageId`)")
+            }
+        }
+
+        val MIGRATION_21_22 = object : Migration(21, 22) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `scheduled_messages` (
+                        `id` TEXT NOT NULL,
+                        `messageId` TEXT NOT NULL,
+                        `chatId` TEXT NOT NULL,
+                        `senderId` TEXT NOT NULL,
+                        `recipientId` TEXT NOT NULL,
+                        `messageType` TEXT NOT NULL DEFAULT 'TEXT',
+                        `content` TEXT NOT NULL,
+                        `attachmentReference` TEXT,
+                        `scheduledAt` INTEGER NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `status` TEXT NOT NULL DEFAULT 'SCHEDULED',
+                        `sentAt` INTEGER,
+                        `cancelledAt` INTEGER,
+                        `replyToMessageId` TEXT,
+                        `replyToSenderNxId` TEXT,
+                        `replyToSnippet` TEXT,
+                        `transportType` TEXT NOT NULL DEFAULT 'INTERNET',
+                        `destinationPhone` TEXT,
+                        `failureReason` TEXT,
+                        PRIMARY KEY(`id`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_scheduled_messages_chatId` ON `scheduled_messages` (`chatId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_scheduled_messages_status` ON `scheduled_messages` (`status`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_scheduled_messages_scheduledAt` ON `scheduled_messages` (`scheduledAt`)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_scheduled_messages_messageId` ON `scheduled_messages` (`messageId`)")
+            }
+        }
+
+        val MIGRATION_22_23 = object : Migration(22, 23) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfNotExists(db, "file_transfers", "securityState", "TEXT NOT NULL DEFAULT 'OFFERED'")
+                addColumnIfNotExists(db, "file_transfers", "scanResult", "TEXT NOT NULL DEFAULT 'SCANNING'")
+                addColumnIfNotExists(db, "file_transfers", "quarantinePath", "TEXT")
+                addColumnIfNotExists(db, "file_transfers", "senderScanReported", "TEXT")
+                addColumnIfNotExists(db, "file_transfers", "threatDetails", "TEXT")
+                addColumnIfNotExists(db, "file_transfers", "isExplicitlyAccepted", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "file_transfers", "expiryTimestamp", "INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_file_transfers_securityState` ON `file_transfers` (`securityState`)")
+            }
+        }
+
+        val MIGRATION_23_24 = object : Migration(23, 24) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // 1. Alter chats table for deterministic organization
+                addColumnIfNotExists(db, "chats", "chatType", "TEXT NOT NULL DEFAULT 'DIRECT'")
+                addColumnIfNotExists(db, "chats", "title", "TEXT")
+                addColumnIfNotExists(db, "chats", "avatarUrl", "TEXT")
+                addColumnIfNotExists(db, "chats", "lastMessageId", "TEXT")
+                addColumnIfNotExists(db, "chats", "lastMessageSenderNxId", "TEXT")
+                addColumnIfNotExists(db, "chats", "isPinned", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "chats", "pinPosition", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "chats", "pinnedAt", "INTEGER")
+                addColumnIfNotExists(db, "chats", "isArchived", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "chats", "archivedAt", "INTEGER")
+                addColumnIfNotExists(db, "chats", "isMuted", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "chats", "mutedUntil", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "chats", "createdAt", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "chats", "updatedAt", "INTEGER NOT NULL DEFAULT 0")
+
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chats_isArchived_isPinned_lastMessageTimestamp` ON `chats` (`isArchived`, `isPinned`, `lastMessageTimestamp`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chats_participantNxId` ON `chats` (`participantNxId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chats_chatType` ON `chats` (`chatType`)")
+
+                // 2. Alter messages table for sequence, soft delete, starring, editing, and types
+                addColumnIfNotExists(db, "messages", "messageType", "TEXT NOT NULL DEFAULT 'TEXT'")
+                addColumnIfNotExists(db, "messages", "localSequence", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "messages", "isDeleted", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "messages", "isStarred", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "messages", "editedAt", "INTEGER")
+                addColumnIfNotExists(db, "messages", "localState", "TEXT NOT NULL DEFAULT 'PERSISTED'")
+
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_messages_conversationId_localSequence` ON `messages` (`conversationId`, `localSequence`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_messages_conversationId_timestamp` ON `messages` (`conversationId`, `timestamp`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_messages_messageType` ON `messages` (`messageType`)")
+
+                // 3. Create chat_members table
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `chat_members` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `chatId` TEXT NOT NULL,
+                        `userNxId` TEXT NOT NULL,
+                        `role` TEXT NOT NULL DEFAULT 'MEMBER',
+                        `joinedAt` INTEGER NOT NULL,
+                        `leftAt` INTEGER,
+                        `membershipState` TEXT NOT NULL DEFAULT 'ACTIVE'
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_chat_members_chatId_userNxId` ON `chat_members` (`chatId`, `userNxId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chat_members_chatId` ON `chat_members` (`chatId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chat_members_userNxId` ON `chat_members` (`userNxId`)")
+
+                // 4. Create message_attachments table
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `message_attachments` (
+                        `attachmentId` TEXT NOT NULL,
+                        `messageId` TEXT NOT NULL,
+                        `fileName` TEXT NOT NULL,
+                        `mimeType` TEXT NOT NULL,
+                        `detectedFileType` TEXT NOT NULL,
+                        `fileSize` INTEGER NOT NULL,
+                        `localPathReference` TEXT,
+                        `thumbnailReference` TEXT,
+                        `width` INTEGER,
+                        `height` INTEGER,
+                        `durationMs` INTEGER,
+                        `transferState` TEXT NOT NULL DEFAULT 'COMPLETED',
+                        `integrityState` TEXT NOT NULL DEFAULT 'VERIFIED',
+                        `securityScanState` TEXT NOT NULL DEFAULT 'SAFE',
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`attachmentId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_attachments_messageId` ON `message_attachments` (`messageId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_attachments_mimeType` ON `message_attachments` (`mimeType`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_attachments_securityScanState` ON `message_attachments` (`securityScanState`)")
+
+                // 5. Create chat_drafts table
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `chat_drafts` (
+                        `conversationId` TEXT NOT NULL,
+                        `draftText` TEXT NOT NULL,
+                        `attachmentDraftReference` TEXT,
+                        `replyToMessageId` TEXT,
+                        `updatedAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`conversationId`)
+                    )
+                    """.trimIndent()
+                )
+
+                // 6. Create message_reactions table
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `message_reactions` (
+                        `reactionId` TEXT NOT NULL,
+                        `messageId` TEXT NOT NULL,
+                        `userNxId` TEXT NOT NULL,
+                        `reaction` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        PRIMARY KEY(`reactionId`)
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_message_reactions_messageId_userNxId` ON `message_reactions` (`messageId`, `userNxId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_message_reactions_messageId` ON `message_reactions` (`messageId`)")
+
+                // 7. Create status_updates table
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `status_updates` (
+                        `statusId` TEXT NOT NULL,
+                        `userNxId` TEXT NOT NULL,
+                        `mediaReference` TEXT,
+                        `caption` TEXT NOT NULL,
+                        `createdAt` INTEGER NOT NULL,
+                        `expiresAt` INTEGER NOT NULL,
+                        `privacy` TEXT NOT NULL DEFAULT 'CONTACTS',
+                        `statusType` TEXT NOT NULL DEFAULT 'TEXT',
+                        `isViewed` INTEGER NOT NULL DEFAULT 0,
+                        `viewedAt` INTEGER,
+                        `viewCount` INTEGER NOT NULL DEFAULT 0,
+                        PRIMARY KEY(`statusId`)
+                    )
+                    """.trimIndent()
+                )
+                addColumnIfNotExists(db, "status_updates", "isViewed", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "status_updates", "viewedAt", "INTEGER")
+                addColumnIfNotExists(db, "status_updates", "viewCount", "INTEGER NOT NULL DEFAULT 0")
+
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_status_updates_userNxId` ON `status_updates` (`userNxId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_status_updates_expiresAt` ON `status_updates` (`expiresAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_status_updates_isViewed` ON `status_updates` (`isViewed`)")
+
+                // 8. Create status_views table
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS `status_views` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `statusId` TEXT NOT NULL,
+                        `viewerNxId` TEXT NOT NULL,
+                        `viewedAt` INTEGER NOT NULL
+                    )
+                    """.trimIndent()
+                )
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_status_views_statusId_viewerNxId` ON `status_views` (`statusId`, `viewerNxId`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_status_views_statusId` ON `status_views` (`statusId`)")
+            }
+        }
+
+        val MIGRATION_24_25 = object : Migration(24, 25) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfNotExists(
+                    db,
+                    "file_transfers",
+                    "fileClassification",
+                    "TEXT NOT NULL DEFAULT 'UNKNOWN'"
+                )
+            }
+        }
+
+        val MIGRATION_25_26 = object : Migration(25, 26) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfNotExists(db, "transfer_sessions", "senderId", "TEXT NOT NULL DEFAULT ''")
+                addColumnIfNotExists(db, "transfer_sessions", "receiverId", "TEXT NOT NULL DEFAULT ''")
+                addColumnIfNotExists(db, "transfer_sessions", "transferDirection", "TEXT NOT NULL DEFAULT 'OUTBOUND'")
+                addColumnIfNotExists(db, "transfer_sessions", "transportType", "TEXT NOT NULL DEFAULT 'WEBRTC'")
+                addColumnIfNotExists(db, "transfer_sessions", "chunkSize", "INTEGER NOT NULL DEFAULT 65536")
+                addColumnIfNotExists(db, "transfer_sessions", "retryCount", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "transfer_sessions", "lastSuccessfulCheckpoint", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "transfer_sessions", "lastUpdatedAt", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "transfer_sessions", "uploadedBytes", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "transfer_sessions", "receivedBytes", "INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
+        val MIGRATION_26_27 = object : Migration(26, 27) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfNotExists(db, "chats", "hasManualUnread", "INTEGER NOT NULL DEFAULT 0")
+                addColumnIfNotExists(db, "contacts", "isStatusMuted", "INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         private fun addColumnIfNotExists(db: SupportSQLiteDatabase, table: String, column: String, typeAndConstraints: String) {
             var exists = false
             try {
@@ -510,11 +780,21 @@ abstract class NexaDatabase : RoomDatabase() {
             }
         }
 
-        private fun buildDatabase(context: Context, passphrase: ByteArray): NexaDatabase {
-            checkAndRecoverFromRollbackJournal(context)
+        private fun loadSqlCipherLibrarySafely() {
             try {
                 System.loadLibrary("sqlcipher")
-            } catch (ignored: Throwable) {}
+            } catch (t: Throwable) {
+                android.util.Log.w(
+                    "NexaDatabase",
+                    "SQLCipher native library could not be loaded; the app should not continue without the 16 KB-compatible sqlcipher library.",
+                    t
+                )
+            }
+        }
+
+        private fun buildDatabase(context: Context, passphrase: ByteArray): NexaDatabase {
+            checkAndRecoverFromRollbackJournal(context)
+            loadSqlCipherLibrarySafely()
             // Instantiate SQLCipher open helper factory with the Keystore-protected passphrase
             val supportFactory = SupportOpenHelperFactory(passphrase)
 
@@ -544,7 +824,14 @@ abstract class NexaDatabase : RoomDatabase() {
                     MIGRATION_16_17,
                     MIGRATION_17_18,
                     MIGRATION_18_19,
-                    MIGRATION_19_20
+                    MIGRATION_19_20,
+                    MIGRATION_20_21,
+                    MIGRATION_21_22,
+                    MIGRATION_22_23,
+                    MIGRATION_23_24,
+                    MIGRATION_24_25,
+                    MIGRATION_25_26,
+                    MIGRATION_26_27
                 )
                 .build()
         }

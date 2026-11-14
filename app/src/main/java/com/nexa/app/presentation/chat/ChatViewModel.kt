@@ -17,7 +17,10 @@ import com.nexa.app.data.local.preferences.MediaPrefs
 import com.nexa.app.data.local.preferences.OnlinePrivacyMode
 import com.nexa.app.data.local.preferences.TransportRouteMode
 import com.nexa.app.data.local.preferences.TypingPrivacyMode
+import com.nexa.app.domain.manager.ScheduledMessageManager
 import com.nexa.app.domain.model.Message
+import com.nexa.app.domain.model.MessageType
+import com.nexa.app.domain.model.ScheduledMessage
 import com.nexa.app.domain.model.TransportType
 import com.nexa.app.domain.repository.ChatRepository
 import com.nexa.app.domain.repository.ContactRepository
@@ -92,7 +95,20 @@ data class ChatUiState(
     val showPinDurationDialog: Boolean = false,
     val candidateMessageToPin: Message? = null,
     val pinLimitReachedSnackbar: Boolean = false,
-    val selectedMessageForAction: Message? = null
+    val selectedMessageForAction: Message? = null,
+    // Reply to message state
+    val replyingToMessage: Message? = null,
+    // Scheduled messages state
+    val scheduledMessages: List<ScheduledMessage> = emptyList(),
+    val showScheduleDialog: Boolean = false,
+    val showScheduledMessagesSheet: Boolean = false,
+    // Find in chat & search state
+    val isSearchActive: Boolean = false,
+    val searchQuery: String = "",
+    val searchResults: List<Message> = emptyList(),
+    val isSearching: Boolean = false,
+    val searchMatchIndex: Int = 0,
+    val showDatePickerDialog: Boolean = false
 )
 
 sealed interface ChatUiEvent {
@@ -137,6 +153,35 @@ sealed interface ChatUiEvent {
     data object OnPinnedBannerClicked : ChatUiEvent
     data object DismissPinLimitSnackbar : ChatUiEvent
     data class SetSelectedMessageForAction(val message: Message?) : ChatUiEvent
+
+    // Reply-to-message events
+    data class SetReplyingMessage(val message: Message?) : ChatUiEvent
+    data object CancelReply : ChatUiEvent
+    data class HighlightMessage(val packetId: String) : ChatUiEvent
+
+    // Scheduled message events
+    data class SetScheduleDialogVisible(val visible: Boolean) : ChatUiEvent
+    data class SetScheduledMessagesSheetVisible(val visible: Boolean) : ChatUiEvent
+    data class ScheduleCurrentMessage(val scheduledAtUtcMillis: Long) : ChatUiEvent
+    data class CancelScheduledMessage(val id: String) : ChatUiEvent
+
+    // Find in chat & date navigation events
+    data class SetSearchActive(val active: Boolean) : ChatUiEvent
+    data class OnSearchQueryChanged(val query: String) : ChatUiEvent
+    data object ClearSearchQuery : ChatUiEvent
+    data object NextSearchMatch : ChatUiEvent
+    data object PreviousSearchMatch : ChatUiEvent
+    data class SelectSearchResult(val message: Message) : ChatUiEvent
+    data class SetDatePickerVisible(val visible: Boolean) : ChatUiEvent
+    data class SelectDate(val epochDayMillis: Long) : ChatUiEvent
+
+    // GIF, Meme & Media messaging events
+    data class SendGifMeme(val content: String, val messageType: MessageType = MessageType.GIF) : ChatUiEvent
+
+    // Reactions & Message Management events
+    data class ToggleReaction(val messageId: String, val emoji: String) : ChatUiEvent
+    data class DeleteMessage(val message: Message) : ChatUiEvent
+    data class ToggleStarMessage(val message: Message) : ChatUiEvent
 }
 
 class ChatViewModel(
@@ -144,7 +189,8 @@ class ChatViewModel(
     private val mediaProcessingRepository: MediaProcessingRepository? = null,
     private val mediaPrefs: MediaPrefs? = null,
     private val chatPrivacyPrefs: ChatPrivacyPrefs? = null,
-    private val contactRepository: ContactRepository? = null
+    private val contactRepository: ContactRepository? = null,
+    private val scheduledMessageManager: ScheduledMessageManager? = null
 ) : ViewModel() {
 
     companion object {
@@ -157,6 +203,9 @@ class ChatViewModel(
     private val _videoReadyFlow = MutableSharedFlow<VideoReadyForTransfer>(extraBufferCapacity = 8)
     val videoReadyFlow: SharedFlow<VideoReadyForTransfer> = _videoReadyFlow.asSharedFlow()
 
+    private val _navigateToMessageFlow = MutableSharedFlow<String>(extraBufferCapacity = 8)
+    val navigateToMessageFlow: SharedFlow<String> = _navigateToMessageFlow.asSharedFlow()
+
     private var messagesJob: Job? = null
     private var connectionJob: Job? = null
     private var transportHandoffJob: Job? = null
@@ -165,6 +214,9 @@ class ChatViewModel(
     private var typingExpiryJob: Job? = null
     private var typingDebounceJob: Job? = null
     private var pinnedMessagesJob: Job? = null
+    private var scheduledMessagesJob: Job? = null
+    private var searchJob: Job? = null
+    private var draftSaveJob: Job? = null
     private var isCurrentlyTypingSent = false
     private var lastTypingSentMs: Long = 0L
 
@@ -331,16 +383,163 @@ class ChatViewModel(
                     }
                 }
             }
+            is ChatUiEvent.SetReplyingMessage -> _uiState.update { it.copy(replyingToMessage = event.message) }
+            is ChatUiEvent.CancelReply -> _uiState.update { it.copy(replyingToMessage = null) }
+            is ChatUiEvent.HighlightMessage -> highlightMessage(event.packetId)
+
+            // Scheduled message events
+            is ChatUiEvent.SetScheduleDialogVisible -> _uiState.update { it.copy(showScheduleDialog = event.visible) }
+            is ChatUiEvent.SetScheduledMessagesSheetVisible -> _uiState.update { it.copy(showScheduledMessagesSheet = event.visible) }
+            is ChatUiEvent.ScheduleCurrentMessage -> scheduleCurrentMessage(event.scheduledAtUtcMillis)
+            is ChatUiEvent.CancelScheduledMessage -> cancelScheduledMessage(event.id)
+
+            // Find in chat & date navigation events
+            is ChatUiEvent.SetSearchActive -> {
+                searchJob?.cancel()
+                _uiState.update {
+                    it.copy(
+                        isSearchActive = event.active,
+                        searchQuery = if (event.active) it.searchQuery else "",
+                        searchResults = if (event.active) it.searchResults else emptyList(),
+                        isSearching = false,
+                        searchMatchIndex = 0
+                    )
+                }
+            }
+            is ChatUiEvent.OnSearchQueryChanged -> handleSearchQueryChanged(event.query)
+            is ChatUiEvent.ClearSearchQuery -> {
+                searchJob?.cancel()
+                _uiState.update {
+                    it.copy(
+                        searchQuery = "",
+                        searchResults = emptyList(),
+                        isSearching = false,
+                        searchMatchIndex = 0
+                    )
+                }
+            }
+            is ChatUiEvent.NextSearchMatch -> {
+                val results = _uiState.value.searchResults
+                if (results.isNotEmpty()) {
+                    val nextIdx = (_uiState.value.searchMatchIndex + 1) % results.size
+                    _uiState.update { it.copy(searchMatchIndex = nextIdx) }
+                    viewModelScope.launch {
+                        _navigateToMessageFlow.emit(results[nextIdx].packetId)
+                        highlightMessage(results[nextIdx].packetId)
+                    }
+                }
+            }
+            is ChatUiEvent.PreviousSearchMatch -> {
+                val results = _uiState.value.searchResults
+                if (results.isNotEmpty()) {
+                    val prevIdx = if (_uiState.value.searchMatchIndex <= 0) results.lastIndex else _uiState.value.searchMatchIndex - 1
+                    _uiState.update { it.copy(searchMatchIndex = prevIdx) }
+                    viewModelScope.launch {
+                        _navigateToMessageFlow.emit(results[prevIdx].packetId)
+                        highlightMessage(results[prevIdx].packetId)
+                    }
+                }
+            }
+            is ChatUiEvent.SelectSearchResult -> {
+                _uiState.update { it.copy(isSearchActive = false) }
+                viewModelScope.launch {
+                    _navigateToMessageFlow.emit(event.message.packetId)
+                    highlightMessage(event.message.packetId)
+                }
+            }
+            is ChatUiEvent.SetDatePickerVisible -> _uiState.update { it.copy(showDatePickerDialog = event.visible) }
+            is ChatUiEvent.SelectDate -> handleDateSelected(event.epochDayMillis)
+
+            // GIF, Meme & Reactions
+            is ChatUiEvent.SendGifMeme -> sendGifMeme(event.content, event.messageType)
+            is ChatUiEvent.ToggleReaction -> toggleReaction(event.messageId, event.emoji)
+            is ChatUiEvent.DeleteMessage -> deleteMessage(event.message)
+            is ChatUiEvent.ToggleStarMessage -> toggleStarMessage(event.message)
+        }
+    }
+
+    private fun highlightMessage(packetId: String) {
+        _uiState.update { it.copy(highlightedMessageId = packetId) }
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(1500)
+            _uiState.update { current ->
+                if (current.highlightedMessageId == packetId) {
+                    current.copy(highlightedMessageId = null)
+                } else current
+            }
+        }
+    }
+
+    private fun handleSearchQueryChanged(query: String) {
+        _uiState.update { it.copy(searchQuery = query) }
+        searchJob?.cancel()
+        val trimmed = query.trim()
+        if (trimmed.isBlank()) {
+            _uiState.update { it.copy(searchResults = emptyList(), isSearching = false, searchMatchIndex = 0) }
+            return
+        }
+        val convId = _uiState.value.conversationId
+        if (convId.isBlank()) return
+
+        searchJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(250)
+            _uiState.update { it.copy(isSearching = true) }
+            val results = chatRepository.searchMessagesInConversation(convId, trimmed)
+            _uiState.update {
+                it.copy(
+                    searchResults = results,
+                    isSearching = false,
+                    searchMatchIndex = 0
+                )
+            }
+            if (results.isNotEmpty()) {
+                _navigateToMessageFlow.emit(results[0].packetId)
+                highlightMessage(results[0].packetId)
+            }
+        }
+    }
+
+    private fun handleDateSelected(epochDayMillis: Long) {
+        val convId = _uiState.value.conversationId
+        if (convId.isBlank()) return
+        val zoneId = java.time.ZoneId.systemDefault()
+        val instant = java.time.Instant.ofEpochMilli(epochDayMillis)
+        val localDate = instant.atZone(zoneId).toLocalDate()
+        val startOfDay = localDate.atStartOfDay(zoneId).toInstant().toEpochMilli()
+        val endOfDay = localDate.plusDays(1).atStartOfDay(zoneId).toInstant().toEpochMilli()
+
+        _uiState.update { it.copy(showDatePickerDialog = false) }
+        viewModelScope.launch {
+            val firstMessage = chatRepository.getFirstMessageOnDate(convId, startOfDay, endOfDay)
+            if (firstMessage != null) {
+                _uiState.update { it.copy(isSearchActive = false) }
+                _navigateToMessageFlow.emit(firstMessage.packetId)
+                highlightMessage(firstMessage.packetId)
+            } else {
+                _uiState.update { it.copy(errorMessage = "No messages found on this date.") }
+            }
         }
     }
 
     private fun initializeConversation(event: ChatUiEvent.Init) {
+        if (event.conversationId.isBlank() || event.participantNxId.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    errorMessage = "Unable to open this conversation. Please try again.",
+                    conversationId = event.conversationId,
+                    participantNxId = event.participantNxId,
+                    participantName = event.participantName.ifBlank { "Unknown contact" }
+                )
+            }
+            return
+        }
+
         _uiState.update {
             it.copy(
                 conversationId = event.conversationId,
                 participantNxId = event.participantNxId,
-                participantName = event.participantName,
-                originalProfileName = event.participantName,
+                participantName = event.participantName.ifBlank { "Unknown contact" },
+                originalProfileName = event.participantName.ifBlank { "Unknown contact" },
                 destinationPhone = event.destinationPhone ?: it.destinationPhone
             )
         }
@@ -365,6 +564,17 @@ class ChatViewModel(
             }
         }
 
+        viewModelScope.launch {
+            try {
+                val draft = chatRepository.getDraft(event.conversationId)
+                if (draft != null && draft.draftText.isNotBlank()) {
+                    _uiState.update { it.copy(inputText = draft.draftText) }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to restore draft: ${e.message}")
+            }
+        }
+
         messagesJob?.cancel()
         messagesJob = viewModelScope.launch {
             try {
@@ -378,7 +588,52 @@ class ChatViewModel(
 
         observePinnedMessages(event.conversationId)
         observeTyping(event.conversationId)
+        observeScheduledMessages(event.conversationId)
         markConversationAsRead()
+    }
+
+    private fun observeScheduledMessages(conversationId: String) {
+        scheduledMessagesJob?.cancel()
+        scheduledMessagesJob = viewModelScope.launch {
+            try {
+                scheduledMessageManager?.observeActiveSchedulesForChat(conversationId)?.collect { list ->
+                    _uiState.update { it.copy(scheduledMessages = list) }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error observing scheduled messages for $conversationId", e)
+            }
+        }
+    }
+
+    private fun scheduleCurrentMessage(scheduledAtUtcMillis: Long) {
+        val state = _uiState.value
+        val text = SafeMessageParser.sanitizeInputText(state.inputText.trim())
+        if (text.isBlank() || state.participantNxId.isBlank() || state.conversationId.isBlank()) return
+
+        val replyTarget = state.replyingToMessage
+        _uiState.update { it.copy(inputText = "", replyingToMessage = null, showScheduleDialog = false) }
+
+        viewModelScope.launch {
+            val result = scheduledMessageManager?.scheduleMessage(
+                chatId = state.conversationId,
+                recipientId = state.participantNxId,
+                content = text,
+                scheduledAtUtcMillis = scheduledAtUtcMillis,
+                replyToMessageId = replyTarget?.packetId,
+                transportType = state.selectedTransport,
+                destinationPhone = state.destinationPhone
+            )
+            result?.onFailure { error ->
+                Log.e(TAG, "Failed to schedule message", error)
+                _uiState.update { it.copy(errorMessage = error.message ?: "Failed to schedule message") }
+            }
+        }
+    }
+
+    private fun cancelScheduledMessage(id: String) {
+        viewModelScope.launch {
+            scheduledMessageManager?.cancelScheduledMessage(id)
+        }
     }
 
     private fun observePinnedMessages(conversationId: String) {
@@ -422,6 +677,7 @@ class ChatViewModel(
             chatRepository.getConnectionState().collect { state ->
                 val isConnected = state is ConnectionState.Connected
                 val presenceMode = chatPrivacyPrefs?.onlinePresenceMode ?: OnlinePrivacyMode.EVERYONE
+                val showOnlineStatus = chatPrivacyPrefs?.showOnlineStatus ?: true
                 transportHandoffJob?.cancel()
 
                 if (isConnected) {
@@ -435,7 +691,7 @@ class ChatViewModel(
                         current.copy(
                             connectionState = state,
                             selectedTransport = updatedTransport,
-                            isPeerOnline = if (presenceMode != OnlinePrivacyMode.NOBODY) true else false
+                            isPeerOnline = showOnlineStatus && presenceMode != OnlinePrivacyMode.NOBODY
                         )
                     }
                 } else {
@@ -463,6 +719,16 @@ class ChatViewModel(
     private fun handleInputTextChanged(text: String) {
         val boundedText = SafeMessageParser.sanitizeInputText(text)
         _uiState.update { it.copy(inputText = boundedText) }
+
+        val convId = _uiState.value.conversationId
+        if (convId.isNotBlank()) {
+            draftSaveJob?.cancel()
+            draftSaveJob = viewModelScope.launch {
+                kotlinx.coroutines.delay(500)
+                chatRepository.saveDraft(convId, boundedText)
+            }
+        }
+
         val typingMode = chatPrivacyPrefs?.typingIndicatorMode ?: TypingPrivacyMode.EVERYONE
         if (typingMode == TypingPrivacyMode.NOBODY) return
 
@@ -570,15 +836,25 @@ class ChatViewModel(
             chatRepository.sendTypingIndicator(state.participantNxId, state.conversationId, false)
         }
 
-        _uiState.update { it.copy(inputText = "") }
+        val replyTarget = state.replyingToMessage
+        _uiState.update { it.copy(inputText = "", replyingToMessage = null) }
         NexaTelemetryEngine.recordMessageSent(state.selectedTransport)
+
+        val convId = state.conversationId
+        if (convId.isNotBlank()) {
+            draftSaveJob?.cancel()
+            viewModelScope.launch {
+                chatRepository.clearDraft(convId)
+            }
+        }
 
         viewModelScope.launch {
             val result = chatRepository.sendMessage(
                 recipientNxId = state.participantNxId,
                 text = text,
                 transport = state.selectedTransport,
-                destinationPhone = state.destinationPhone
+                destinationPhone = state.destinationPhone,
+                replyToMessageId = replyTarget?.packetId
             )
             result.onSuccess {
                 NexaTelemetryEngine.recordMessageDelivered()
@@ -757,6 +1033,40 @@ class ChatViewModel(
             it.copy(
                 transcodeState = TranscodeState(isTranscoding = false, progressPercent = 0)
             )
+        }
+    }
+
+    private fun sendGifMeme(content: String, messageType: MessageType) {
+        val state = _uiState.value
+        if (state.participantNxId.isBlank()) return
+        val replyTarget = state.replyingToMessage
+        _uiState.update { it.copy(replyingToMessage = null) }
+        viewModelScope.launch {
+            chatRepository.sendMediaMessage(
+                recipientNxId = state.participantNxId,
+                localPath = content,
+                messageType = messageType,
+                caption = "",
+                replyToMessageId = replyTarget?.packetId
+            )
+        }
+    }
+
+    private fun toggleReaction(messageId: String, emoji: String) {
+        viewModelScope.launch {
+            chatRepository.addReaction(messageId, emoji)
+        }
+    }
+
+    private fun deleteMessage(message: Message) {
+        viewModelScope.launch {
+            chatRepository.softDeleteMessage(message.packetId)
+        }
+    }
+
+    private fun toggleStarMessage(message: Message) {
+        viewModelScope.launch {
+            chatRepository.starMessage(message.packetId, !message.isStarred)
         }
     }
 }

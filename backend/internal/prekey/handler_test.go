@@ -29,35 +29,56 @@ func newMockIdentityRepo() *mockIdentityRepo {
 }
 
 func (m *mockIdentityRepo) AllocateNxID(pubKeyHex string) (string, error) { return "NX-ALLOC01", nil }
-func (m *mockIdentityRepo) CreateAccount(a *identity.UserAccount) error  { return nil }
+func (m *mockIdentityRepo) CreateAccount(a *identity.UserAccount) error   { return nil }
 func (m *mockIdentityRepo) GetAccountByNxID(nxId string) (*identity.UserAccount, bool) {
 	a, ok := m.accounts[nxId]
 	return a, ok
 }
-func (m *mockIdentityRepo) GetAccountByPhone(p string) (*identity.UserAccount, bool) { return nil, false }
-func (m *mockIdentityRepo) GetAccountByGoogleID(g string) (*identity.UserAccount, bool) { return nil, false }
-func (m *mockIdentityRepo) GetAccountBySupabaseUID(s string) (*identity.UserAccount, bool) { return nil, false }
-func (m *mockIdentityRepo) GetAccountByPublicKey(pubKeyHex string) (*identity.UserAccount, bool) { return nil, false }
-func (m *mockIdentityRepo) UpdateAccount(a *identity.UserAccount) error  { return nil }
-func (m *mockIdentityRepo) LookupVerifiedPhoneNumbers(phoneNumbers []string) []*identity.ContactMatch { return nil }
+func (m *mockIdentityRepo) GetAccountByPhone(p string) (*identity.UserAccount, bool) {
+	return nil, false
+}
+func (m *mockIdentityRepo) GetAccountByGoogleID(g string) (*identity.UserAccount, bool) {
+	return nil, false
+}
+func (m *mockIdentityRepo) GetAccountBySupabaseUID(s string) (*identity.UserAccount, bool) {
+	return nil, false
+}
+func (m *mockIdentityRepo) GetAccountByPublicKey(pubKeyHex string) (*identity.UserAccount, bool) {
+	return nil, false
+}
+func (m *mockIdentityRepo) UpdateAccount(a *identity.UserAccount) error { return nil }
+func (m *mockIdentityRepo) LookupVerifiedPhoneNumbers(phoneNumbers []string) []*identity.ContactMatch {
+	return nil
+}
 func (m *mockIdentityRepo) RegisterDevice(d *identity.Device) error { return nil }
+func (m *mockIdentityRepo) RegisterDeviceReplacingOthers(d *identity.Device, reason string) ([]string, error) {
+	return nil, nil
+}
+func (m *mockIdentityRepo) GetAllDevicesForAccount(nxId string) []*identity.Device { return nil }
+func (m *mockIdentityRepo) RecordDeviceEvent(event *identity.DeviceEvent) error    { return nil }
+func (m *mockIdentityRepo) GetDeviceEvents(nxID string, limit int) ([]*identity.DeviceEvent, error) {
+	return nil, nil
+}
 func (m *mockIdentityRepo) GetDevice(deviceId string) (*identity.Device, bool) {
 	d, ok := m.devices[deviceId]
 	return d, ok
 }
-func (m *mockIdentityRepo) GetDevicesForAccount(nxId string) []*identity.Device { return nil }
-func (m *mockIdentityRepo) GetDevices(nxID string) ([]*identity.Device, error) { return nil, nil }
-func (m *mockIdentityRepo) RevokeDevice(devId string) error { return nil }
-func (m *mockIdentityRepo) RevokeDeviceForUser(nxID string, deviceID string) error { return nil }
+func (m *mockIdentityRepo) GetDevicesForAccount(nxId string) []*identity.Device      { return nil }
+func (m *mockIdentityRepo) GetDevices(nxID string) ([]*identity.Device, error)       { return nil, nil }
+func (m *mockIdentityRepo) RevokeDevice(devId string) error                          { return nil }
+func (m *mockIdentityRepo) RevokeDeviceForUser(nxID string, deviceID string) error   { return nil }
 func (m *mockIdentityRepo) UpdateDeviceFcmToken(deviceID string, token string) error { return nil }
-func (m *mockIdentityRepo) CreateSession(s *identity.Session) error { return nil }
+func (m *mockIdentityRepo) CreateSession(s *identity.Session) error                  { return nil }
 func (m *mockIdentityRepo) GetSession(token string) (*identity.Session, bool) {
 	s, ok := m.sessions[token]
 	return s, ok
 }
 func (m *mockIdentityRepo) RevokeSession(token string) error { return nil }
+func (m *mockIdentityRepo) RevokeSessionsForDevice(nxID string, deviceID string, exceptToken string, createdBefore int64) (int, error) {
+	return 0, nil
+}
 func (m *mockIdentityRepo) CountAccounts() (int, error) { return 1, nil }
-func (m *mockIdentityRepo) Close() error { return nil }
+func (m *mockIdentityRepo) Close() error                     { return nil }
 
 func TestHandlerEndpoints(t *testing.T) {
 	// Setup keys

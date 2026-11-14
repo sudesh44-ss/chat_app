@@ -1,9 +1,9 @@
 package com.nexa.app
 
 import com.nexa.app.core.security.DualScanEngine
+import com.nexa.app.core.security.DualScanResult
 import com.nexa.app.core.security.InspectionVerdict
 import com.nexa.app.core.security.MagicByteInspector
-import com.nexa.app.core.security.ScanResult
 import com.nexa.app.core.security.ThreatBloomFilter
 import com.nexa.app.core.security.YaraNativeBridge
 import com.nexa.app.core.util.FileShredder
@@ -267,8 +267,8 @@ class DualGateSecurityUnitTests {
         val expectedHash = sha256Hex(cleanBytes)
 
         val verdict = dualScan.scanInboundQuarantine(cleanFile, expectedHash, "png")
-        assertTrue("Clean PNG must pass Gate 2 verification", verdict is ScanResult.Clean)
-        assertEquals(expectedHash, (verdict as ScanResult.Clean).hash)
+        assertTrue("Clean PNG must pass Gate 2 verification", verdict is DualScanResult.Clean)
+        assertEquals(expectedHash, (verdict as DualScanResult.Clean).hash)
     }
 
     @Test
@@ -283,8 +283,8 @@ class DualGateSecurityUnitTests {
         val wrongHash = "0000000000000000000000000000000000000000000000000000000000000000"
 
         val verdict = dualScan.scanInboundQuarantine(file, wrongHash, "txt")
-        assertTrue("Tampered hash must return ScanResult.Corrupted", verdict is ScanResult.Corrupted)
-        assertTrue((verdict as ScanResult.Corrupted).message.contains("Hash mismatch"))
+        assertTrue("Tampered hash must return ScanResult.Corrupted", verdict is DualScanResult.Corrupted)
+        assertTrue((verdict as DualScanResult.Corrupted).message.contains("Hash mismatch"))
     }
 
     @Test
@@ -301,8 +301,8 @@ class DualGateSecurityUnitTests {
         val hash = sha256Hex(mzData)
 
         val verdict = dualScan.scanInboundQuarantine(maliciousFile, hash, "jpg")
-        assertTrue("Disguised MZ binary must be flagged as ScanResult.Malicious", verdict is ScanResult.Malicious)
-        assertTrue((verdict as ScanResult.Malicious).reason.contains("dangerous binary"))
+        assertTrue("Disguised MZ binary must be flagged as ScanResult.Malicious", verdict is DualScanResult.Malicious)
+        assertTrue((verdict as DualScanResult.Malicious).reason.contains("dangerous binary"))
     }
 
     // ==========================================

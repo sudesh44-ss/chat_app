@@ -31,7 +31,8 @@ class AuthRepositoryImpl(
     private val apiService: AuthApiService,
     private val userDao: UserDao,
     private val keystoreManager: CryptoKeystoreManager,
-    private val secureStorage: SecureStorage
+    private val secureStorage: SecureStorage,
+    private val appContext: android.content.Context? = null
 ) : AuthRepository {
 
     private val _accountStatus = MutableStateFlow(
@@ -43,6 +44,19 @@ class AuthRepositoryImpl(
     )
 
     override fun getAccountStatus(): Flow<AccountStatus> = _accountStatus.asStateFlow()
+
+    /**
+     * Probes the real Keystore security level after the identity key exists and
+     * persists it. Swallows failures: an unprobed key must not block sign-in,
+     * and the UI treats a missing value as UNKNOWN rather than claiming TEE.
+     */
+    private fun recordHardwareSecurityLevel(security: com.nexa.app.core.keystore.NexaHardwareSecurity) {
+        try {
+            secureStorage.saveHardwareSecurityLevel(security.getHardwareSecurityLevel().name)
+        } catch (_: Exception) {
+            // Level stays unrecorded; UI shows UNKNOWN.
+        }
+    }
 
     override suspend fun updateDisplayName(name: String): Result<Boolean> = withContext(Dispatchers.IO) {
         try {
@@ -59,19 +73,33 @@ class AuthRepositoryImpl(
         }
     }
 
+    /**
+     * Requests a server-side OTP for a phone-number change. The backend binds the
+     * OTP to the authenticated account; no client-side success is assumed.
+     */
     override suspend fun requestChangePhoneOtp(newPhone: String): Result<Boolean> = withContext(Dispatchers.IO) {
-        sendVerificationOtp(newPhone, null)
+        val token = secureStorage.getAuthToken()
+            ?: return@withContext Result.failure(IllegalStateException("Not signed in"))
+        apiService.requestPhoneChange(token, newPhone)
     }
 
+    /**
+     * Verifies the phone-change OTP with the backend. The local profile is only
+     * updated after the server confirms ownership and uniqueness.
+     */
     override suspend fun verifyChangePhoneOtp(newPhone: String, otp: String): Result<Boolean> = withContext(Dispatchers.IO) {
         try {
             val nxId = getActiveNxId() ?: return@withContext Result.failure(IllegalStateException("No active account"))
-            if (otp.length == 6) {
-                userDao.updatePhoneNumber(nxId, newPhone)
-                Result.success(true)
-            } else {
-                Result.failure(IllegalArgumentException("Invalid 6-digit OTP code"))
+            val token = secureStorage.getAuthToken()
+                ?: return@withContext Result.failure(IllegalStateException("Not signed in"))
+
+            val verified = apiService.verifyPhoneChange(token, newPhone, otp).getOrThrow()
+            if (!verified) {
+                return@withContext Result.failure(SecurityException("Phone change was rejected by the server"))
             }
+
+            userDao.updatePhoneNumber(nxId, newPhone)
+            Result.success(true)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -99,26 +127,31 @@ class AuthRepositoryImpl(
 
     override suspend fun requestDeletionOtp(): Result<Boolean> = withContext(Dispatchers.IO) {
         try {
-            val profile = userDao.getLocalProfile()
-            if (profile != null) {
-                sendVerificationOtp(profile.phoneNumber, null)
+            val token = secureStorage.getAuthToken()
+                ?: return@withContext Result.failure(IllegalStateException("Not signed in"))
+
+            val sent = apiService.requestAccountDeletion(token).getOrThrow()
+            if (!sent) {
+                return@withContext Result.failure(SecurityException("Deletion verification could not be started"))
             }
             _accountStatus.value = AccountStatus.DELETION_REQUESTED
             Result.success(true)
         } catch (e: Exception) {
-            _accountStatus.value = AccountStatus.DELETION_REQUESTED
-            Result.success(true)
+            Result.failure(e)
         }
     }
 
     override suspend fun verifyDeletionOtp(otp: String): Result<Boolean> = withContext(Dispatchers.IO) {
         try {
-            if (otp.length == 6) {
-                _accountStatus.value = AccountStatus.IDENTITY_VERIFIED
-                Result.success(true)
-            } else {
-                Result.failure(IllegalArgumentException("Invalid 6-digit OTP code"))
+            val token = secureStorage.getAuthToken()
+                ?: return@withContext Result.failure(IllegalStateException("Not signed in"))
+
+            val verified = apiService.verifyAccountDeletion(token, otp).getOrThrow()
+            if (!verified) {
+                return@withContext Result.failure(SecurityException("Deletion verification was rejected by the server"))
             }
+            _accountStatus.value = AccountStatus.IDENTITY_VERIFIED
+            Result.success(true)
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -199,7 +232,8 @@ class AuthRepositoryImpl(
                 val challengeId = response.challengeId ?: challengeHex
                 val challengeBytes = challengeHex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
 
-                val hardwareSecurity = com.nexa.app.core.keystore.NexaHardwareSecurity()
+                val hardwareSecurity = com.nexa.app.core.keystore.NexaHardwareSecurity(appContext)
+                recordHardwareSecurityLevel(hardwareSecurity)
                 val signatureBytes = hardwareSecurity.signChallenge(challengeBytes)
                 val signatureHex = signatureBytes.joinToString("") { "%02x".format(it) }
 
@@ -266,7 +300,8 @@ class AuthRepositoryImpl(
             ).getOrThrow()
 
             val challengeBytes = challengeResp.challenge.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
-            val hardwareSecurity = com.nexa.app.core.keystore.NexaHardwareSecurity()
+            val hardwareSecurity = com.nexa.app.core.keystore.NexaHardwareSecurity(appContext)
+            recordHardwareSecurityLevel(hardwareSecurity)
             val signatureBytes = hardwareSecurity.signChallenge(challengeBytes)
             val signatureHex = signatureBytes.joinToString("") { "%02x".format(it) }
 
@@ -510,6 +545,10 @@ class AuthRepositoryImpl(
                 )
             ).getOrThrow()
 
+            // The server is authoritative for device identity. Persist its device id
+            // before other state so same-device login detection works next time.
+            response.deviceId?.let { secureStorage.saveDeviceId(it) }
+
             val userEntity = UserEntity(
                 nxId = response.nxId,
                 fullName = name,
@@ -532,8 +571,23 @@ class AuthRepositoryImpl(
         }
     }
 
+    override suspend fun getDevices(): Result<List<com.nexa.app.data.remote.dto.DeviceInfoDto>> =
+        withContext(Dispatchers.IO) {
+            val token = secureStorage.getAuthToken()
+                ?: return@withContext Result.failure(IllegalStateException("Not signed in"))
+            apiService.getDevices(token)
+        }
+
+    override suspend fun revokeDevice(deviceId: String): Result<Boolean> = withContext(Dispatchers.IO) {
+        val token = secureStorage.getAuthToken()
+            ?: return@withContext Result.failure(IllegalStateException("Not signed in"))
+        apiService.revokeDevice(token, deviceId)
+    }
+
     override suspend fun clearSession() = withContext(Dispatchers.IO) {
         userDao.clearProfile()
-        secureStorage.clearAll()
+        // Credentials only: the DB passphrase, device id and identity keys must survive
+        // logout so local encrypted chat history remains readable.
+        secureStorage.clearSessionCredentials()
     }
 }

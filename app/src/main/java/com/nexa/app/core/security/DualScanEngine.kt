@@ -8,10 +8,11 @@ import java.io.File
 import java.io.FileInputStream
 import java.security.MessageDigest
 
-sealed interface ScanResult {
-    data class Clean(val hash: String) : ScanResult
-    data class Malicious(val reason: String) : ScanResult
-    data class Corrupted(val message: String) : ScanResult
+sealed interface DualScanResult {
+    data class Clean(val hash: String) : DualScanResult
+    data class Malicious(val reason: String) : DualScanResult
+    data class Corrupted(val message: String) : DualScanResult
+    data class Inconclusive(val reason: String) : DualScanResult
 }
 
 /**
@@ -26,27 +27,27 @@ class DualScanEngine(
 ) {
 
     // GATE 1: SENDER PRE-DISPATCH SCAN
-    suspend fun scanOutbound(uri: Uri, declaredExtension: String): ScanResult = withContext(Dispatchers.IO) {
+    suspend fun scanOutbound(uri: Uri, declaredExtension: String): DualScanResult = withContext(Dispatchers.IO) {
         val ext = declaredExtension.lowercase().removePrefix(".").trim()
         if (NexaFileSecurityEngine.BANNED_EXTENSIONS.contains(ext)) {
-            return@withContext ScanResult.Malicious("Blocked dangerous executable file extension: .$ext")
+            return@withContext DualScanResult.Malicious("Blocked dangerous executable file extension: .$ext")
         }
 
-        val ctx = context ?: return@withContext ScanResult.Corrupted("Inaccessible source context")
+        val ctx = context ?: return@withContext DualScanResult.Corrupted("Inaccessible source context")
         val stream = try {
             ctx.contentResolver.openInputStream(uri)
         } catch (e: Exception) {
             null
-        } ?: return@withContext ScanResult.Corrupted("Inaccessible source file")
+        } ?: return@withContext DualScanResult.Corrupted("Inaccessible source file")
 
         // 1. Magic Bytes & Extension Spoofing Check
         val headerVerdict = stream.use { MagicByteInspector.inspect(it, declaredExtension) }
         when (headerVerdict) {
             is InspectionVerdict.DangerousBinary -> {
-                return@withContext ScanResult.Malicious("Blocked executable file type: ${headerVerdict.detectedType}")
+                return@withContext DualScanResult.Malicious("Blocked executable file type: ${headerVerdict.detectedType}")
             }
             is InspectionVerdict.Spoofed -> {
-                return@withContext ScanResult.Malicious("File spoofing detected: Disguised as .${headerVerdict.declaredExt} (${headerVerdict.actualType})")
+                return@withContext DualScanResult.Malicious("File spoofing detected: Disguised as .${headerVerdict.declaredExt} (${headerVerdict.actualType})")
             }
             is InspectionVerdict.Clean -> Unit
         }
@@ -55,61 +56,97 @@ class DualScanEngine(
         val hash = try {
             computeSha256(uri)
         } catch (e: Exception) {
-            return@withContext ScanResult.Corrupted("Failed to compute file digest: ${e.localizedMessage}")
+            return@withContext DualScanResult.Corrupted("Failed to compute file digest: ${e.localizedMessage}")
         }
 
         // 3. Offline Known Malware Bloom Filter Lookup (O(1))
         if (bloomFilter.contains(hash)) {
-            return@withContext ScanResult.Malicious("Identified in known malware database.")
+            return@withContext DualScanResult.Malicious("Identified in known malware database.")
         }
 
         // 4. Native YARA Signature Inspection (Shellcode / Exploits / Macros)
         val yaraThreat = yaraScanner.scanUri(ctx, uri)
         if (yaraThreat != null) {
-            return@withContext ScanResult.Malicious("Matched threat signature: $yaraThreat")
+            return@withContext DualScanResult.Malicious("Matched threat signature: $yaraThreat")
         }
 
-        ScanResult.Clean(hash)
+        DualScanResult.Clean(hash)
     }
 
     // GATE 2: RECEIVER POST-DELIVERY ISOLATION SCAN
-    suspend fun scanInboundQuarantine(tempFile: File, expectedHash: String, declaredExt: String): ScanResult = withContext(Dispatchers.IO) {
+    suspend fun scanInboundQuarantine(tempFile: File, expectedHash: String, declaredExt: String): DualScanResult = withContext(Dispatchers.IO) {
         if (!tempFile.exists() || tempFile.length() == 0L) {
-            return@withContext ScanResult.Corrupted("Quarantined payload is missing or empty")
+            return@withContext DualScanResult.Corrupted("Quarantined payload is missing or empty")
+        }
+        if (tempFile.length() > FileSecurityManager.MAX_FILE_SIZE_BYTES) {
+            return@withContext DualScanResult.Inconclusive("Quarantined file exceeds the maximum supported scan size")
         }
 
         // 1. Cryptographic Hash Integrity Verification
         val actualHash = try {
             computeFileSha256(tempFile)
         } catch (e: Exception) {
-            return@withContext ScanResult.Corrupted("Failed to verify quarantined file digest: ${e.localizedMessage}")
+            return@withContext DualScanResult.Corrupted("Failed to verify quarantined file digest: ${e.localizedMessage}")
         }
 
         if (!actualHash.equals(expectedHash, ignoreCase = true)) {
-            return@withContext ScanResult.Corrupted(
+            return@withContext DualScanResult.Corrupted(
                 "Hash mismatch: Expected $expectedHash but got $actualHash (Tampered or incomplete stream)"
             )
         }
 
-        // 2. Re-Verify Magic Bytes on Reassembled Assembly
-        val headerVerdict = FileInputStream(tempFile).use { MagicByteInspector.inspect(it, declaredExt) }
-        when (headerVerdict) {
-            is InspectionVerdict.DangerousBinary -> {
-                return@withContext ScanResult.Malicious("Post-download scan flagged dangerous binary: ${headerVerdict.detectedType}")
+        val classification = FileReleaseClassifier.classify(tempFile, "received.$declaredExt")
+        when (classification) {
+            FileClassification.APK -> {
+                if (declaredExt.lowercase().removePrefix(".") != "apk") {
+                    return@withContext DualScanResult.Malicious("Post-download scan flagged an APK extension mismatch")
+                }
+                if (ArchiveScanner.scanAndroidPackage(tempFile) is ArchiveScanVerdict.Blocked) {
+                    return@withContext DualScanResult.Malicious("Post-download scan flagged a malformed APK package")
+                }
             }
-            is InspectionVerdict.Spoofed -> {
-                return@withContext ScanResult.Malicious("Post-download scan flagged extension spoofing: .${headerVerdict.declaredExt}")
+            FileClassification.EXECUTABLE -> {
+                val executableThreat = yaraScanner.scanFile(tempFile.absolutePath)
+                return@withContext DualScanResult.Malicious(
+                    executableThreat?.let { "Executable signature matched: $it" }
+                        ?: "Post-download scan flagged dangerous binary: executable content"
+                )
             }
-            is InspectionVerdict.Clean -> Unit
+            FileClassification.UNSUPPORTED -> {
+                return@withContext DualScanResult.Inconclusive("Unsupported file format; complete inspection is unavailable")
+            }
+            FileClassification.NORMAL -> {
+                val headerVerdict = FileInputStream(tempFile).use {
+                    MagicByteInspector.inspect(it, declaredExt)
+                }
+                when (headerVerdict) {
+                    is InspectionVerdict.DangerousBinary -> {
+                        return@withContext DualScanResult.Malicious(
+                            "Post-download scan flagged dangerous binary: ${headerVerdict.detectedType}"
+                        )
+                    }
+                    is InspectionVerdict.Spoofed -> {
+                        return@withContext DualScanResult.Malicious(
+                            "Post-download scan flagged extension spoofing: .${headerVerdict.declaredExt}"
+                        )
+                    }
+                    is InspectionVerdict.Clean -> Unit
+                }
+                if (declaredExt.lowercase().removePrefix(".") == "zip" &&
+                    ArchiveScanner.scanArchive(tempFile) is ArchiveScanVerdict.Blocked
+                ) {
+                    return@withContext DualScanResult.Malicious("Post-download scan flagged an unsafe archive")
+                }
+            }
         }
 
         // 3. Deep Static LibYARA Scan on Reassembled Assembly
         val yaraThreat = yaraScanner.scanFile(tempFile.absolutePath)
         if (yaraThreat != null) {
-            return@withContext ScanResult.Malicious("Post-download scan flagged threat: $yaraThreat")
+            return@withContext DualScanResult.Malicious("Post-download scan flagged threat: $yaraThreat")
         }
 
-        ScanResult.Clean(actualHash)
+        DualScanResult.Clean(actualHash)
     }
 
     private fun computeSha256(uri: Uri): String {

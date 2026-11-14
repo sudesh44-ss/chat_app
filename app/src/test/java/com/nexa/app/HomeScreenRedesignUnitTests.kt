@@ -157,9 +157,10 @@ class HomeScreenRedesignUnitTests {
     @Test
     fun testBottomNavDestinations() {
         val destinations = BottomNavDestination.values()
-        assertEquals(2, destinations.size)
+        assertEquals(3, destinations.size)
         assertTrue(destinations.contains(BottomNavDestination.HOME))
         assertTrue(destinations.contains(BottomNavDestination.PROFILE))
+        assertTrue(destinations.contains(BottomNavDestination.SETTINGS))
     }
 
     @Test

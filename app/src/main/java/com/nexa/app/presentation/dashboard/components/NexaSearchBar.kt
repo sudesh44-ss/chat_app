@@ -17,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
@@ -33,6 +34,7 @@ fun NexaSearchBar(
     onQueryChange: (String) -> Unit,
     placeholder: String = "Search messages or contacts...",
     onSearchBarClick: (() -> Unit)? = null,
+    onFocusChanged: (Boolean) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val focusManager = LocalFocusManager.current
@@ -78,7 +80,8 @@ fun NexaSearchBar(
                 keyboardActions = KeyboardActions(onSearch = { focusManager.clearFocus() }),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(start = 32.dp, end = if (query.isNotEmpty()) 32.dp else 0.dp),
+                    .padding(start = 32.dp, end = if (query.isNotEmpty()) 32.dp else 0.dp)
+                    .onFocusChanged { onFocusChanged(it.isFocused) },
                 decorationBox = { innerTextField ->
                     if (query.isEmpty()) {
                         Text(

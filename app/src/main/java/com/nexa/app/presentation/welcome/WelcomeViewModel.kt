@@ -35,6 +35,20 @@ data class WelcomeUiState(
     val proceedToPhoneOnly: Boolean = false
 )
 
+/**
+ * Canonical fail-closed state for a failed backend Google verification.
+ * There is intentionally no path from here to isSuccess=true: the client must
+ * never authenticate on an unverified Google token.
+ */
+internal fun googleVerificationFailedState(message: String): WelcomeUiState =
+    WelcomeUiState(
+        isLoading = false,
+        isSuccess = false,
+        isInstantLogin = false,
+        requireSimVerification = false,
+        errorMessage = message
+    )
+
 sealed interface WelcomeUiEvent {
     data class InitiateGoogleSignIn(val context: Context, val webClientId: String) : WelcomeUiEvent
     data object ContinueWithoutGoogle : WelcomeUiEvent
@@ -179,29 +193,16 @@ class WelcomeViewModel(
                                 }
                             }
                         }.onFailure { err ->
-                            Log.w(TAG, "Backend Google Auth verification failed, proceeding with client Google token: ${err.message}")
-                            _uiState.update {
-                                it.copy(
-                                    isLoading = false,
-                                    googleIdToken = token,
-                                    userEmail = email,
-                                    suggestedName = displayName,
-                                    isSuccess = true,
-                                    errorMessage = null
-                                )
-                            }
-                        }
-                    } else {
-                        _uiState.update {
-                            it.copy(
-                                isLoading = false,
-                                googleIdToken = token,
-                                userEmail = email,
-                                suggestedName = displayName,
-                                isSuccess = true,
-                                errorMessage = null
+                            Log.w(TAG, "Backend Google Auth verification failed; refusing client-side fallback: ${err.message}")
+                            _uiState.value = googleVerificationFailedState(
+                                "Could not verify your Google account with NEXA. Please check your connection and try again."
                             )
                         }
+                    } else {
+                        Log.e(TAG, "Auth repository unavailable; cannot verify Google identity")
+                        _uiState.value = googleVerificationFailedState(
+                            "Authentication is unavailable. Please restart the app and try again."
+                        )
                     }
                 } else {
                     _uiState.update {

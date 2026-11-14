@@ -14,16 +14,24 @@ import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.nexa.app.presentation.common.viewer.ProfileImageViewerScreen
@@ -38,6 +46,9 @@ import com.nexa.app.presentation.profile.components.ContactProfileHeader
 import com.nexa.app.presentation.profile.components.CustomNotificationsDialog
 import com.nexa.app.presentation.profile.components.EditUserDetailsDialog
 import com.nexa.app.presentation.profile.components.MuteNotificationsDialog
+import com.nexa.app.domain.model.UserStatusGroup
+import com.nexa.app.R
+import com.nexa.app.presentation.status.components.NexaSequentialStoryViewer
 import kotlinx.coroutines.launch
 
 /**
@@ -71,8 +82,35 @@ fun ContactProfileScreen(
     val coroutineScope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val scrollState = rememberScrollState()
+    var isStatusViewerVisible by remember { mutableStateOf(false) }
+    var showStatusUnavailableDialog by remember { mutableStateOf(false) }
+    val activeStatusGroup = remember(uiState.nxId, uiState.displayName, uiState.avatarUrl, uiState.activeStatuses) {
+        uiState.activeStatuses.takeIf { it.isNotEmpty() }?.let { statuses ->
+            UserStatusGroup(
+                userNxId = uiState.nxId,
+                displayName = uiState.displayName,
+                avatarUrl = uiState.avatarUrl,
+                statuses = statuses
+            )
+        }
+    }
+
+    LaunchedEffect(activeStatusGroup) {
+        if (activeStatusGroup == null) isStatusViewerVisible = false
+    }
 
     val screenBg = if (isDark) Color(0xFF000000) else Color(0xFFFFFFFF)
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+
+    DisposableEffect(lifecycleOwner, viewModel) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                viewModel.refreshStatusAvailability()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(uiState.snackbarMessage) {
         uiState.snackbarMessage?.let { msg ->
@@ -120,6 +158,34 @@ fun ContactProfileScreen(
                     }
                 )
 
+                Column(modifier = Modifier.padding(horizontal = 16.dp)) {
+                    TextButton(
+                        enabled = activeStatusGroup != null,
+                        onClick = {
+                            if (uiState.activeStatuses.isNotEmpty()) {
+                                isStatusViewerVisible = true
+                            } else {
+                                showStatusUnavailableDialog = true
+                            }
+                        }
+                    ) {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_nexa_clock_fading),
+                            contentDescription = null
+                        )
+                        Text("See Status", modifier = Modifier.padding(start = 8.dp))
+                    }
+                    Text(
+                        text = if (activeStatusGroup != null) "Available" else "Not available",
+                        color = if (activeStatusGroup != null) {
+                            androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant
+                        } else {
+                            androidx.compose.material3.MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        },
+                        modifier = Modifier.padding(start = 12.dp)
+                    )
+                }
+
                 // 2. Four Actions in 2-Column Capsule Layout (Chat, Video Call, Voice Call, Share)
                 ContactActionButtons(
                     onChatClick = {
@@ -165,9 +231,14 @@ fun ContactProfileScreen(
                 ContactActiveStatus(
                     isOnline = uiState.isOnline,
                     lastSeenText = uiState.lastSeenText,
+                    showOnlineStatus = uiState.showOnlineStatus,
                     onlinePrivacyMode = uiState.onlinePrivacyMode,
+                    offlinePresenceMode = uiState.offlinePresenceMode,
+                    selectedOnlineStatusContacts = uiState.selectedOnlineStatusContacts,
                     typingPrivacyMode = uiState.typingPrivacyMode,
+                    onToggleShowOnlineStatus = { viewModel.setShowOnlineStatus(it) },
                     onTogglePresenceMode = { viewModel.setPresenceMode(it) },
+                    onOfflinePresenceModeChanged = { viewModel.setOfflinePresenceMode(it) },
                     onToggleTypingMode = { viewModel.setTypingMode(it) }
                 )
 
@@ -260,6 +331,27 @@ fun ContactProfileScreen(
                 ProfileImageViewerScreen(
                     imageModel = photoModel,
                     onCloseClick = { viewModel.setPhotoViewerVisible(false) }
+                )
+            }
+
+            if (showStatusUnavailableDialog) {
+                AlertDialog(
+                    onDismissRequest = { showStatusUnavailableDialog = false },
+                    title = { Text("Status unavailable") },
+                    text = { Text("Status not posted by this contact.") },
+                    confirmButton = {
+                        TextButton(onClick = { showStatusUnavailableDialog = false }) {
+                            Text("OK")
+                        }
+                    }
+                )
+            }
+
+            if (isStatusViewerVisible && activeStatusGroup != null) {
+                NexaSequentialStoryViewer(
+                    group = activeStatusGroup,
+                    onDismiss = { isStatusViewerVisible = false },
+                    onMarkViewed = viewModel::markStatusViewed
                 )
             }
         }

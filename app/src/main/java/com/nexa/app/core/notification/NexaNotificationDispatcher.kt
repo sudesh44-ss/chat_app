@@ -9,6 +9,9 @@ import com.nexa.app.MainActivity
 import com.nexa.app.R
 import com.nexa.app.data.local.preferences.LockScreenMode
 import com.nexa.app.data.local.preferences.NotificationPrefs
+import com.nexa.app.data.local.preferences.ConversationPreferences
+import com.nexa.app.data.local.preferences.SoundCategory
+import com.nexa.app.core.sound.NexaSoundManager
 
 /**
  * Production-Grade Notification Dispatcher for NEXA.
@@ -20,7 +23,9 @@ import com.nexa.app.data.local.preferences.NotificationPrefs
  */
 class NexaNotificationDispatcher(
     private val context: Context,
-    private val notificationPrefs: NotificationPrefs
+    private val notificationPrefs: NotificationPrefs,
+    private val soundManager: NexaSoundManager? = null,
+    private val conversationPreferences: ConversationPreferences? = null
 ) {
 
     companion object {
@@ -45,6 +50,8 @@ class NexaNotificationDispatcher(
         decryptedText: String,
         messageId: String
     ) {
+        if (conversationPreferences?.isMuted(conversationId) == true) return
+
         val settings = notificationPrefs.getSnapshot()
         if (!settings.directMessagesEnabled) return
 
@@ -106,6 +113,9 @@ class NexaNotificationDispatcher(
 
         try {
             notificationManager.notify(notifId, baseBuilder.build())
+            if (!isSuppressedByQuietHours) {
+                soundManager?.playEventSound(SoundCategory.MESSAGE, eventKey = messageId)
+            }
         } catch (e: SecurityException) {
             // POST_NOTIFICATIONS permission not granted
         }
@@ -121,6 +131,8 @@ class NexaNotificationDispatcher(
         decryptedText: String,
         isMention: Boolean
     ) {
+        if (conversationPreferences?.isMuted(groupId) == true) return
+
         val settings = notificationPrefs.getSnapshot()
         if (!settings.groupsEnabled) return
         if (settings.groupMentionsOnly && !isMention) return
@@ -148,6 +160,9 @@ class NexaNotificationDispatcher(
 
         try {
             notificationManager.notify(notifId, builder.build())
+            if (!isSuppressed) {
+                soundManager?.playEventSound(SoundCategory.GROUP_MESSAGE)
+            }
         } catch (e: SecurityException) {
             // Permission missing
         }
@@ -181,6 +196,7 @@ class NexaNotificationDispatcher(
 
         try {
             notificationManager.notify(CALL_NOTIF_ID, builder.build())
+            soundManager?.startCallRingtone()
         } catch (e: SecurityException) {
             // Permission missing
         }
@@ -214,6 +230,10 @@ class NexaNotificationDispatcher(
 
             try {
                 notificationManager.notify(notifId, completedBuilder.build())
+                soundManager?.playEventSound(
+                    SoundCategory.TRANSFER_COMPLETED,
+                    eventKey = "transfer_completed_$transferId"
+                )
             } catch (e: SecurityException) {}
             return
         }
@@ -255,6 +275,7 @@ class NexaNotificationDispatcher(
 
         try {
             notificationManager.notify(notifId, builder.build())
+            soundManager?.playEventSound(SoundCategory.NEARBY_DEVICE, eventKey = peerNxId)
         } catch (e: SecurityException) {}
     }
 
@@ -276,15 +297,20 @@ class NexaNotificationDispatcher(
 
         try {
             notificationManager.notify(notifId, builder.build())
+            soundManager?.playEventSound(SoundCategory.CONNECTION_REQUEST, eventKey = requesterNxId)
         } catch (e: SecurityException) {}
     }
 
     fun cancelNotification(notificationId: Int) {
         notificationManager.cancel(notificationId)
+        if (notificationId == CALL_NOTIF_ID) {
+            soundManager?.stopCallRingtone()
+        }
     }
 
     fun cancelAll() {
         notificationManager.cancelAll()
+        soundManager?.stopCallRingtone()
     }
 
     private fun applyLockScreenPolicy(

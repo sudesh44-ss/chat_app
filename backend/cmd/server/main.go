@@ -51,6 +51,19 @@ func main() {
 	}
 	isProduction := env == "production"
 
+	// Fail fast when phone protection secrets are missing. Production has no
+	// fallback key: starting without PHONE_HMAC_KEY/PHONE_ENC_KEY would make
+	// phone lookups silently unavailable.
+	if err := identity.ValidatePhoneCryptoConfig(); err != nil {
+		log.Fatalf("[Server] CRITICAL: phone protection is not configured: %v", err)
+	}
+
+	// Fail fast when the OTP HMAC pepper is missing in production. The dev
+	// fallback pepper is deliberately never accepted when APP_ENV=production.
+	if err := auth.ValidateOtpConfig(isProduction); err != nil {
+		log.Fatalf("[Server] CRITICAL: OTP configuration is invalid: %v", err)
+	}
+
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
@@ -100,6 +113,9 @@ func main() {
 			if err := database.RunMigrations(migCtx, pool); err != nil {
 				log.Fatalf("[Server] CRITICAL: Failed to apply database migrations: %v", err)
 			}
+			if _, err := database.BackfillPhoneProtection(migCtx, pool); err != nil {
+				log.Fatalf("[Server] CRITICAL: Failed to backfill phone protection: %v", err)
+			}
 			migCancel()
 
 			pgRepo := database.NewPostgresRepository(pool)
@@ -144,6 +160,10 @@ func main() {
 
 	smsProvider := auth.GetDefaultSmsProvider()
 	otpService := auth.NewOtpService(smsProvider)
+	// Phase 3: share OTP records, cooldowns, auth tickets and rate limits across
+	// instances. A nil client keeps dev/test on the in-memory fallback; production
+	// fails closed inside the OTP service.
+	otpService.SetDistributedState(buffer.GetClient(), isProduction)
 	googleVerifier := auth.NewGoogleVerifier()
 	authHandler := auth.NewAuthHandler(identityRepo, otpService, googleVerifier)
 	authHandler.SetChallengeStore(auth.NewChallengeStore(buffer.GetClient()))
@@ -302,12 +322,12 @@ func main() {
 			redisStatus = "DEGRADED_IN_MEMORY"
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"service":   "NEXA Blind-Postman Relay Server",
-			"status":    "UP",
-			"database":  dbStatus,
-			"redis":     redisStatus,
-			"mode":      "Ephemeral-RAM-Only",
-			"version":   "1.0",
+			"service":  "NEXA Blind-Postman Relay Server",
+			"status":   "UP",
+			"database": dbStatus,
+			"redis":    redisStatus,
+			"mode":     "Ephemeral-RAM-Only",
+			"version":  "1.0",
 			"endpoints": []string{
 				"/health", "/api/v1/telemetry/metrics", "/api/v1/telemetry/batch",
 				"/api/v1/media/upload-ticket", "/api/v1/media/purge-ack", "/ws", "/ws/signaling",

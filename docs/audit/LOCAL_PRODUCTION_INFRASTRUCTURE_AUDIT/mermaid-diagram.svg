@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 827.20975 2240.3340000000003" width="827.20975" height="2240.3340000000003" style="--bg:#18181B;--fg:#F4F4F5;--line:#71717A;--muted:#A1A1AA;--surface:#27272A;--border:#3F3F46;background:var(--bg)">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&amp;display=swap');
+  text { font-family: 'Inter', system-ui, sans-serif; }
+  svg {
+    /* Derived from --bg and --fg (overridable via --line, --accent, etc.) */
+    --_text:          var(--fg);
+    --_text-sec:      var(--muted, color-mix(in srgb, var(--fg) 60%, var(--bg)));
+    --_text-muted:    var(--muted, color-mix(in srgb, var(--fg) 40%, var(--bg)));
+    --_text-faint:    color-mix(in srgb, var(--fg) 25%, var(--bg));
+    --_line:          var(--line, color-mix(in srgb, var(--fg) 50%, var(--bg)));
+    --_arrow:         var(--accent, color-mix(in srgb, var(--fg) 85%, var(--bg)));
+    --_node-fill:     var(--surface, color-mix(in srgb, var(--fg) 3%, var(--bg)));
+    --_node-stroke:   var(--border, color-mix(in srgb, var(--fg) 20%, var(--bg)));
+    --_group-fill:    var(--bg);
+    --_group-hdr:     color-mix(in srgb, var(--fg) 5%, var(--bg));
+    --_inner-stroke:  color-mix(in srgb, var(--fg) 12%, var(--bg));
+    --_key-badge:     color-mix(in srgb, var(--fg) 10%, var(--bg));
+  }
+</style>
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="5" refX="7" refY="2.5" orient="auto">
+    <polygon points="0 0, 8 2.5, 0 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+  <marker id="arrowhead-start" markerWidth="8" markerHeight="5" refX="1" refY="2.5" orient="auto-start-reverse">
+    <polygon points="8 0, 0 2.5, 8 5" fill="var(--_arrow)" stroke="var(--_arrow)" stroke-width="0.75" stroke-linejoin="round" />
+  </marker>
+</defs>
+<polyline class="edge" data-from="A" data-to="B" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Credential Manager ID Token" points="436.5874999999999,76.9 436.5875,193.2" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="B" data-to="C" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Same Device (Known Hardware Key)" points="388.05174999999997,338.80724999999995 388.05174999999997,491.643 145.07849999999996,491.643 145.07850000000002,1061.6589999999999" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="B" data-to="D" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="New User" points="436.5875,387.34299999999996 436.5875,503.643" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="B" data-to="E" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Device Switch / SIM Change" points="485.1232499999999,338.80724999999995 485.1232499999999,491.643 605.0179999999999,491.643 605.0179999999999,798.0429999999999 565.9559166666666,798.0429999999999 565.9559166666666,810.0429999999999" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="D" data-to="F" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Validate +91 Domestic Phone" points="436.5875,540.543 436.5875,656.843" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="F" data-to="E" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Receive 90s Nonce + Inbound Gateway" points="436.5875,693.7429999999999 436.5875,798.0429999999999 475.6495833333333,798.0429999999999 475.6495833333333,810.0429999999999" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="E" data-to="G" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Dual-SIM Check" points="475.6495833333333,846.9429999999999 475.6495833333333,882.9429999999999 383.95374999999996,882.9429999999999 383.9537499999999,963.2429999999998" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="G" data-to="H" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Dual-SIM" points="357.4010833333333,1096.0063333333333 357.4010833333333,1134.5589999999997 260.79974999999996,1134.5589999999997 260.79975,1214.8589999999997" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="G" data-to="I" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Single SIM" points="410.5064166666666,1096.006333333333 410.5064166666666,1134.5589999999997 507.1077499999999,1134.5589999999997 507.1077499999999,1214.8589999999997" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="H" data-to="J" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="260.79975,1251.7589999999998 260.79975,1275.7589999999998 383.9537499999999,1275.7589999999998 383.9537499999999,1299.7589999999998" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="I" data-to="J" data-style="solid" data-arrow-start="false" data-arrow-end="true" points="507.1077499999999,1251.7589999999998 507.1077499999999,1275.7589999999998 383.9537499999999,1275.7589999999998 383.9537499999999,1299.7589999999998" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="J" data-to="K" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Carrier Routes SMS to Gateway" points="383.9537499999999,1336.6589999999999 383.9537499999999,1452.9589999999998" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="K" data-to="L" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Match Nonce + Sender Phone" points="383.9537499999999,1489.859 383.9537499999999,1606.1589999999999" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="E" data-to="M" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Poll /auth/verification-status (every 2s)" points="565.9559166666666,846.9429999999999 565.9559166666666,1202.8589999999997 693.17175,1202.8589999999997 693.17175,1723.359 564.9919166666666,1723.359 564.9919166666666,1761.7881666666665" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="L" data-to="M" data-style="dotted" data-arrow-start="false" data-arrow-end="true" data-label="Status: VERIFIED" points="383.9537499999999,1643.059 383.95374999999996,1723.359 512.1335833333333,1723.359 512.1335833333333,1761.7881666666665" fill="none" stroke="var(--_line)" stroke-width="1" stroke-dasharray="4 4" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="M" data-to="N" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Yes" points="538.5627499999999,1893.934 538.5627499999999,2010.234" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<polyline class="edge" data-from="N" data-to="O" data-style="solid" data-arrow-start="false" data-arrow-end="true" data-label="Tap 'Next / Go to Chats'" points="538.5627499999999,2047.134 538.5627499999999,2163.434" fill="none" stroke="var(--_line)" stroke-width="1" marker-end="url(#arrowhead)" />
+<g class="edge-label" data-from="A" data-to="B" data-label="Credential Manager ID Token">
+  <rect x="358.5875" y="119.9" width="155.458" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="436.31649999999996" y="135.05" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Credential Manager ID Token</text>
+</g>
+<g class="edge-label" data-from="B" data-to="C" data-label="Same Device (Known Hardware Key)">
+  <rect x="50.57849999999996" y="988.3589999999999" width="188.72200000000004" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="144.93949999999998" y="1003.5089999999999" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Same Device (Known Hardware Key)</text>
+</g>
+<g class="edge-label" data-from="B" data-to="D" data-label="New User">
+  <rect x="404.5875" y="430.34299999999996" width="63.388000000000005" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="436.2815" y="445.49299999999994" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">New User</text>
+</g>
+<g class="edge-label" data-from="B" data-to="E" data-label="Device Switch / SIM Change">
+  <rect x="531.0179999999999" y="583.543" width="147.14200000000002" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="604.5889999999999" y="598.693" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Device Switch / SIM Change</text>
+</g>
+<g class="edge-label" data-from="D" data-to="F" data-label="Validate +91 Domestic Phone">
+  <rect x="362.0875" y="583.543" width="148.92400000000004" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="436.54949999999997" y="598.693" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Validate +91 Domestic Phone</text>
+</g>
+<g class="edge-label" data-from="F" data-to="E" data-label="Receive 90s Nonce + Inbound Gateway">
+  <rect x="337.0875" y="736.7429999999999" width="198.82000000000002" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="436.4975" y="751.8929999999999" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Receive 90s Nonce + Inbound Gateway</text>
+</g>
+<g class="edge-label" data-from="E" data-to="G" data-label="Dual-SIM Check">
+  <rect x="336.95374999999996" y="889.9429999999999" width="93.08800000000001" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="383.49774999999994" y="905.0929999999998" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Dual-SIM Check</text>
+</g>
+<g class="edge-label" data-from="G" data-to="H" data-label="Dual-SIM">
+  <rect x="230.29974999999996" y="1141.5589999999997" width="60.418000000000006" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="260.50874999999996" y="1156.7089999999998" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Dual-SIM</text>
+</g>
+<g class="edge-label" data-from="G" data-to="I" data-label="Single SIM">
+  <rect x="473.1077499999999" y="1141.5589999999997" width="67.546" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="506.8807499999999" y="1156.7089999999998" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Single SIM</text>
+</g>
+<g class="edge-label" data-from="J" data-to="K" data-label="Carrier Routes SMS to Gateway">
+  <rect x="300.95374999999996" y="1379.6589999999999" width="165.556" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="383.73175" y="1394.809" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Carrier Routes SMS to Gateway</text>
+</g>
+<g class="edge-label" data-from="K" data-to="L" data-label="Match Nonce + Sender Phone">
+  <rect x="304.95374999999996" y="1532.859" width="157.24000000000004" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="383.57374999999996" y="1548.009" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Match Nonce + Sender Phone</text>
+</g>
+<g class="edge-label" data-from="E" data-to="M" data-label="Poll /auth/verification-status (every 2s)">
+  <rect x="594.17175" y="1662.059" width="197.038" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="692.69075" y="1677.209" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Poll /auth/verification-status (every 2s)</text>
+</g>
+<g class="edge-label" data-from="L" data-to="M" data-label="Status: VERIFIED">
+  <rect x="333.95374999999996" y="1686.059" width="99.02799999999999" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="383.46774999999997" y="1701.209" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Status: VERIFIED</text>
+</g>
+<g class="edge-label" data-from="M" data-to="N" data-label="Yes">
+  <rect x="520.0627499999999" y="1936.934" width="36.658" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="538.3917499999999" y="1952.084" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Yes</text>
+</g>
+<g class="edge-label" data-from="N" data-to="O" data-label="Tap 'Next / Go to Chats'">
+  <rect x="476.56275" y="2090.134" width="123.38199999999999" height="30.3" rx="2" ry="2" fill="var(--bg)" stroke="var(--_inner-stroke)" stroke-width="1" />
+  <text x="538.25375" y="2105.284" text-anchor="middle" font-size="11" font-weight="400" fill="var(--_text-sec)" dy="3.8499999999999996">Tap &#39;Next / Go to Chats&#39;</text>
+</g>
+<g class="node" data-id="A" data-label="Screen 1: Welcome &amp; Google Sign-In" data-shape="rectangle">
+  <rect x="313.72499999999997" y="40" width="245.72499999999994" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="436.5874999999999" y="58.45" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Screen 1: Welcome &amp; Google Sign-In</text>
+</g>
+<g class="node" data-id="B" data-label="Backend /auth/google" data-shape="diamond">
+  <polygon points="436.5875,193.19999999999996 533.659,290.27149999999995 436.5875,387.34299999999996 339.51599999999996,290.27149999999995" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="436.5875" y="290.27149999999995" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Backend /auth/google</text>
+</g>
+<g class="node" data-id="C" data-label="Dashboard (Instant ₹0 Login)" data-shape="rectangle">
+  <rect x="40" y="1061.6589999999999" width="210.15699999999998" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="145.0785" y="1080.109" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Dashboard (Instant ₹0 Login)</text>
+</g>
+<g class="node" data-id="D" data-label="Screen 2: Profile Setup (Pre-filled Name/Avatar)" data-shape="rectangle">
+  <rect x="278.157" y="503.643" width="316.86099999999993" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="436.5875" y="522.093" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Screen 2: Profile Setup (Pre-filled Name/Avatar)</text>
+</g>
+<g class="node" data-id="E" data-label="Screen 3: Verification Radar (Re-verify)" data-shape="rectangle">
+  <rect x="385.34324999999995" y="810.0429999999999" width="270.919" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="520.80275" y="828.4929999999999" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Screen 3: Verification Radar (Re-verify)</text>
+</g>
+<g class="node" data-id="F" data-label="POST /auth/initiate-reverse-verify" data-shape="rectangle">
+  <rect x="316.68899999999996" y="656.843" width="239.797" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="436.5875" y="675.293" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">POST /auth/initiate-reverse-verify</text>
+</g>
+<g class="node" data-id="G" data-label="1 SIM or 2 SIMs?" data-shape="diamond">
+  <polygon points="383.9537499999999,963.2429999999998 463.6117499999999,1042.9009999999998 383.9537499999999,1122.5589999999997 304.2957499999999,1042.9009999999998" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="383.9537499999999" y="1042.9009999999998" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">1 SIM or 2 SIMs?</text>
+</g>
+<g class="node" data-id="H" data-label="User Selects Registered SIM Slot" data-shape="rectangle">
+  <rect x="143.12425000000002" y="1214.8589999999997" width="235.35099999999994" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="260.79975" y="1233.3089999999997" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">User Selects Registered SIM Slot</text>
+</g>
+<g class="node" data-id="I" data-label="Auto-Select Default SIM Slot" data-shape="rectangle">
+  <rect x="406.47524999999996" y="1214.8589999999997" width="201.26499999999993" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="507.1077499999999" y="1233.3089999999997" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Auto-Select Default SIM Slot</text>
+</g>
+<g class="node" data-id="J" data-label="SmsManager.sendTextMessage('NX-VERIFY &lt;nonce&gt;')" data-shape="rectangle">
+  <rect x="197.73574999999994" y="1299.7589999999998" width="372.436" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="383.9537499999999" y="1318.2089999999998" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">SmsManager.sendTextMessage(&#39;NX-VERIFY &lt;nonce&gt;&#39;)</text>
+</g>
+<g class="node" data-id="K" data-label="POST /webhooks/sms-inbound (Backend)" data-shape="rectangle">
+  <rect x="241.08424999999997" y="1452.9589999999998" width="285.7389999999999" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="383.9537499999999" y="1471.4089999999999" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">POST /webhooks/sms-inbound (Backend)</text>
+</g>
+<g class="node" data-id="L" data-label="Mint Base32 NX-ID + Issue Session Token" data-shape="rectangle">
+  <rect x="240.71374999999995" y="1606.1589999999999" width="286.47999999999996" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="383.9537499999999" y="1624.609" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Mint Base32 NX-ID + Issue Session Token</text>
+</g>
+<g class="node" data-id="M" data-label="Status Verified?" data-shape="diamond">
+  <polygon points="538.5627499999999,1735.359 617.85025,1814.6464999999998 538.5627499999999,1893.9339999999997 459.2752499999999,1814.6464999999998" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="538.5627499999999" y="1814.6464999999998" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Status Verified?</text>
+</g>
+<g class="node" data-id="N" data-label="Screen 4: Identity Reveal Badge (NX-ID + QR Code)" data-shape="rectangle">
+  <rect x="371.98124999999993" y="2010.234" width="333.163" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="538.5627499999999" y="2028.684" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Screen 4: Identity Reveal Badge (NX-ID + QR Code)</text>
+</g>
+<g class="node" data-id="O" data-label="Permission Gateway / Dashboard" data-shape="rectangle">
+  <rect x="420.51674999999994" y="2163.434" width="236.09199999999998" height="36.900000000000006" rx="0" ry="0" fill="var(--_node-fill)" stroke="var(--_node-stroke)" stroke-width="0.75" />
+  <text x="538.5627499999999" y="2181.884" text-anchor="middle" font-size="13" font-weight="500" fill="var(--_text)" dy="4.55">Permission Gateway / Dashboard</text>
+</g>
+</svg>

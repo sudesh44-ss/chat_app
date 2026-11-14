@@ -12,7 +12,8 @@ interface SecureMessageRepository {
         recipientNxId: String,
         text: String,
         targetRoute: OutboundRoute,
-        recipientPhone: String? = null
+        recipientPhone: String? = null,
+        replyToMessageId: String? = null
     ): Result<EncryptedEnvelope>
 
     suspend fun receiveAndDecryptEnvelope(

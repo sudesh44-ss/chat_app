@@ -15,17 +15,25 @@ import com.nexa.app.core.proto.PacketType
 import com.nexa.app.core.security.CryptoKeystoreManager
 import com.nexa.app.core.security.SecureStorage
 import com.nexa.app.data.local.dao.ChatDao
+import com.nexa.app.data.local.dao.ChatDraftDao
 import com.nexa.app.data.local.dao.ContactDao
+import com.nexa.app.data.local.dao.MessageAttachmentDao
 import com.nexa.app.data.local.dao.MessageDao
+import com.nexa.app.data.local.dao.MessageReactionDao
 import com.nexa.app.data.local.dao.UserDao
+import com.nexa.app.data.local.entity.ChatDraftEntity
 import com.nexa.app.data.local.entity.ChatEntity
+import com.nexa.app.data.local.entity.MessageAttachmentEntity
 import com.nexa.app.data.local.entity.MessageEntity
+import com.nexa.app.data.local.entity.MessageReactionEntity
 import com.nexa.app.data.local.entity.toDomain
 import com.nexa.app.data.local.preferences.ChatPrivacyPrefs
+import com.nexa.app.data.local.preferences.ConversationPreferences
 import com.nexa.app.data.remote.sms.NexaDataSmsSender
 import com.nexa.app.domain.model.ChatConversation
 import com.nexa.app.domain.model.Message
 import com.nexa.app.domain.model.MessageStatus
+import com.nexa.app.domain.model.MessageType
 import com.nexa.app.domain.model.TransportType
 import com.nexa.app.domain.repository.ChatRepository
 import com.nexa.app.domain.repository.DtnRepository
@@ -62,10 +70,15 @@ class ChatRepositoryImpl(
     private val doubleRatchetEngine: DoubleRatchetEngine,
     private val contactDao: ContactDao? = null,
     private val chatPrivacyPrefs: ChatPrivacyPrefs? = null,
-    private val notificationDispatcher: NexaNotificationDispatcher? = null
+    private val notificationDispatcher: NexaNotificationDispatcher? = null,
+    private val chatDraftDao: ChatDraftDao? = null,
+    private val messageReactionDao: MessageReactionDao? = null,
+    private val messageAttachmentDao: MessageAttachmentDao? = null,
+    private val conversationPreferences: ConversationPreferences? = null
 ) : ChatRepository {
 
     var universalTransportIngest: NexaUniversalTransportIngest? = null
+    var scheduledMessageManager: com.nexa.app.domain.manager.ScheduledMessageManager? = null
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _typingFlow = MutableSharedFlow<Pair<String, Boolean>>(extraBufferCapacity = 32)
@@ -101,17 +114,53 @@ class ChatRepositoryImpl(
         text: String,
         transport: TransportType,
         destinationPhone: String?
+    ): Result<Message> = sendMessage(recipientNxId, text, transport, destinationPhone, null)
+
+    override suspend fun sendMessage(
+        recipientNxId: String,
+        text: String,
+        transport: TransportType,
+        destinationPhone: String?,
+        replyToMessageId: String?
+    ): Result<Message> = sendMessage(recipientNxId, text, transport, destinationPhone, replyToMessageId, false)
+
+    override suspend fun sendMessage(
+        recipientNxId: String,
+        text: String,
+        transport: TransportType,
+        destinationPhone: String?,
+        replyToMessageId: String?,
+        isScheduledDispatch: Boolean
     ): Result<Message> = withContext(Dispatchers.IO) {
         try {
             val myNxId = getMyNxId()
             val packetId = UUID.randomUUID().toString()
             val timestamp = System.currentTimeMillis()
 
+            // Resolve original message if replying to embed fallback snapshot
+            var replyToSender: String? = null
+            var replyToSnippet: String? = null
+            if (!replyToMessageId.isNullOrBlank()) {
+                val originalMsg = messageDao.getMessageByPacketId(replyToMessageId)
+                if (originalMsg != null) {
+                    replyToSender = originalMsg.senderNxId
+                    replyToSnippet = originalMsg.plainTextContent.take(120)
+                }
+            }
+
+            val payloadToEncrypt = com.nexa.app.core.util.SafeMessageParser.formatOutgoingPayload(
+                text = text,
+                replyToMessageId = replyToMessageId,
+                replyToSenderNxId = replyToSender,
+                replyToSnippet = replyToSnippet
+            )
+
             // Intercept Demo Conversations for safe local-only development testing
             if (recipientNxId.startsWith("NX-DEMO")) {
                 val existingChat = chatDao.getChatByParticipant(recipientNxId)
                 val targetConvId = existingChat?.conversationId ?: deriveConversationId(myNxId, recipientNxId)
                 val targetName = existingChat?.participantName ?: recipientNxId
+                val nextSeq = messageDao.getNextLocalSequence(targetConvId)
                 val demoMsg = MessageEntity(
                     packetId = packetId,
                     conversationId = targetConvId,
@@ -121,19 +170,42 @@ class ChatRepositoryImpl(
                     status = MessageStatus.DELIVERED.name,
                     timestamp = timestamp,
                     isOutgoing = true,
-                    transportType = transport.name
+                    transportType = transport.name,
+                    replyToMessageId = replyToMessageId,
+                    replyToSenderNxId = replyToSender,
+                    replyToSnippet = replyToSnippet,
+                    localSequence = nextSeq
                 )
                 messageDao.insertMessage(demoMsg)
-                chatDao.upsertChat(
-                    ChatEntity(
-                        conversationId = targetConvId,
-                        participantNxId = recipientNxId,
-                        participantName = targetName,
-                        lastMessageText = text,
-                        lastMessageTimestamp = timestamp,
-                        unreadCount = 0
-                    )
+                chatDraftDao?.deleteDraft(targetConvId)
+                if (!isScheduledDispatch) {
+                    try {
+                        scheduledMessageManager?.cancelPendingSchedulesForChat(targetConvId)
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Failed to cancel pending schedules for demo chat $targetConvId: ${e.message}")
+                    }
+                }
+                val updatedDemo = chatDao.updateLastMessage(
+                    conversationId = targetConvId,
+                    text = text,
+                    timestamp = timestamp,
+                    lastMessageId = packetId,
+                    lastSenderNxId = myNxId
                 )
+                if (updatedDemo == 0) {
+                    chatDao.upsertChat(
+                        ChatEntity(
+                            conversationId = targetConvId,
+                            participantNxId = recipientNxId,
+                            participantName = targetName,
+                            lastMessageText = text,
+                            lastMessageTimestamp = timestamp,
+                            lastMessageId = packetId,
+                            lastMessageSenderNxId = myNxId,
+                            unreadCount = 0
+                        )
+                    )
+                }
                 Log.i(TAG, "Demo message $packetId stored locally as DELIVERED without cloud transmission")
                 return@withContext Result.success(demoMsg.toDomain())
             }
@@ -144,6 +216,7 @@ class ChatRepositoryImpl(
             createOrGetConversation(recipientNxId)
 
             // 2. Insert into local SQLCipher Room DB with status PENDING (Outbox Pattern)
+            val nextSeq = messageDao.getNextLocalSequence(conversationId)
             val messageEntity = MessageEntity(
                 packetId = packetId,
                 conversationId = conversationId,
@@ -153,21 +226,47 @@ class ChatRepositoryImpl(
                 status = MessageStatus.PENDING.name,
                 timestamp = timestamp,
                 isOutgoing = true,
-                transportType = transport.name
+                transportType = transport.name,
+                replyToMessageId = replyToMessageId,
+                replyToSenderNxId = replyToSender,
+                replyToSnippet = replyToSnippet,
+                localSequence = nextSeq
             )
             messageDao.insertMessage(messageEntity)
+            chatDraftDao?.deleteDraft(conversationId)
 
-            // Update conversation snippet
-            chatDao.upsertChat(
-                ChatEntity(
-                    conversationId = conversationId,
-                    participantNxId = recipientNxId,
-                    participantName = recipientNxId,
-                    lastMessageText = text,
-                    lastMessageTimestamp = timestamp,
-                    unreadCount = 0
-                )
+            // Critical Rule: Scheduled Message Must Remain the Last Message
+            // When a normal outgoing message is committed, automatically cancel all active pending schedules in this chat
+            if (!isScheduledDispatch) {
+                try {
+                    scheduledMessageManager?.cancelPendingSchedulesForChat(conversationId)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to cancel pending schedules for chat $conversationId: ${e.message}")
+                }
+            }
+
+            // Update conversation snippet preserving pin/archive/mute metadata
+            val updated = chatDao.updateLastMessage(
+                conversationId = conversationId,
+                text = text,
+                timestamp = timestamp,
+                lastMessageId = packetId,
+                lastSenderNxId = myNxId
             )
+            if (updated == 0) {
+                chatDao.upsertChat(
+                    ChatEntity(
+                        conversationId = conversationId,
+                        participantNxId = recipientNxId,
+                        participantName = recipientNxId,
+                        lastMessageText = text,
+                        lastMessageTimestamp = timestamp,
+                        lastMessageId = packetId,
+                        lastMessageSenderNxId = myNxId,
+                        unreadCount = 0
+                    )
+                )
+            }
 
             var isDispatched = false
 
@@ -179,7 +278,7 @@ class ChatRepositoryImpl(
                     val dtnResult = dtnRepository.createAndCacheEnvelope(
                         recipientNxId = recipientNxId,
                         recipientPublicKeyHex = recipientPkHex,
-                        plainText = text
+                        plainText = payloadToEncrypt
                     )
                     if (dtnResult.isSuccess) {
                         isDispatched = true
@@ -207,7 +306,7 @@ class ChatRepositoryImpl(
                         throw IllegalArgumentException("Data SMS transport requires a destination phone number")
                     }
 
-                    val rawPlainBytes = text.toByteArray(StandardCharsets.UTF_8)
+                    val rawPlainBytes = payloadToEncrypt.toByteArray(StandardCharsets.UTF_8)
                     val recipientContact = contactDao?.getContact(recipientNxId)
                     val recipientPubKey = recipientContact?.publicKeyHex?.let { fromHexOrNull(it) }
 
@@ -249,7 +348,7 @@ class ChatRepositoryImpl(
 
                 TransportType.INTERNET -> {
                     // Route via Primary Transport: Internet WebSocket (Double Ratchet E2EE)
-                    val rawPlainBytes = text.toByteArray(StandardCharsets.UTF_8)
+                    val rawPlainBytes = payloadToEncrypt.toByteArray(StandardCharsets.UTF_8)
                     val recipientContact = contactDao?.getContact(recipientNxId)
                     val recipientPubKey = recipientContact?.publicKeyHex?.let { fromHexOrNull(it) }
 
@@ -323,43 +422,68 @@ class ChatRepositoryImpl(
 
                 val messageStatus = if (decryptedBytes != null) MessageStatus.DELIVERED else MessageStatus.FAILED
 
+                val parsedMessage = if (decryptedBytes != null) {
+                    com.nexa.app.core.util.SafeMessageParser.parseIncomingPayload(decryptedText)
+                } else {
+                    com.nexa.app.core.util.SafeMessageParser.DecryptedChatMessage(plainText = decryptedText)
+                }
+
                 // 2. Persist in local encrypted SQLCipher Room DB
+                val nextSeq = messageDao.getNextLocalSequence(conversationId)
                 val messageEntity = MessageEntity(
                     packetId = packet.packetId,
                     conversationId = conversationId,
                     senderNxId = senderNxId,
                     recipientNxId = myNxId,
-                    plainTextContent = decryptedText,
+                    plainTextContent = parsedMessage.plainText,
                     status = messageStatus.name,
                     timestamp = packet.timestamp,
                     isOutgoing = false,
-                    transportType = TransportType.DATA_SMS.name
+                    transportType = TransportType.DATA_SMS.name,
+                    replyToMessageId = parsedMessage.replyToMessageId,
+                    replyToSenderNxId = parsedMessage.replyToSenderNxId,
+                    replyToSnippet = parsedMessage.replyToSnippet,
+                    localSequence = nextSeq
                 )
                 messageDao.insertMessage(messageEntity)
 
-                // 3. Update conversation snippet & unread count
+                // 3. Update conversation snippet & unread count preserving pin/archive/mute metadata
                 val existingChat = chatDao.getChatById(conversationId)
                 val unread = (existingChat?.unreadCount ?: 0) + 1
-                chatDao.upsertChat(
-                    ChatEntity(
-                        conversationId = conversationId,
-                        participantNxId = senderNxId,
-                        participantName = existingChat?.participantName ?: senderNxId,
-                        lastMessageText = decryptedText,
-                        lastMessageTimestamp = packet.timestamp,
-                        unreadCount = unread
-                    )
+                val updatedChat = chatDao.updateLastMessage(
+                    conversationId = conversationId,
+                    text = parsedMessage.plainText,
+                    timestamp = packet.timestamp,
+                    lastMessageId = packet.packetId,
+                    lastSenderNxId = senderNxId
                 )
+                if (updatedChat > 0) {
+                    chatDao.incrementUnread(conversationId)
+                } else {
+                    chatDao.upsertChat(
+                        ChatEntity(
+                            conversationId = conversationId,
+                            participantNxId = senderNxId,
+                            participantName = existingChat?.participantName ?: senderNxId,
+                            lastMessageText = parsedMessage.plainText,
+                            lastMessageTimestamp = packet.timestamp,
+                            lastMessageId = packet.packetId,
+                            lastMessageSenderNxId = senderNxId,
+                            unreadCount = unread
+                        )
+                    )
+                }
 
-                // 4. Dispatch privacy-preserving local notification if decrypted successfully
-                if (decryptedBytes != null) {
+                // 4. Dispatch privacy-preserving local notification if decrypted successfully and not muted
+                val isMuted = existingChat?.isMuted == true && (existingChat.mutedUntil == 0L || existingChat.mutedUntil > System.currentTimeMillis())
+                if (decryptedBytes != null && !isMuted) {
                     val contact = contactDao?.getContact(senderNxId)
                     val resolvedName = contact?.effectiveDisplayName ?: existingChat?.participantName ?: senderNxId
                     notificationDispatcher?.postDirectMessageNotification(
                         conversationId = conversationId,
                         senderNxId = senderNxId,
                         senderDisplayName = resolvedName,
-                        decryptedText = decryptedText,
+                        decryptedText = parsedMessage.plainText,
                         messageId = packet.packetId
                     )
                 }
@@ -405,6 +529,10 @@ class ChatRepositoryImpl(
         }
     }
 
+    override suspend fun markConversationUnread(conversationId: String): Unit = withContext(Dispatchers.IO) {
+        chatDao.markConversationUnread(conversationId, System.currentTimeMillis())
+    }
+
     override suspend fun retryFailedMessage(
         packetId: String,
         transport: TransportType,
@@ -428,6 +556,18 @@ class ChatRepositoryImpl(
         participantNxId: String,
         participantName: String?
     ): ChatConversation = withContext(Dispatchers.IO) {
+        if (participantNxId.isBlank()) {
+            Log.w(TAG, "Refusing to create conversation with blank participant id")
+            return@withContext ChatConversation(
+                conversationId = "",
+                participantNxId = "",
+                participantName = participantName ?: "Unknown contact",
+                lastMessageText = "Conversation unavailable",
+                lastMessageTimestamp = System.currentTimeMillis(),
+                unreadCount = 0
+            )
+        }
+
         val myNxId = getMyNxId()
         val conversationId = deriveConversationId(myNxId, participantNxId)
         val existing = chatDao.getChatById(conversationId) ?: chatDao.getChatByParticipant(participantNxId)
@@ -660,43 +800,68 @@ class ChatRepositoryImpl(
 
         val messageStatus = if (decryptedBytes != null) MessageStatus.DELIVERED else MessageStatus.FAILED
 
+        val parsedMessage = if (decryptedBytes != null) {
+            com.nexa.app.core.util.SafeMessageParser.parseIncomingPayload(decryptedText)
+        } else {
+            com.nexa.app.core.util.SafeMessageParser.DecryptedChatMessage(plainText = decryptedText)
+        }
+
         // 2. Persist in local encrypted Room DB
+        val nextSeq = messageDao.getNextLocalSequence(conversationId)
         val messageEntity = MessageEntity(
             packetId = packet.packetId,
             conversationId = conversationId,
             senderNxId = senderNxId,
             recipientNxId = myNxId,
-            plainTextContent = decryptedText,
+            plainTextContent = parsedMessage.plainText,
             status = messageStatus.name,
             timestamp = packet.timestamp,
             isOutgoing = false,
-            transportType = TransportType.INTERNET.name
+            transportType = TransportType.INTERNET.name,
+            replyToMessageId = parsedMessage.replyToMessageId,
+            replyToSenderNxId = parsedMessage.replyToSenderNxId,
+            replyToSnippet = parsedMessage.replyToSnippet,
+            localSequence = nextSeq
         )
         messageDao.insertMessage(messageEntity)
 
-        // 3. Update conversation list & unread count
+        // 3. Update conversation list & unread count preserving pin/archive/mute metadata
         val existingChat = chatDao.getChatById(conversationId)
         val unread = (existingChat?.unreadCount ?: 0) + 1
-        chatDao.upsertChat(
-            ChatEntity(
-                conversationId = conversationId,
-                participantNxId = senderNxId,
-                participantName = existingChat?.participantName ?: senderNxId,
-                lastMessageText = decryptedText,
-                lastMessageTimestamp = packet.timestamp,
-                unreadCount = unread
-            )
+        val updatedChat = chatDao.updateLastMessage(
+            conversationId = conversationId,
+            text = parsedMessage.plainText,
+            timestamp = packet.timestamp,
+            lastMessageId = packet.packetId,
+            lastSenderNxId = senderNxId
         )
+        if (updatedChat > 0) {
+            chatDao.incrementUnread(conversationId)
+        } else {
+            chatDao.upsertChat(
+                ChatEntity(
+                    conversationId = conversationId,
+                    participantNxId = senderNxId,
+                    participantName = existingChat?.participantName ?: senderNxId,
+                    lastMessageText = parsedMessage.plainText,
+                    lastMessageTimestamp = packet.timestamp,
+                    lastMessageId = packet.packetId,
+                    lastMessageSenderNxId = senderNxId,
+                    unreadCount = unread
+                )
+            )
+        }
 
-        // 4. Dispatch privacy-preserving local notification if decrypted successfully
-        if (decryptedBytes != null) {
+        // 4. Dispatch privacy-preserving local notification if decrypted successfully and not muted
+        val isMuted = existingChat?.isMuted == true && (existingChat.mutedUntil == 0L || existingChat.mutedUntil > System.currentTimeMillis())
+        if (decryptedBytes != null && !isMuted) {
             val contact = contactDao?.getContact(senderNxId)
             val resolvedName = contact?.effectiveDisplayName ?: existingChat?.participantName ?: senderNxId
             notificationDispatcher?.postDirectMessageNotification(
                 conversationId = conversationId,
                 senderNxId = senderNxId,
                 senderDisplayName = resolvedName,
-                decryptedText = decryptedText,
+                decryptedText = parsedMessage.plainText,
                 messageId = packet.packetId
             )
         }
@@ -794,7 +959,15 @@ class ChatRepositoryImpl(
     }
 
     private fun deriveConversationId(id1: String, id2: String): String {
-        return if (id1 < id2) "${id1}_$id2" else "${id2}_$id1"
+        val left = id1.trim()
+        val right = id2.trim()
+        return when {
+            left.isBlank() && right.isBlank() -> "invalid_conversation_${UUID.randomUUID()}"
+            left.isBlank() -> "invalid_${right}"
+            right.isBlank() -> "invalid_${left}"
+            left < right -> "${left}_$right"
+            else -> "${right}_$left"
+        }
     }
 
     override suspend fun clearChatMessages(conversationId: String): Result<Unit> = withContext(Dispatchers.IO) {
@@ -804,6 +977,279 @@ class ChatRepositoryImpl(
             Result.success(Unit)
         } catch (e: Exception) {
             Log.e(TAG, "Error clearing chat messages for $conversationId", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun deleteChat(conversationId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            messageDao.deleteMessagesForConversation(conversationId)
+            chatDao.deleteChat(conversationId)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error deleting chat $conversationId", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun getMessageById(packetId: String): Message? = withContext(Dispatchers.IO) {
+        try {
+            messageDao.getMessageByPacketId(packetId)?.toDomain()
+        } catch (e: Exception) {
+            Log.w(TAG, "Error fetching message by id: $packetId", e)
+            null
+        }
+    }
+
+    override suspend fun searchMessagesInConversation(conversationId: String, query: String): List<Message> = withContext(Dispatchers.IO) {
+        val trimmed = query.trim()
+        if (trimmed.isBlank() || conversationId.isBlank()) return@withContext emptyList()
+        try {
+            messageDao.searchMessagesInConversation(conversationId, trimmed).map { it.toDomain() }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error searching messages in conversation $conversationId for '$trimmed'", e)
+            emptyList()
+        }
+    }
+
+    override suspend fun getFirstMessageOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): Message? = withContext(Dispatchers.IO) {
+        if (conversationId.isBlank()) return@withContext null
+        try {
+            messageDao.getFirstMessageOnDate(conversationId, startOfDay, endOfDay)?.toDomain()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error querying first message on date for $conversationId", e)
+            null
+        }
+    }
+
+    override suspend fun getMessagesOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): List<Message> = withContext(Dispatchers.IO) {
+        if (conversationId.isBlank()) return@withContext emptyList()
+        try {
+            messageDao.getMessagesOnDate(conversationId, startOfDay, endOfDay).map { it.toDomain() }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error querying messages on date for $conversationId", e)
+            emptyList()
+        }
+    }
+
+    // --- Conversation Organization ---
+    override suspend fun pinConversation(conversationId: String, isPinned: Boolean, pinPosition: Int): Unit = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val pinnedAt = if (isPinned) now else null
+        chatDao.updatePinStatus(conversationId, isPinned, pinPosition, pinnedAt, now)
+        Unit
+    }
+
+    override suspend fun archiveConversation(conversationId: String, isArchived: Boolean): Unit = withContext(Dispatchers.IO) {
+        val now = System.currentTimeMillis()
+        val archivedAt = if (isArchived) now else null
+        chatDao.updateArchiveStatus(conversationId, isArchived, archivedAt, now)
+        Unit
+    }
+
+    override suspend fun muteConversation(conversationId: String, isMuted: Boolean, mutedUntil: Long): Unit = withContext(Dispatchers.IO) {
+        chatDao.updateMuteStatus(conversationId, isMuted, mutedUntil, System.currentTimeMillis())
+        val preferenceUntil = when {
+            !isMuted -> 0L
+            mutedUntil == 0L -> -1L
+            else -> mutedUntil
+        }
+        conversationPreferences?.setMuted(conversationId, isMuted, preferenceUntil)
+        Unit
+    }
+
+    override fun getArchivedConversations(): Flow<List<ChatConversation>> {
+        return chatDao.getArchivedChatsFlow()
+            .map { list -> list.map { it.toDomain() } }
+            .catch { e ->
+                Log.e(TAG, "Error collecting archived conversations", e)
+                emit(emptyList())
+            }
+            .flowOn(Dispatchers.IO)
+    }
+
+    // --- Message Drafts ---
+    override fun getDraftFlow(conversationId: String): Flow<ChatDraftEntity?> {
+        return chatDraftDao?.getDraftFlow(conversationId) ?: kotlinx.coroutines.flow.flowOf(null)
+    }
+
+    override suspend fun getDraft(conversationId: String): ChatDraftEntity? = withContext(Dispatchers.IO) {
+        chatDraftDao?.getDraft(conversationId)
+    }
+
+    override suspend fun saveDraft(
+        conversationId: String,
+        draftText: String,
+        replyToMessageId: String?,
+        attachmentDraftReference: String?
+    ) = withContext(Dispatchers.IO) {
+        if (draftText.isBlank() && replyToMessageId.isNullOrBlank() && attachmentDraftReference.isNullOrBlank()) {
+            chatDraftDao?.deleteDraft(conversationId)
+        } else {
+            chatDraftDao?.saveDraft(
+                ChatDraftEntity(
+                    conversationId = conversationId,
+                    draftText = draftText,
+                    replyToMessageId = replyToMessageId,
+                    attachmentDraftReference = attachmentDraftReference,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+        Unit
+    }
+
+    override suspend fun clearDraft(conversationId: String) = withContext(Dispatchers.IO) {
+        chatDraftDao?.deleteDraft(conversationId)
+        Unit
+    }
+
+    // --- Message Reactions ---
+    override fun getReactionsForMessage(messageId: String): Flow<List<MessageReactionEntity>> {
+        return messageReactionDao?.getReactionsForMessage(messageId) ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    }
+
+    override fun getReactionsForConversation(conversationId: String): Flow<List<MessageReactionEntity>> {
+        return messageReactionDao?.getReactionsForConversation(conversationId) ?: kotlinx.coroutines.flow.flowOf(emptyList())
+    }
+
+    override suspend fun addReaction(messageId: String, reaction: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val myNxId = getMyNxId()
+            val reactionEntity = MessageReactionEntity(
+                reactionId = UUID.randomUUID().toString(),
+                messageId = messageId,
+                userNxId = myNxId,
+                reaction = reaction,
+                createdAt = System.currentTimeMillis()
+            )
+            messageReactionDao?.upsertReaction(reactionEntity)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to upsert reaction for $messageId", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun removeReaction(messageId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val myNxId = getMyNxId()
+            messageReactionDao?.removeReaction(messageId, myNxId)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to remove reaction for $messageId", e)
+            Result.failure(e)
+        }
+    }
+
+    // --- Soft Delete & Starring ---
+    override suspend fun softDeleteMessage(packetId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            messageDao.softDeleteMessage(packetId)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to soft delete message $packetId", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun starMessage(packetId: String, isStarred: Boolean): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            messageDao.updateStarredStatus(packetId, isStarred)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update star status for $packetId", e)
+            Result.failure(e)
+        }
+    }
+
+    // --- GIF / Meme / Media Messaging ---
+    override suspend fun sendMediaMessage(
+        recipientNxId: String,
+        localPath: String,
+        messageType: MessageType,
+        caption: String,
+        replyToMessageId: String?
+    ): Result<Message> = withContext(Dispatchers.IO) {
+        try {
+            val myNxId = getMyNxId()
+            val packetId = UUID.randomUUID().toString()
+            val timestamp = System.currentTimeMillis()
+            val conversationId = deriveConversationId(myNxId, recipientNxId)
+            val nextSeq = messageDao.getNextLocalSequence(conversationId)
+
+            val file = java.io.File(localPath)
+            val fileSize = if (file.exists()) file.length() else 0L
+            val fileName = file.name
+
+            val mimeType = when (messageType) {
+                MessageType.GIF -> "image/gif"
+                MessageType.MEME, MessageType.IMAGE -> "image/jpeg"
+                MessageType.VIDEO -> "video/mp4"
+                MessageType.AUDIO, MessageType.VOICE -> "audio/ogg"
+                else -> "application/octet-stream"
+            }
+
+            val attachment = MessageAttachmentEntity(
+                attachmentId = UUID.randomUUID().toString(),
+                messageId = packetId,
+                fileName = fileName,
+                mimeType = mimeType,
+                detectedFileType = messageType.name,
+                fileSize = fileSize,
+                localPathReference = localPath,
+                thumbnailReference = localPath,
+                transferState = "COMPLETED",
+                integrityState = "VERIFIED",
+                securityScanState = "SAFE",
+                createdAt = timestamp
+            )
+            messageAttachmentDao?.insertAttachment(attachment)
+
+            val displaySnippet = if (caption.isNotBlank()) caption else "[${messageType.name}]"
+
+            val messageEntity = MessageEntity(
+                packetId = packetId,
+                conversationId = conversationId,
+                senderNxId = myNxId,
+                recipientNxId = recipientNxId,
+                plainTextContent = displaySnippet,
+                status = MessageStatus.DELIVERED.name,
+                timestamp = timestamp,
+                isOutgoing = true,
+                transportType = TransportType.INTERNET.name,
+                replyToMessageId = replyToMessageId,
+                messageType = messageType.name,
+                localSequence = nextSeq,
+                localState = "PERSISTED"
+            )
+            messageDao.insertMessage(messageEntity)
+
+            val updated = chatDao.updateLastMessage(
+                conversationId = conversationId,
+                text = displaySnippet,
+                timestamp = timestamp,
+                lastMessageId = packetId,
+                lastSenderNxId = myNxId
+            )
+            if (updated == 0) {
+                chatDao.upsertChat(
+                    ChatEntity(
+                        conversationId = conversationId,
+                        participantNxId = recipientNxId,
+                        participantName = recipientNxId,
+                        lastMessageText = displaySnippet,
+                        lastMessageTimestamp = timestamp,
+                        lastMessageId = packetId,
+                        lastMessageSenderNxId = myNxId,
+                        unreadCount = 0
+                    )
+                )
+            }
+
+            Result.success(messageEntity.toDomain())
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to send media message", e)
             Result.failure(e)
         }
     }

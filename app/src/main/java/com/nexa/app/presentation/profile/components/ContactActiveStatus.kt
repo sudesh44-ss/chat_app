@@ -1,6 +1,7 @@
 package com.nexa.app.presentation.profile.components
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexa.app.R
 import com.nexa.app.core.theme.NexaVerifiedGreen
+import com.nexa.app.data.local.preferences.OfflinePresenceMode
 import com.nexa.app.data.local.preferences.OnlinePrivacyMode
 import com.nexa.app.data.local.preferences.TypingPrivacyMode
 import com.nexa.app.presentation.common.glass.NexaGlassSurface
@@ -43,9 +45,14 @@ import com.nexa.app.presentation.common.glass.NexaGlassSurface
 fun ContactActiveStatus(
     isOnline: Boolean,
     lastSeenText: String,
+    showOnlineStatus: Boolean,
     onlinePrivacyMode: OnlinePrivacyMode,
+    offlinePresenceMode: OfflinePresenceMode,
+    selectedOnlineStatusContacts: List<String>,
     typingPrivacyMode: TypingPrivacyMode,
+    onToggleShowOnlineStatus: (Boolean) -> Unit,
     onTogglePresenceMode: (OnlinePrivacyMode) -> Unit,
+    onOfflinePresenceModeChanged: (OfflinePresenceMode) -> Unit,
     onToggleTypingMode: (TypingPrivacyMode) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -56,6 +63,7 @@ fun ContactActiveStatus(
     val primaryTextColor = if (isDark) Color.White else Color(0xFF000000)
     val secondaryTextColor = if (isDark) Color(0xFFA0A7B5) else Color(0xFF555B66)
     val dividerColor = if (isDark) Color.White.copy(alpha = 0.06f) else Color.Black.copy(alpha = 0.05f)
+    val effectivePresenceEnabled = showOnlineStatus && onlinePrivacyMode != OnlinePrivacyMode.NOBODY
 
     NexaGlassSurface(
         modifier = modifier
@@ -71,7 +79,6 @@ fun ContactActiveStatus(
                 .fillMaxWidth()
                 .padding(horizontal = 16.dp, vertical = 14.dp)
         ) {
-            // Section Header
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -82,9 +89,7 @@ fun ContactActiveStatus(
                     tint = secondaryTextColor,
                     modifier = Modifier.size(20.dp)
                 )
-
                 Spacer(modifier = Modifier.width(10.dp))
-
                 Text(
                     text = "Active Status & Privacy",
                     style = MaterialTheme.typography.titleMedium.copy(
@@ -97,7 +102,6 @@ fun ContactActiveStatus(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Current Peer Status Row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -108,14 +112,12 @@ fun ContactActiveStatus(
                     modifier = Modifier
                         .size(10.dp)
                         .clip(CircleShape)
-                        .background(if (isOnline) NexaVerifiedGreen else Color(0xFF737C8D))
+                        .background(if (effectivePresenceEnabled && isOnline) NexaVerifiedGreen else Color(0xFF737C8D))
                 )
-
                 Spacer(modifier = Modifier.width(10.dp))
-
                 Column {
                     Text(
-                        text = if (isOnline) "Active Now" else "Offline",
+                        text = if (effectivePresenceEnabled && isOnline) "Active Now" else "Offline",
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.Medium,
                             fontSize = 14.sp
@@ -136,8 +138,6 @@ fun ContactActiveStatus(
                 thickness = 1.dp
             )
 
-            // Setting 1: Show Active Status Switch
-            val isPresenceEnabled = onlinePrivacyMode != OnlinePrivacyMode.NOBODY
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -146,7 +146,7 @@ fun ContactActiveStatus(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Share My Active Status",
+                        text = "Show my online status",
                         style = MaterialTheme.typography.bodyMedium.copy(
                             fontWeight = FontWeight.Medium,
                             fontSize = 14.sp
@@ -154,17 +154,14 @@ fun ContactActiveStatus(
                         color = primaryTextColor
                     )
                     Text(
-                        text = if (isPresenceEnabled) "Visible to mutual contacts" else "Hidden from all users",
+                        text = if (showOnlineStatus) "Visible to selected viewers" else "Hidden from all viewers",
                         style = MaterialTheme.typography.labelSmall.copy(fontSize = 12.sp),
                         color = secondaryTextColor
                     )
                 }
-
                 Switch(
-                    checked = isPresenceEnabled,
-                    onCheckedChange = { checked ->
-                        onTogglePresenceMode(if (checked) OnlinePrivacyMode.MY_CONTACTS else OnlinePrivacyMode.NOBODY)
-                    },
+                    checked = showOnlineStatus,
+                    onCheckedChange = onToggleShowOnlineStatus,
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White,
                         checkedTrackColor = if (isDark) Color(0xFF2979FF) else Color(0xFF1976D2),
@@ -174,7 +171,89 @@ fun ContactActiveStatus(
                 )
             }
 
-            // Setting 2: Typing Indicators Switch
+            Text(
+                text = "Who can see my online status",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 14.sp
+                ),
+                color = primaryTextColor,
+                modifier = Modifier.padding(top = 8.dp, bottom = 4.dp)
+            )
+            OnlinePrivacyMode.values().forEach { mode ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = when (mode) {
+                            OnlinePrivacyMode.EVERYONE -> "Everyone"
+                            OnlinePrivacyMode.MY_CONTACTS -> "My contacts"
+                            OnlinePrivacyMode.NOBODY -> "Nobody"
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
+                        color = primaryTextColor
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(if (onlinePrivacyMode == mode) NexaVerifiedGreen else Color(0xFF737C8D))
+                            .clickable { onTogglePresenceMode(mode) },
+                        contentAlignment = Alignment.Center
+                    ) { }
+                }
+            }
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 10.dp),
+                color = dividerColor,
+                thickness = 1.dp
+            )
+
+            Text(
+                text = "When I'm Offline",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 14.sp
+                ),
+                color = primaryTextColor,
+                modifier = Modifier.padding(bottom = 4.dp)
+            )
+            OfflinePresenceMode.values().forEach { mode ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = mode.label,
+                        modifier = Modifier
+                            .weight(1f)
+                            .padding(end = 8.dp),
+                        color = primaryTextColor
+                    )
+                    Box(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .clip(CircleShape)
+                            .background(if (offlinePresenceMode == mode) NexaVerifiedGreen else Color(0xFF737C8D))
+                            .clickable { onOfflinePresenceModeChanged(mode) },
+                        contentAlignment = Alignment.Center
+                    ) { }
+                }
+            }
+
+            HorizontalDivider(
+                modifier = Modifier.padding(vertical = 10.dp),
+                color = dividerColor,
+                thickness = 1.dp
+            )
+
             val isTypingEnabled = typingPrivacyMode == TypingPrivacyMode.EVERYONE
             Row(
                 modifier = Modifier

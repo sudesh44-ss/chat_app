@@ -26,5 +26,7 @@ data class ContactUiState(
     val isSearchingUser: Boolean = false,
     val blockedUsers: List<BlockedUserItemDto> = emptyList(),
     val outgoingRequests: List<ConnectionRequestItemDto> = emptyList(),
-    val incomingRequests: List<ConnectionRequestItemDto> = emptyList()
+    val incomingRequests: List<ConnectionRequestItemDto> = emptyList(),
+    val isLoadingIncomingRequests: Boolean = false,
+    val incomingRequestsError: String? = null
 )

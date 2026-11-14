@@ -257,4 +257,64 @@ object SafeMessageParser {
 
         return builder.toAnnotatedString()
     }
+
+    data class DecryptedChatMessage(
+        val plainText: String,
+        val replyToMessageId: String? = null,
+        val replyToSenderNxId: String? = null,
+        val replyToSnippet: String? = null
+    )
+
+    /**
+     * Parses decrypted text from Double Ratchet AEAD.
+     * If the payload is a structured CHAT_MESSAGE JSON envelope containing reply metadata,
+     * extracts text and reply references. Otherwise returns original text.
+     */
+    fun parseIncomingPayload(decryptedText: String): DecryptedChatMessage {
+        if (decryptedText.startsWith("{") && decryptedText.contains("\"type\":\"CHAT_MESSAGE\"")) {
+            try {
+                val json = org.json.JSONObject(decryptedText)
+                if (json.optString("type") == "CHAT_MESSAGE") {
+                    val text = json.optString("text", "")
+                    val replyId = json.optString("replyToMessageId").takeIf { it.isNotBlank() }
+                    val replySender = json.optString("replyToSender").takeIf { it.isNotBlank() }
+                    val replySnippet = json.optString("replyToSnippet").takeIf { it.isNotBlank() }
+                    return DecryptedChatMessage(
+                        plainText = text,
+                        replyToMessageId = replyId,
+                        replyToSenderNxId = replySender,
+                        replyToSnippet = replySnippet
+                    )
+                }
+            } catch (ignored: Exception) {}
+        }
+        return DecryptedChatMessage(plainText = decryptedText)
+    }
+
+    /**
+     * Formats an outgoing message for E2EE transmission.
+     * When replying to a message, embeds replyToMessageId and safe fallback snapshot
+     * inside the encrypted payload envelope, preserving zero-server-knowledge privacy.
+     */
+    fun formatOutgoingPayload(
+        text: String,
+        replyToMessageId: String? = null,
+        replyToSenderNxId: String? = null,
+        replyToSnippet: String? = null
+    ): String {
+        if (replyToMessageId.isNullOrBlank()) {
+            return text
+        }
+        val json = org.json.JSONObject()
+        json.put("type", "CHAT_MESSAGE")
+        json.put("text", text)
+        json.put("replyToMessageId", replyToMessageId)
+        if (!replyToSenderNxId.isNullOrBlank()) {
+            json.put("replyToSender", replyToSenderNxId)
+        }
+        if (!replyToSnippet.isNullOrBlank()) {
+            json.put("replyToSnippet", replyToSnippet.take(120))
+        }
+        return json.toString()
+    }
 }

@@ -36,11 +36,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.res.painterResource
@@ -50,7 +52,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexa.app.R
 import com.nexa.app.core.theme.NexaGlassTokens
-import com.nexa.app.domain.model.ChatConversation
+import com.nexa.app.domain.model.Message
 import com.nexa.app.domain.repository.ChatRepository
 import com.nexa.app.domain.repository.ContactRepository
 import com.nexa.app.presentation.common.glass.NexaGlassSurface
@@ -58,6 +60,10 @@ import com.nexa.app.presentation.dashboard.components.NexaConversationItem
 import com.nexa.app.presentation.dashboard.isGroup
 import com.nexa.app.presentation.search.components.NexaSearchFilterChips
 import com.nexa.app.presentation.search.model.SearchFilter
+import com.nexa.app.presentation.search.model.matches
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 
 /**
  * NEXA Advanced Search Screen.
@@ -79,12 +85,18 @@ fun NexaSearchScreen(
     modifier: Modifier = Modifier
 ) {
     val conversations by chatRepository.getConversations().collectAsState(initial = emptyList())
+    val archivedConversations by chatRepository.getArchivedConversations().collectAsState(initial = emptyList())
     val contacts by (contactRepository?.getAllContacts()?.collectAsState(initial = emptyList())
         ?: remember { mutableStateOf(emptyList()) })
+    val searchableConversations = remember(conversations, archivedConversations) {
+        (conversations + archivedConversations).distinctBy { it.conversationId }
+    }
 
     var searchQuery by remember { mutableStateOf("") }
     var selectedFilters by remember { mutableStateOf<Set<SearchFilter>>(emptySet()) }
     var showClearAllConfirmation by remember { mutableStateOf(false) }
+    var searchHasFocus by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
     // Session cache of recent conversation IDs (defaults to recent 5)
     var recentChatIds by remember(conversations) {
@@ -102,13 +114,54 @@ fun NexaSearchScreen(
     }
 
     // Set of known contact NX-IDs for Contacts vs Non-contacts filtering
-    val knownContactNxIds = remember(contacts, conversations) {
+    val knownContactNxIds = remember(contacts) {
         contacts.map { it.nxId }.toSet()
     }
 
-    // Dynamic search & filter evaluation
+    val messagesFlow = remember(searchableConversations, chatRepository) {
+        if (searchableConversations.isEmpty()) {
+            flowOf<Map<String, List<Message>>>(emptyMap())
+        } else {
+            combine(searchableConversations.map { chatRepository.getMessages(it.conversationId) }) { messageLists ->
+                searchableConversations.mapIndexed { index, conversation ->
+                    conversation.conversationId to messageLists[index]
+                }.toMap()
+            }
+        }
+    }
+    val messagesByConversation by messagesFlow.collectAsState(initial = emptyMap())
+
+    val matchingContactSuggestions = remember(searchQuery, contacts) {
+        val query = searchQuery.trim()
+        if (query.isBlank()) emptyList() else contacts.filter {
+            it.effectiveDisplayName.contains(query, ignoreCase = true) ||
+                it.nxId.contains(query, ignoreCase = true)
+        }.take(4)
+    }
+    val matchingConversationSuggestions = remember(searchQuery, searchableConversations) {
+        val query = searchQuery.trim()
+        if (query.isBlank()) emptyList() else searchableConversations.filter {
+            it.participantName.contains(query, ignoreCase = true) ||
+                it.participantNxId.contains(query, ignoreCase = true)
+        }.take(4)
+    }
+    val matchingCategorySuggestions = remember(searchQuery, searchableConversations, messagesByConversation) {
+        val query = searchQuery.trim()
+        val candidateFilters = suggestedFiltersForQuery(query)
+        candidateFilters.filter { filter ->
+            searchableConversations.any { conversation ->
+                filter.matches(
+                    conversation = conversation,
+                    messages = messagesByConversation[conversation.conversationId].orEmpty(),
+                    knownContactIds = knownContactNxIds
+                )
+            }
+        }
+    }
+
     val displayedConversations = remember(
-        conversations,
+        searchableConversations,
+        messagesByConversation,
         searchQuery,
         selectedFilters,
         recentChatIds,
@@ -118,44 +171,15 @@ fun NexaSearchScreen(
             // Display Recent Chats
             conversations.filter { recentChatIds.contains(it.conversationId) }
         } else {
-            conversations.filter { chat ->
-                // 1. Text Query Filter (matches name, preview text, or nxId)
-                val matchesQuery = if (searchQuery.isBlank()) true else {
-                    chat.participantName.contains(searchQuery, ignoreCase = true) ||
-                        chat.lastMessageText.contains(searchQuery, ignoreCase = true) ||
-                        chat.participantNxId.contains(searchQuery, ignoreCase = true)
-                }
-                if (!matchesQuery) return@filter false
-
-                // 2. Chip Filters evaluation
-                if (selectedFilters.isEmpty()) return@filter true
-
-                selectedFilters.all { filter ->
-                    when (filter) {
-                        SearchFilter.UNREAD -> chat.unreadCount > 0
-                        SearchFilter.AUDIO -> chat.lastMessageText.contains("[Audio]", ignoreCase = true) ||
-                            chat.lastMessageText.contains(".mp3", ignoreCase = true) ||
-                            chat.lastMessageText.contains("voice", ignoreCase = true)
-                        SearchFilter.FAVORITE -> chat.conversationId.contains("favorite", ignoreCase = true) ||
-                            chat.conversationId.contains("pin", ignoreCase = true)
-                        SearchFilter.ARCHIVED -> chat.conversationId.contains("archive", ignoreCase = true)
-                        SearchFilter.GROUPS -> chat.isGroup
-                        SearchFilter.CONTACTS -> !chat.isGroup && (knownContactNxIds.isEmpty() || knownContactNxIds.contains(chat.participantNxId))
-                        SearchFilter.PHOTOS -> chat.lastMessageText.contains("[Photo]", ignoreCase = true) ||
-                            chat.lastMessageText.contains("[Image]", ignoreCase = true) ||
-                            chat.lastMessageText.contains(".jpg", ignoreCase = true) ||
-                            chat.lastMessageText.contains(".png", ignoreCase = true)
-                        SearchFilter.DOCUMENTS -> chat.lastMessageText.contains("[Document]", ignoreCase = true) ||
-                            chat.lastMessageText.contains("[File]", ignoreCase = true) ||
-                            chat.lastMessageText.contains(".pdf", ignoreCase = true)
-                        SearchFilter.VIDEOS -> chat.lastMessageText.contains("[Video]", ignoreCase = true) ||
-                            chat.lastMessageText.contains(".mp4", ignoreCase = true)
-                        SearchFilter.GIFS -> chat.lastMessageText.contains("[GIF]", ignoreCase = true) ||
-                            chat.lastMessageText.contains(".gif", ignoreCase = true)
-                        SearchFilter.LINKS -> chat.lastMessageText.contains("http://", ignoreCase = true) ||
-                            chat.lastMessageText.contains("https://", ignoreCase = true)
-                        SearchFilter.NON_CONTACTS -> !chat.isGroup && knownContactNxIds.isNotEmpty() && !knownContactNxIds.contains(chat.participantNxId)
-                    }
+            searchableConversations.filter { chat ->
+                val messages = messagesByConversation[chat.conversationId].orEmpty()
+                val query = searchQuery.trim()
+                val matchesQuery = query.isBlank() ||
+                    chat.participantName.contains(query, ignoreCase = true) ||
+                    chat.participantNxId.contains(query, ignoreCase = true) ||
+                    messages.any { it.plainTextContent.contains(query, ignoreCase = true) }
+                matchesQuery && selectedFilters.all { filter ->
+                    filter.matches(chat, messages, knownContactNxIds)
                 }
             }
         }
@@ -241,7 +265,8 @@ fun NexaSearchScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .padding(start = 32.dp, end = if (searchQuery.isNotEmpty()) 32.dp else 0.dp)
-                                .focusRequester(focusRequester),
+                                .focusRequester(focusRequester)
+                                .onFocusChanged { searchHasFocus = it.isFocused },
                             decorationBox = { innerTextField ->
                                 if (searchQuery.isEmpty()) {
                                     Text(
@@ -349,6 +374,65 @@ fun NexaSearchScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp),
                 contentPadding = PaddingValues(bottom = 24.dp)
             ) {
+                if (searchHasFocus && searchQuery.isNotBlank() &&
+                    (matchingContactSuggestions.isNotEmpty() ||
+                        matchingConversationSuggestions.isNotEmpty() ||
+                        matchingCategorySuggestions.isNotEmpty())
+                ) {
+                    item(key = "suggestions_heading") {
+                        Text(
+                            text = "Suggestions",
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                        )
+                    }
+                    items(
+                        items = matchingContactSuggestions,
+                        key = { "contact:${it.nxId}" }
+                    ) { contact ->
+                        SearchSuggestionRow(
+                            title = contact.effectiveDisplayName,
+                            subtitle = "Contact",
+                            onClick = {
+                                coroutineScope.launch {
+                                    val chat = chatRepository.createOrGetConversation(
+                                        contact.nxId,
+                                        contact.effectiveDisplayName
+                                    )
+                                    onOpenChat(chat.conversationId, chat.participantNxId, chat.participantName)
+                                }
+                            }
+                        )
+                    }
+                    items(
+                        items = matchingConversationSuggestions,
+                        key = { "conversation:${it.conversationId}" }
+                    ) { conversation ->
+                        SearchSuggestionRow(
+                            title = conversation.participantName,
+                            subtitle = if (conversation.isGroup) "Group" else "Conversation",
+                            onClick = {
+                                onOpenChat(
+                                    conversation.conversationId,
+                                    conversation.participantNxId,
+                                    conversation.participantName
+                                )
+                            }
+                        )
+                    }
+                    items(
+                        items = matchingCategorySuggestions,
+                        key = { "filter:${it.name}" }
+                    ) { filter ->
+                        SearchSuggestionRow(
+                            title = filter.displayName,
+                            subtitle = "Filter by ${filter.displayName.lowercase()}",
+                            onClick = { selectedFilters = selectedFilters + filter }
+                        )
+                    }
+                }
+
                 if (displayedConversations.isEmpty()) {
                     item {
                         EmptySearchCard(
@@ -467,4 +551,52 @@ private fun EmptySearchCard(
             )
         }
     }
+}
+
+@Composable
+private fun SearchSuggestionRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit
+) {
+    NexaGlassSurface(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick),
+        shape = RoundedCornerShape(NexaGlassTokens.SmallCardRadius),
+        elevation = 1.dp
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 11.dp)
+        ) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1
+            )
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+private fun suggestedFiltersForQuery(query: String): List<SearchFilter> {
+    if (query.isBlank()) return emptyList()
+
+    val terms = mapOf(
+        SearchFilter.AUDIO to setOf("audio", "voice", "mp3", "wav", "m4a"),
+        SearchFilter.PHOTOS to setOf("photo", "image", "jpg", "jpeg", "png"),
+        SearchFilter.DOCUMENTS to setOf("document", "file", "pdf", "doc", "xls"),
+        SearchFilter.VIDEOS to setOf("video", "mp4", "mov"),
+        SearchFilter.GIFS to setOf("gif"),
+        SearchFilter.LINKS to setOf("link", "url", "http", "www")
+    )
+    return terms.filterValues { words -> words.any { query.contains(it, ignoreCase = true) } }.keys.toList()
 }

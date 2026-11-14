@@ -1,8 +1,12 @@
 package com.nexa.app
 
 import com.nexa.app.domain.model.ChatConversation
+import com.nexa.app.domain.model.Message
+import com.nexa.app.domain.model.MessageStatus
+import com.nexa.app.domain.model.MessageType
 import com.nexa.app.presentation.dashboard.isGroup
 import com.nexa.app.presentation.search.model.SearchFilter
+import com.nexa.app.presentation.search.model.matches
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -86,7 +90,7 @@ class AdvancedSearchScreenUnitTests {
         // Verify Display Names
         assertEquals("Unread", SearchFilter.UNREAD.displayName)
         assertEquals("Audio", SearchFilter.AUDIO.displayName)
-        assertEquals("Favorite", SearchFilter.FAVORITE.displayName)
+        assertEquals("Favorites", SearchFilter.FAVORITE.displayName)
         assertEquals("Archived", SearchFilter.ARCHIVED.displayName)
         assertEquals("Groups", SearchFilter.GROUPS.displayName)
         assertEquals("Contacts", SearchFilter.CONTACTS.displayName)
@@ -123,15 +127,34 @@ class AdvancedSearchScreenUnitTests {
 
     @Test
     fun testFilterFavoriteAndArchived() {
-        val favoriteIds = setOf("conv_favorite_photo")
-        val favorites = sampleConversations.filter { favoriteIds.contains(it.conversationId) }
-        assertEquals(1, favorites.size)
-        assertEquals("Bob Photo", favorites[0].participantName)
+        val conversation = sampleConversations[1]
+        val starred = message(conversation.conversationId, isStarred = true)
+        assertTrue(SearchFilter.FAVORITE.matches(conversation, listOf(starred), emptySet()))
+        assertFalse(SearchFilter.FAVORITE.matches(conversation, emptyList(), emptySet()))
 
-        val archivedIds = setOf("conv_web_links")
-        val archived = sampleConversations.filter { archivedIds.contains(it.conversationId) }
-        assertEquals(1, archived.size)
-        assertEquals("Dave Link", archived[0].participantName)
+        val archiveNamedButActive = conversation.copy(conversationId = "archive_named_chat")
+        assertFalse(SearchFilter.ARCHIVED.matches(archiveNamedButActive, emptyList(), emptySet()))
+        assertTrue(SearchFilter.ARCHIVED.matches(archiveNamedButActive.copy(isArchived = true), emptyList(), emptySet()))
+    }
+
+    @Test
+    fun testMediaFiltersUseStoredMessageTypesInsteadOfPreviewTextOrIds() {
+        val conversation = sampleConversations[0].copy(conversationId = "video_audio_name")
+        val audioMessage = message(conversation.conversationId, type = MessageType.AUDIO)
+        val videoMessage = message(conversation.conversationId, type = MessageType.VIDEO)
+
+        assertTrue(SearchFilter.AUDIO.matches(conversation, listOf(audioMessage), emptySet()))
+        assertFalse(SearchFilter.VIDEOS.matches(conversation, emptyList(), emptySet()))
+        assertTrue(SearchFilter.VIDEOS.matches(conversation, listOf(videoMessage), emptySet()))
+    }
+
+    @Test
+    fun testContactAndNonContactFiltersUseContactData() {
+        val conversation = sampleConversations[0]
+        assertTrue(SearchFilter.CONTACTS.matches(conversation, emptyList(), setOf(conversation.participantNxId)))
+        assertFalse(SearchFilter.CONTACTS.matches(conversation, emptyList(), emptySet()))
+        assertTrue(SearchFilter.NON_CONTACTS.matches(conversation, emptyList(), emptySet()))
+        assertFalse(SearchFilter.NON_CONTACTS.matches(conversation, emptyList(), setOf(conversation.participantNxId)))
     }
 
     @Test
@@ -251,4 +274,22 @@ class AdvancedSearchScreenUnitTests {
     fun testBackArrowResourceExists() {
         assertTrue(R.drawable.ic_nexa_arrow_back != 0)
     }
+
+    private fun message(
+        conversationId: String,
+        type: MessageType = MessageType.TEXT,
+        text: String = "",
+        isStarred: Boolean = false
+    ) = Message(
+        packetId = "message-$conversationId-${type.name}",
+        conversationId = conversationId,
+        senderNxId = "NX-SENDER",
+        recipientNxId = "NX-RECIPIENT",
+        plainTextContent = text,
+        status = MessageStatus.DELIVERED,
+        timestamp = 1L,
+        isOutgoing = false,
+        messageType = type,
+        isStarred = isStarred
+    )
 }

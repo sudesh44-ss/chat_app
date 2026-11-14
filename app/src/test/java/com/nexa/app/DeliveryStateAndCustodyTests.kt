@@ -701,7 +701,15 @@ class DeliveryStateAndCustodyTests {
         // Relay A sends Custody ACK to Alice
         val ackAtoAlice = relayAAcks.first()
         assertEquals(PacketType.PACKET_CUSTODY_ACK, ackAtoAlice.type)
-        aliceIngest.ingestWirePacket(ackAtoAlice.copy(custodyAck = ackAtoAlice.custodyAck!!.copy(originalPacketId = packetId)), TransportMedium.OFFLINE_MESH)
+        val custodyPayload = ackAtoAlice.custodyAck!!.copy(originalPacketId = packetId)
+        val digest = AckDigestHelper.computeCustodyAckDigest(
+            originalPacketId = custodyPayload.originalPacketId,
+            custodianNxId = custodyPayload.custodianNxId,
+            status = custodyPayload.status,
+            timestamp = custodyPayload.timestamp
+        )
+        val signedCustodyAck = custodyPayload.copy(signature = Ed25519Signer.sign(digest, relayAPrivEd))
+        aliceIngest.ingestWirePacket(ackAtoAlice.copy(custodyAck = signedCustodyAck), TransportMedium.OFFLINE_MESH)
         // Alice updates to RELAYED, NOT DELIVERED
         assertEquals(MessageStatus.RELAYED.name, aliceMessageDao.getMessageByPacketId(packetId)!!.status)
 
@@ -834,12 +842,47 @@ class DeliveryStateAndCustodyTests {
         override suspend fun getMessagesAfterTimestamp(conversationId: String, afterTimestamp: Long, limit: Int): List<MessageEntity> =
             messages.values.filter { it.conversationId == conversationId && it.timestamp > afterTimestamp }
                 .sortedBy { it.timestamp }.take(limit)
+
+        override suspend fun searchMessagesInConversation(conversationId: String, query: String): List<MessageEntity> =
+            messages.values.filter { it.conversationId == conversationId && it.plainTextContent.contains(query, ignoreCase = true) }
+                .sortedByDescending { it.timestamp }
+
+        override suspend fun getFirstMessageOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): MessageEntity? =
+            messages.values.filter { it.conversationId == conversationId && it.timestamp in startOfDay until endOfDay }
+                .minByOrNull { it.timestamp }
+
+        override suspend fun getMessagesOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): List<MessageEntity> =
+            messages.values.filter { it.conversationId == conversationId && it.timestamp in startOfDay until endOfDay }
+                .sortedBy { it.timestamp }
+
+        override suspend fun countMessagesOnDate(conversationId: String, startOfDay: Long, endOfDay: Long): Int =
+            messages.values.count { it.conversationId == conversationId && it.timestamp in startOfDay until endOfDay }
+
+        override suspend fun countMessagesBeforeTimestamp(conversationId: String, timestamp: Long): Int =
+            messages.values.count { it.conversationId == conversationId && it.timestamp < timestamp }
+
+        override suspend fun getMessagesPaged(conversationId: String, limit: Int, offset: Int): List<MessageEntity> =
+            messages.values.filter { it.conversationId == conversationId && !it.isDeleted }
+                .sortedWith(compareByDescending<MessageEntity> { it.timestamp }.thenByDescending { it.localSequence })
+                .drop(offset).take(limit)
+
+        override suspend fun getNextLocalSequence(conversationId: String): Long =
+            (messages.values.filter { it.conversationId == conversationId }.maxOfOrNull { it.localSequence } ?: 0L) + 1L
+
+        override suspend fun softDeleteMessage(packetId: String): Int = 1
+
+        override suspend fun updateStarredStatus(packetId: String, isStarred: Boolean): Int = 1
     }
 
     private class FakeChatDao : ChatDao {
         val chats = mutableMapOf<String, ChatEntity>()
 
-        override fun getChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.toList())
+        override fun getChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { !it.isArchived })
+
+        override fun getArchivedChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.isArchived })
+
+        override fun getChatsByTypeFlow(chatType: String): Flow<List<ChatEntity>> =
+            flowOf(chats.values.filter { !it.isArchived && it.chatType == chatType })
 
         override suspend fun upsertChat(chat: ChatEntity): Long {
             chats[chat.conversationId] = chat
@@ -857,6 +900,12 @@ class DeliveryStateAndCustodyTests {
             return 1
         }
 
+        override suspend fun markConversationUnread(conversationId: String, updatedAt: Long): Int {
+            val existing = chats[conversationId] ?: return 0
+            chats[conversationId] = existing.copy(hasManualUnread = true, updatedAt = updatedAt)
+            return 1
+        }
+
         override suspend fun deleteChat(conversationId: String): Int =
             if (chats.remove(conversationId) != null) 1 else 0
 
@@ -871,6 +920,18 @@ class DeliveryStateAndCustodyTests {
             chats[conversationId] = existing.copy(lastMessageText = "", unreadCount = 0)
             return 1
         }
+
+        override suspend fun updatePinStatus(conversationId: String, isPinned: Boolean, pinPosition: Int, pinnedAt: Long?, updatedAt: Long): Int = 1
+
+        override suspend fun updateArchiveStatus(conversationId: String, isArchived: Boolean, archivedAt: Long?, updatedAt: Long): Int = 1
+
+        override suspend fun updateMuteStatus(conversationId: String, isMuted: Boolean, mutedUntil: Long, updatedAt: Long): Int = 1
+
+        override suspend fun updateLastMessage(conversationId: String, text: String, timestamp: Long, lastMessageId: String?, lastSenderNxId: String?): Int = 1
+
+        override suspend fun incrementUnread(conversationId: String): Int = 1
+
+        override suspend fun countActiveChats(): Int = chats.values.count { !it.isArchived }
     }
 
     private class FakeUserDao(var user: UserEntity? = null) : UserDao {
@@ -907,6 +968,12 @@ class DeliveryStateAndCustodyTests {
         override suspend fun updateStatus(nxId: String, newStatus: ContactStatus): Int {
             val existing = contacts[nxId] ?: return 0
             contacts[nxId] = existing.copy(status = newStatus)
+            return 1
+        }
+
+        override suspend fun updateStatusMuted(nxId: String, isMuted: Boolean): Int {
+            val existing = contacts[nxId] ?: return 0
+            contacts[nxId] = existing.copy(isStatusMuted = isMuted)
             return 1
         }
 

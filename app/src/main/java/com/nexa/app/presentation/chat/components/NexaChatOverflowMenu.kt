@@ -28,26 +28,19 @@ import com.nexa.app.R
 import com.nexa.app.presentation.common.glass.NexaGlassSurface
 
 enum class ChatOverflowAction {
-    VIEW_CONTACT,
+    VIEW_PROFILE,
     SEARCH_CHAT,
-    MEDIA_LINKS_FILES,
-    GHOST_MODE,
-    PINNED_MESSAGES,
-    CHAT_WALLPAPER,
+    DELETE_CHAT,
     CLEAR_CHAT,
-    BLOCK_CONTACT
+    SHARED_FILES,
+    PINNED_MESSAGES,
+    MUTE_NOTIFICATIONS,
+    ARCHIVE_CHAT
 }
 
 /**
- * Chat 3-Dot Overflow Menu with exact 8 items in specified order:
- * 1. View Contact
- * 2. Search Chat
- * 3. Media, Links & Files
- * 4. Ghost Mode
- * 5. Pinned Messages
- * 6. Chat Wallpaper
- * 7. Clear Chat
- * 8. Block Contact
+ * Chat header overflow menu used by the current conversation.
+ * The menu intentionally contains only the canonical management actions required by the app.
  */
 @Composable
 fun NexaChatOverflowMenu(
@@ -76,20 +69,18 @@ fun NexaChatOverflowMenu(
         Column(
             modifier = Modifier.padding(vertical = 8.dp)
         ) {
-            // 1. View Contact
             OverflowMenuItem(
-                title = "View Contact",
+                title = "View Profile",
                 iconRes = R.drawable.ic_nexa_view_contact,
                 tint = contentColor,
                 onClick = {
-                    onActionSelected(ChatOverflowAction.VIEW_CONTACT)
+                    onActionSelected(ChatOverflowAction.VIEW_PROFILE)
                     onDismiss()
                 }
             )
 
-            // 2. Search Chat
             OverflowMenuItem(
-                title = "Search Chat",
+                title = "Search",
                 iconRes = R.drawable.ic_nexa_search,
                 tint = contentColor,
                 onClick = {
@@ -98,56 +89,16 @@ fun NexaChatOverflowMenu(
                 }
             )
 
-            // 3. Media, Links & Files
             OverflowMenuItem(
-                title = "Media, Links & Files",
-                iconRes = R.drawable.ic_nexa_file,
-                tint = contentColor,
+                title = "Delete Chat",
+                iconRes = R.drawable.ic_nexa_delete,
+                tint = dangerColor,
                 onClick = {
-                    onActionSelected(ChatOverflowAction.MEDIA_LINKS_FILES)
+                    onActionSelected(ChatOverflowAction.DELETE_CHAT)
                     onDismiss()
                 }
             )
 
-            // 4. Ghost Mode
-            OverflowMenuItem(
-                title = if (isGhostModeActive) "Ghost Mode (On)" else "Ghost Mode",
-                iconRes = R.drawable.ic_nexa_ghost,
-                tint = if (isGhostModeActive) MaterialTheme.colorScheme.primary else contentColor,
-                onClick = {
-                    onActionSelected(ChatOverflowAction.GHOST_MODE)
-                    onDismiss()
-                }
-            )
-
-            // 5. Pinned Messages
-            OverflowMenuItem(
-                title = "Pinned Messages",
-                iconRes = R.drawable.ic_nexa_pin,
-                tint = contentColor,
-                onClick = {
-                    onActionSelected(ChatOverflowAction.PINNED_MESSAGES)
-                    onDismiss()
-                }
-            )
-
-            // 6. Chat Wallpaper
-            OverflowMenuItem(
-                title = "Chat Wallpaper",
-                iconRes = R.drawable.ic_nexa_wallpaper,
-                tint = contentColor,
-                onClick = {
-                    onActionSelected(ChatOverflowAction.CHAT_WALLPAPER)
-                    onDismiss()
-                }
-            )
-
-            HorizontalDivider(
-                color = if (isDark) Color(0x22FFFFFF) else Color(0x15000000),
-                modifier = Modifier.padding(vertical = 4.dp)
-            )
-
-            // 7. Clear Chat
             OverflowMenuItem(
                 title = "Clear Chat",
                 iconRes = R.drawable.ic_nexa_clear_chat,
@@ -158,13 +109,42 @@ fun NexaChatOverflowMenu(
                 }
             )
 
-            // 8. Block Contact
             OverflowMenuItem(
-                title = "Block Contact",
-                iconRes = R.drawable.ic_nexa_block_ban,
-                tint = dangerColor,
+                title = "Shared Files",
+                iconRes = R.drawable.ic_nexa_file,
+                tint = contentColor,
                 onClick = {
-                    onActionSelected(ChatOverflowAction.BLOCK_CONTACT)
+                    onActionSelected(ChatOverflowAction.SHARED_FILES)
+                    onDismiss()
+                }
+            )
+
+            OverflowMenuItem(
+                title = "Pinned Messages",
+                iconRes = R.drawable.ic_nexa_pin,
+                tint = contentColor,
+                onClick = {
+                    onActionSelected(ChatOverflowAction.PINNED_MESSAGES)
+                    onDismiss()
+                }
+            )
+
+            OverflowMenuItem(
+                title = "Mute Notifications",
+                iconRes = R.drawable.ic_nexa_mute,
+                tint = if (isGhostModeActive) MaterialTheme.colorScheme.primary else contentColor,
+                onClick = {
+                    onActionSelected(ChatOverflowAction.MUTE_NOTIFICATIONS)
+                    onDismiss()
+                }
+            )
+
+            OverflowMenuItem(
+                title = "Archive",
+                iconRes = R.drawable.ic_nexa_archive,
+                tint = contentColor,
+                onClick = {
+                    onActionSelected(ChatOverflowAction.ARCHIVE_CHAT)
                     onDismiss()
                 }
             )

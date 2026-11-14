@@ -16,6 +16,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,6 +41,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.nexa.app.presentation.common.avatar.NexaAvatar
 import com.nexa.app.presentation.contacts.components.RequestItemCard
+import com.nexa.app.data.local.entity.ContactEntity
+import com.nexa.app.data.local.entity.ContactStatus
+import com.nexa.app.data.remote.dto.ConnectionRequestItemDto
+
+private fun ConnectionRequestItemDto.toContactEntity(): ContactEntity {
+    val userProfile = profile
+    return ContactEntity(
+        nxId = senderNxId,
+        displayName = userProfile?.displayName ?: senderNxId,
+        publicKeyHex = userProfile?.publicKeyHex.orEmpty(),
+        introMessage = introMessage,
+        status = ContactStatus.REQUEST_RECEIVED,
+        createdAtTimestamp = createdAt,
+        nexaAvatarUrl = userProfile?.avatarUrl
+    )
+}
 
 /**
  * Screen displaying incoming and outgoing connection requests with Accept, Reject, and Cancel actions.
@@ -58,7 +76,7 @@ fun PendingRequestsScreen(
         viewModel.loadOutgoingRequests()
     }
 
-    val incomingList = uiState.pendingReceived
+    val incomingList = uiState.incomingRequests
     val outgoingList = uiState.pendingSent
 
     Scaffold(
@@ -94,7 +112,34 @@ fun PendingRequestsScreen(
 
             if (selectedTab == 0) {
                 // Incoming Tab
-                if (incomingList.isEmpty()) {
+                if (uiState.isLoadingIncomingRequests) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator()
+                    }
+                } else if (uiState.incomingRequestsError != null) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(24.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Text(
+                            text = uiState.incomingRequestsError.orEmpty(),
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Button(
+                            onClick = viewModel::loadIncomingRequests,
+                            modifier = Modifier.padding(top = 12.dp)
+                        ) {
+                            Text("Retry")
+                        }
+                    }
+                } else if (incomingList.isEmpty()) {
                     Box(
                         modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
@@ -112,15 +157,22 @@ fun PendingRequestsScreen(
                             .padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        items(incomingList, key = { it.nxId }) { contact ->
+                        items(incomingList, key = { it.id }) { request ->
+                            val contact = request.toContactEntity()
                             RequestItemCard(
                                 contact = contact,
-                                onAccept = { viewModel.acceptRequest(contact) },
-                                onReject = { viewModel.rejectContact(contact.nxId) }
+                                requestTime = request.createdAt,
+                                onAccept = {
+                                    viewModel.acceptConnectionRequest(request.id, contact)
+                                },
+                                onReject = {
+                                    viewModel.rejectConnectionRequest(request.id, request.senderNxId)
+                                }
                             )
                         }
                     }
                 }
+
             } else {
                 // Outgoing Tab
                 if (outgoingList.isEmpty()) {
@@ -180,10 +232,12 @@ fun PendingRequestsScreen(
                                         Text("Cancel")
                                     }
                                 }
+
                             }
                         }
                     }
                 }
+
             }
         }
     }

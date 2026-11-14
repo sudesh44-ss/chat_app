@@ -3,6 +3,7 @@ package com.nexa.app.data.local.entity
 import androidx.room.Entity
 import androidx.room.Index
 import androidx.room.PrimaryKey
+import androidx.room.ColumnInfo
 import com.nexa.app.core.identity.PeerIdentityResolver
 import com.nexa.app.core.identity.ResolvedPeerIdentity
 
@@ -37,7 +38,9 @@ data class ContactEntity(
     val connectionSource: String = "ADDRESS_BOOK",
     val avatarLocalPath: String? = null,
     val deviceContactPhotoUri: String? = null,
-    val nexaAvatarUrl: String? = null
+    val nexaAvatarUrl: String? = null,
+    @ColumnInfo(defaultValue = "0")
+    val isStatusMuted: Boolean = false
 ) {
     /**
      * Resolves the effective official avatar URL, preferring remote CDN/R2 URL over local cached path.

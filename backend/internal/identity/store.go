@@ -14,19 +14,24 @@ type Store struct {
 	mu            sync.RWMutex
 	filePath      string
 	accounts      map[string]*UserAccount // nxID -> account
-	byPhone       map[string]string       // phone -> nxID
+	byPhone       map[string]string       // plaintext phone -> nxID (legacy lookup only)
+	byPhoneHMAC   map[string]string       // phone HMAC -> nxID (preferred lookup)
+	phoneByNx     map[string]string       // nxID -> indexed plaintext phone
+	phoneHMACByNx map[string]string       // nxID -> indexed phone HMAC
 	byGoogle      map[string]string       // googleID -> nxID
 	bySupabaseUID map[string]string       // supabaseUID -> nxID
 	byPubKey      map[string]string       // pubKeyHex -> nxID
 	devices       map[string]*Device      // deviceID -> device
 	devicesByNx   map[string][]string     // nxID -> []deviceID
 	sessions      map[string]*Session     // token -> session
+	deviceEvents  []*DeviceEvent          // append-only audit trail
 }
 
 type storeSnapshot struct {
-	Accounts []*UserAccount `json:"accounts"`
-	Devices  []*Device      `json:"devices"`
-	Sessions []*Session     `json:"sessions"`
+	Accounts     []*UserAccount `json:"accounts"`
+	Devices      []*Device      `json:"devices"`
+	Sessions     []*Session     `json:"sessions"`
+	DeviceEvents []*DeviceEvent `json:"device_events,omitempty"`
 }
 
 func NewStore(filePath string) (*Store, error) {
@@ -34,6 +39,9 @@ func NewStore(filePath string) (*Store, error) {
 		filePath:      filePath,
 		accounts:      make(map[string]*UserAccount),
 		byPhone:       make(map[string]string),
+		byPhoneHMAC:   make(map[string]string),
+		phoneByNx:     make(map[string]string),
+		phoneHMACByNx: make(map[string]string),
 		byGoogle:      make(map[string]string),
 		bySupabaseUID: make(map[string]string),
 		byPubKey:      make(map[string]string),
@@ -81,8 +89,8 @@ func (s *Store) load() error {
 
 	for _, a := range snap.Accounts {
 		s.accounts[a.NxID] = a
-		if a.PhoneNumber != "" {
-			s.byPhone[a.PhoneNumber] = a.NxID
+		if err := s.reindexPhone(a); err != nil {
+			log.Printf("[IdentityStore] Warning: phone protection unavailable for %s: %v", a.NxID, err)
 		}
 		if a.GoogleID != "" {
 			s.byGoogle[a.GoogleID] = a.NxID
@@ -99,6 +107,8 @@ func (s *Store) load() error {
 		s.devices[d.DeviceID] = d
 		s.devicesByNx[d.NxID] = append(s.devicesByNx[d.NxID], d.DeviceID)
 	}
+
+	s.deviceEvents = append(s.deviceEvents, snap.DeviceEvents...)
 
 	now := time.Now().UnixMilli()
 	for _, sess := range snap.Sessions {
@@ -122,9 +132,10 @@ func (s *Store) save() error {
 	}
 
 	snap := storeSnapshot{
-		Accounts: make([]*UserAccount, 0, len(s.accounts)),
-		Devices:  make([]*Device, 0, len(s.devices)),
-		Sessions: make([]*Session, 0, len(s.sessions)),
+		Accounts:     make([]*UserAccount, 0, len(s.accounts)),
+		Devices:      make([]*Device, 0, len(s.devices)),
+		Sessions:     make([]*Session, 0, len(s.sessions)),
+		DeviceEvents: s.deviceEvents,
 	}
 
 	for _, a := range s.accounts {
@@ -186,12 +197,6 @@ func (s *Store) CreateAccount(account *UserAccount) error {
 		return fmt.Errorf("account with NX-ID %s already exists", account.NxID)
 	}
 
-	if account.PhoneNumber != "" {
-		if existing, exists := s.byPhone[account.PhoneNumber]; exists && existing != account.NxID {
-			return fmt.Errorf("phone number already associated with account %s", existing)
-		}
-	}
-
 	if account.GoogleID != "" {
 		if existing, exists := s.byGoogle[account.GoogleID]; exists && existing != account.NxID {
 			return fmt.Errorf("google ID already associated with account %s", existing)
@@ -210,10 +215,11 @@ func (s *Store) CreateAccount(account *UserAccount) error {
 		}
 	}
 
-	s.accounts[account.NxID] = account
-	if account.PhoneNumber != "" {
-		s.byPhone[account.PhoneNumber] = account.NxID
+	if err := s.reindexPhone(account); err != nil {
+		return err
 	}
+
+	s.accounts[account.NxID] = account
 	if account.GoogleID != "" {
 		s.byGoogle[account.GoogleID] = account.NxID
 	}
@@ -227,6 +233,55 @@ func (s *Store) CreateAccount(account *UserAccount) error {
 	return s.save()
 }
 
+// reindexPhone rebuilds the phone lookup maps for a single account. Callers
+// must hold the write lock (or be in single-threaded initialisation). It fails
+// closed when phone protection keys are unavailable so plaintext-only indexing
+// can never silently return.
+func (s *Store) reindexPhone(account *UserAccount) error {
+	prevPhone := s.phoneByNx[account.NxID]
+	prevHMAC := s.phoneHMACByNx[account.NxID]
+
+	if prevPhone != "" {
+		if current, ok := s.byPhone[prevPhone]; ok && current == account.NxID {
+			delete(s.byPhone, prevPhone)
+		}
+		delete(s.phoneByNx, account.NxID)
+	}
+	if prevHMAC != "" {
+		if current, ok := s.byPhoneHMAC[prevHMAC]; ok && current == account.NxID {
+			delete(s.byPhoneHMAC, prevHMAC)
+		}
+		delete(s.phoneHMACByNx, account.NxID)
+	}
+
+	if account.PhoneNumber == "" {
+		account.PhoneHMAC = ""
+		account.PhoneEncrypted = ""
+		return nil
+	}
+
+	hmacHex, err := PhoneHMAC(account.PhoneNumber)
+	if err != nil {
+		return err
+	}
+	encrypted, err := EncryptPhone(account.PhoneNumber)
+	if err != nil {
+		return err
+	}
+
+	if existing, exists := s.byPhoneHMAC[hmacHex]; exists && existing != account.NxID {
+		return fmt.Errorf("phone number already associated with account %s", existing)
+	}
+
+	account.PhoneHMAC = hmacHex
+	account.PhoneEncrypted = encrypted
+	s.byPhone[account.PhoneNumber] = account.NxID
+	s.byPhoneHMAC[hmacHex] = account.NxID
+	s.phoneByNx[account.NxID] = account.PhoneNumber
+	s.phoneHMACByNx[account.NxID] = hmacHex
+	return nil
+}
+
 func (s *Store) GetAccountByNxID(nxID string) (*UserAccount, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -235,8 +290,21 @@ func (s *Store) GetAccountByNxID(nxID string) (*UserAccount, bool) {
 }
 
 func (s *Store) GetAccountByPhone(phone string) (*UserAccount, bool) {
+	if phone == "" {
+		return nil, false
+	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
+	// Prefer the HMAC index so the plaintext column is only a transitional
+	// fallback for records created before phone protection existed.
+	if hmacHex, err := PhoneHMAC(phone); err == nil {
+		if nxID, ok := s.byPhoneHMAC[hmacHex]; ok {
+			if a, found := s.accounts[nxID]; found {
+				return a, true
+			}
+		}
+	}
 	nxID, ok := s.byPhone[phone]
 	if !ok {
 		return nil, false
@@ -283,11 +351,13 @@ func (s *Store) UpdateAccount(account *UserAccount) error {
 	defer s.mu.Unlock()
 
 	account.UpdatedAt = time.Now().UnixMilli()
+
+	if err := s.reindexPhone(account); err != nil {
+		return err
+	}
+
 	s.accounts[account.NxID] = account
 
-	if account.PhoneNumber != "" {
-		s.byPhone[account.PhoneNumber] = account.NxID
-	}
 	if account.GoogleID != "" {
 		s.byGoogle[account.GoogleID] = account.NxID
 	}
@@ -317,7 +387,13 @@ func (s *Store) LookupVerifiedPhoneNumbers(phoneNumbers []string) []*ContactMatc
 		}
 		seen[phone] = true
 
-		nxID, found := s.byPhone[phone]
+		nxID, found := "", false
+		if hmacHex, err := PhoneHMAC(phone); err == nil {
+			nxID, found = s.byPhoneHMAC[hmacHex]
+		}
+		if !found {
+			nxID, found = s.byPhone[phone]
+		}
 		if !found {
 			continue
 		}
@@ -345,19 +421,99 @@ func (s *Store) RegisterDevice(d *Device) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.devices[d.DeviceID] = d
-	exists := false
-	for _, id := range s.devicesByNx[d.NxID] {
-		if id == d.DeviceID {
-			exists = true
-			break
-		}
-	}
-	if !exists {
-		s.devicesByNx[d.NxID] = append(s.devicesByNx[d.NxID], d.DeviceID)
-	}
+	s.upsertDevice(d)
+	s.appendEvent(&DeviceEvent{
+		NxID:      d.NxID,
+		DeviceID:  d.DeviceID,
+		EventType: "REGISTERED",
+		Reason:    "device registered",
+		Actor:     "system",
+		CreatedAt: time.Now().UnixMilli(),
+	})
 
 	return s.save()
+}
+
+// RegisterDeviceReplacingOthers enforces the single-active-device rule for the
+// JSON-backed store: every other active device and its sessions are revoked in
+// the same write that registers the new device.
+func (s *Store) RegisterDeviceReplacingOthers(d *Device, reason string) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now().UnixMilli()
+	revoked := make([]string, 0)
+
+	for _, id := range append([]string(nil), s.devicesByNx[d.NxID]...) {
+		if id == d.DeviceID {
+			continue
+		}
+		other, ok := s.devices[id]
+		if !ok || other.IsRevoked {
+			continue
+		}
+
+		other.IsRevoked = true
+		other.RevokedAt = now
+		other.RevokedReason = reason
+		other.FcmToken = ""
+		revoked = append(revoked, id)
+
+		for _, sess := range s.sessions {
+			if sess.DeviceID == id {
+				sess.IsRevoked = true
+			}
+		}
+
+		s.appendEvent(&DeviceEvent{
+			NxID:      d.NxID,
+			DeviceID:  id,
+			EventType: "REVOKED_REPLACED",
+			Reason:    reason,
+			Actor:     "system",
+			CreatedAt: now,
+		})
+	}
+
+	if d.IsRevoked {
+		d.RevokedAt = now
+		d.RevokedReason = reason
+	} else {
+		d.RevokedAt = 0
+		d.RevokedReason = ""
+	}
+	s.upsertDevice(d)
+	s.appendEvent(&DeviceEvent{
+		NxID:      d.NxID,
+		DeviceID:  d.DeviceID,
+		EventType: "REGISTERED",
+		Reason:    "active device",
+		Actor:     "system",
+		CreatedAt: now,
+	})
+
+	return revoked, s.save()
+}
+
+func (s *Store) upsertDevice(d *Device) {
+	s.devices[d.DeviceID] = d
+
+	for _, id := range s.devicesByNx[d.NxID] {
+		if id == d.DeviceID {
+			return
+		}
+	}
+	s.devicesByNx[d.NxID] = append(s.devicesByNx[d.NxID], d.DeviceID)
+}
+
+func (s *Store) appendEvent(event *DeviceEvent) {
+	if event.CreatedAt == 0 {
+		event.CreatedAt = time.Now().UnixMilli()
+	}
+	if event.ID == "" {
+		event.ID = fmt.Sprintf("evt_%d_%d", event.CreatedAt, len(s.deviceEvents))
+	}
+	s.deviceEvents = append(s.deviceEvents, event)
 }
 
 func (s *Store) GetDevice(deviceID string) (*Device, bool) {
@@ -385,6 +541,25 @@ func (s *Store) GetDevicesForAccount(nxID string) []*Device {
 	return result
 }
 
+// GetAllDevicesForAccount includes revoked devices so callers can show history.
+func (s *Store) GetAllDevicesForAccount(nxID string) []*Device {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	deviceIDs, ok := s.devicesByNx[nxID]
+	if !ok {
+		return nil
+	}
+
+	result := make([]*Device, 0, len(deviceIDs))
+	for _, id := range deviceIDs {
+		if d, found := s.devices[id]; found {
+			result = append(result, d)
+		}
+	}
+	return result
+}
+
 func (s *Store) RevokeDevice(deviceID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -394,7 +569,10 @@ func (s *Store) RevokeDevice(deviceID string) error {
 		return fmt.Errorf("device %s not found", deviceID)
 	}
 
+	now := time.Now().UnixMilli()
 	d.IsRevoked = true
+	d.RevokedAt = now
+	d.RevokedReason = "revoked"
 	d.FcmToken = ""
 
 	for _, sess := range s.sessions {
@@ -403,7 +581,42 @@ func (s *Store) RevokeDevice(deviceID string) error {
 		}
 	}
 
+	s.appendEvent(&DeviceEvent{
+		NxID:      d.NxID,
+		DeviceID:  deviceID,
+		EventType: "REVOKED",
+		Reason:    "revoked",
+		Actor:     "user",
+		CreatedAt: now,
+	})
+
 	return s.save()
+}
+
+func (s *Store) RecordDeviceEvent(event *DeviceEvent) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.appendEvent(event)
+	return s.save()
+}
+
+func (s *Store) GetDeviceEvents(nxID string, limit int) ([]*DeviceEvent, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]*DeviceEvent, 0)
+	for i := len(s.deviceEvents) - 1; i >= 0; i-- {
+		event := s.deviceEvents[i]
+		if event.NxID != nxID {
+			continue
+		}
+		result = append(result, event)
+		if limit > 0 && len(result) >= limit {
+			break
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) UpdateDeviceFcmToken(deviceID string, token string) error {
@@ -448,6 +661,41 @@ func (s *Store) RevokeSession(token string) error {
 		return s.save()
 	}
 	return nil
+}
+
+// RevokeSessionsForDevice revokes active sessions for the account (and device,
+// when deviceID is non-empty) except exceptToken. Sessions created at or after
+// createdBefore are left alone when createdBefore is non-zero. Returns the
+// number revoked.
+func (s *Store) RevokeSessionsForDevice(nxID string, deviceID string, exceptToken string, createdBefore int64) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	revoked := 0
+	for token, sess := range s.sessions {
+		if sess == nil || sess.IsRevoked {
+			continue
+		}
+		if sess.NxID != nxID {
+			continue
+		}
+		if deviceID != "" && sess.DeviceID != deviceID {
+			continue
+		}
+		if createdBefore > 0 && sess.CreatedAt >= createdBefore {
+			continue
+		}
+		if exceptToken != "" && token == exceptToken {
+			continue
+		}
+		sess.IsRevoked = true
+		revoked++
+	}
+
+	if revoked == 0 {
+		return 0, nil
+	}
+	return revoked, s.save()
 }
 
 // RegisterUser allocates an NX-ID, creates an account, registers initial device and session.
@@ -549,8 +797,16 @@ func (s *Store) RegisterDeviceWithParams(nxID string, deviceID string, deviceNam
 	return dev, sess, nil
 }
 
-// RevokeDeviceForUser revokes a device by NX-ID and deviceID.
+// RevokeDeviceForUser revokes a device by NX-ID and deviceID after verifying
+// that the device actually belongs to that account.
 func (s *Store) RevokeDeviceForUser(nxID string, deviceID string) error {
+	d, ok := s.GetDevice(deviceID)
+	if !ok {
+		return fmt.Errorf("device %s not found", deviceID)
+	}
+	if d.NxID != nxID {
+		return fmt.Errorf("device %s is not owned by account %s", deviceID, nxID)
+	}
 	return s.RevokeDevice(deviceID)
 }
 
@@ -570,4 +826,3 @@ func (s *Store) Close() error {
 
 // Compile-time check to verify Store satisfies IdentityRepository interface
 var _ IdentityRepository = (*Store)(nil)
-

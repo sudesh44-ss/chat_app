@@ -406,6 +406,64 @@ var migrations = []Migration{
 		END $$;
 		`,
 	},
+	{
+		Version: 7,
+		Name:    "007_phone_protection_and_device_audit",
+		SQL: `
+		-- Phone numbers are protected at rest with a deterministic HMAC for
+		-- lookups/uniqueness and an AES-GCM ciphertext for owner-facing reads.
+		ALTER TABLE accounts ADD COLUMN IF NOT EXISTS phone_hmac VARCHAR(64);
+		ALTER TABLE accounts ADD COLUMN IF NOT EXISTS phone_encrypted TEXT;
+
+		CREATE UNIQUE INDEX IF NOT EXISTS idx_accounts_phone_hmac ON accounts(phone_hmac)
+			WHERE phone_hmac IS NOT NULL AND phone_hmac != '';
+
+		-- Existing plaintext phone values are backfilled by the application
+		-- migration job because HMAC/AES keys live only in the app environment.
+		-- The legacy unique index on phone_number is retained until the
+		-- plaintext column is dropped; dropping it would be a destructive
+		-- follow-up migration that requires an explicit data-retention review.
+
+		-- Device revocation history.
+		ALTER TABLE devices ADD COLUMN IF NOT EXISTS revoked_at BIGINT;
+		ALTER TABLE devices ADD COLUMN IF NOT EXISTS revoked_reason VARCHAR(255);
+
+		CREATE INDEX IF NOT EXISTS idx_devices_nx_id_revoked ON devices(nx_id, is_revoked);
+
+		-- Append-only device lifecycle audit trail.
+		CREATE TABLE IF NOT EXISTS device_events (
+			id VARCHAR(128) PRIMARY KEY,
+			nx_id VARCHAR(32) NOT NULL REFERENCES accounts(nx_id) ON DELETE CASCADE,
+			device_id VARCHAR(128) NOT NULL,
+			event_type VARCHAR(32) NOT NULL,
+			reason VARCHAR(255),
+			actor VARCHAR(32),
+			created_at BIGINT NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_device_events_nx_created ON device_events(nx_id, created_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_device_events_device ON device_events(device_id);
+
+		DO $$
+		BEGIN
+			IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'device_events') THEN
+				BEGIN
+					ALTER TABLE device_events ENABLE ROW LEVEL SECURITY;
+				EXCEPTION WHEN insufficient_privilege THEN
+					RAISE NOTICE 'Skipping RLS enable on device_events: insufficient privilege';
+				END;
+			END IF;
+
+			IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
+				BEGIN
+					REVOKE ALL ON device_events FROM anon, authenticated;
+				EXCEPTION WHEN insufficient_privilege THEN
+					RAISE NOTICE 'Skipping device_events grants: insufficient privilege';
+				END;
+			END IF;
+		END $$;
+		`,
+	},
 }
 
 // RunMigrations applies pending database migrations transactionally.

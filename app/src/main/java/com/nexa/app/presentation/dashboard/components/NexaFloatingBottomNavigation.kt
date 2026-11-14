@@ -38,7 +38,8 @@ import com.nexa.app.presentation.common.glass.NexaGlassSurface
 
 enum class BottomNavDestination {
     HOME,
-    PROFILE
+    PROFILE,
+    SETTINGS
 }
 
 @Composable

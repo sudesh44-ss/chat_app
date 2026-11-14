@@ -2,8 +2,10 @@ package com.nexa.app.presentation.profile
 
 import com.nexa.app.data.local.entity.ContactEntity
 import com.nexa.app.data.local.entity.TransferEntity
+import com.nexa.app.data.local.preferences.OfflinePresenceMode
 import com.nexa.app.data.local.preferences.OnlinePrivacyMode
 import com.nexa.app.data.local.preferences.TypingPrivacyMode
+import com.nexa.app.domain.model.StatusItem
 
 data class ContactProfileUiState(
     val nxId: String = "",
@@ -26,7 +28,11 @@ data class ContactProfileUiState(
     val customTone: String? = null,
     val isVibrationEnabled: Boolean = true,
     val isBlocked: Boolean = false,
+    val activeStatuses: List<StatusItem> = emptyList(),
+    val showOnlineStatus: Boolean = true,
     val onlinePrivacyMode: OnlinePrivacyMode = OnlinePrivacyMode.MY_CONTACTS,
+    val offlinePresenceMode: OfflinePresenceMode = OfflinePresenceMode.TAKING_A_BREAK,
+    val selectedOnlineStatusContacts: List<String> = emptyList(),
     val typingPrivacyMode: TypingPrivacyMode = TypingPrivacyMode.EVERYONE,
     val connectivitySummary: String = "Internet • E2EE Direct",
     val isPhoneInAddressBook: Boolean = false,

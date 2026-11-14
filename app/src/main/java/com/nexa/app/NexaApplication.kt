@@ -1,6 +1,7 @@
 package com.nexa.app
 
 import android.app.Application
+import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -84,6 +85,9 @@ class NexaApplication : Application() {
     lateinit var chatRepository: ChatRepository
         private set
 
+    lateinit var scheduledMessageManager: com.nexa.app.domain.manager.ScheduledMessageManager
+        private set
+
     lateinit var signalingClient: SignalingClient
         private set
 
@@ -150,6 +154,9 @@ class NexaApplication : Application() {
     lateinit var contactRepository: com.nexa.app.domain.repository.ContactRepository
         private set
 
+    lateinit var statusRepository: com.nexa.app.domain.repository.StatusRepository
+        private set
+
     lateinit var googleCodeScannerEngine: com.nexa.app.data.remote.scanner.GoogleCodeScannerEngine
         private set
 
@@ -163,6 +170,9 @@ class NexaApplication : Application() {
         private set
 
     lateinit var mediaPrefs: com.nexa.app.data.local.preferences.MediaPrefs
+        private set
+
+    lateinit var mediaAutoReceivePrefs: com.nexa.app.data.local.preferences.MediaAutoReceivePreferences
         private set
 
     lateinit var chatPrivacyPrefs: com.nexa.app.data.local.preferences.ChatPrivacyPrefs
@@ -187,6 +197,9 @@ class NexaApplication : Application() {
         private set
 
     lateinit var securityScannerRepository: com.nexa.app.domain.repository.SecurityScannerRepository
+        private set
+
+    lateinit var nexaSecurityEngine: com.nexa.app.core.security.NexaSecurityEngine
         private set
 
     lateinit var memoryBufferPool: com.nexa.app.core.hardware.MemoryBufferPool
@@ -225,8 +238,41 @@ class NexaApplication : Application() {
     lateinit var notificationDispatcher: com.nexa.app.core.notification.NexaNotificationDispatcher
         private set
 
+    lateinit var soundPreferences: com.nexa.app.data.local.preferences.SoundPreferences
+        private set
+
+    lateinit var soundManager: com.nexa.app.core.sound.NexaSoundManager
+        private set
+
     lateinit var appearancePrefs: com.nexa.app.data.local.preferences.AppearancePreferences
         private set
+
+    lateinit var chatsPrefs: com.nexa.app.data.local.preferences.ChatsPreferences
+        private set
+
+    lateinit var accessibilityPrefs: com.nexa.app.data.local.preferences.AccessibilityPreferences
+        private set
+
+    lateinit var nearbyMeshPrefs: com.nexa.app.data.local.preferences.NearbyMeshPreferences
+        private set
+
+    lateinit var languagePrefs: com.nexa.app.data.local.preferences.LanguagePreferences
+        private set
+
+    override fun attachBaseContext(newBase: Context) {
+        val selectedTag = newBase
+            .getSharedPreferences("nexa_language_preferences", Context.MODE_PRIVATE)
+            .getString("selected_language", "") ?: ""
+        if (selectedTag.isBlank()) {
+            super.attachBaseContext(newBase)
+            return
+        }
+        val locale = java.util.Locale.forLanguageTag(selectedTag)
+        java.util.Locale.setDefault(locale)
+        val configuration = android.content.res.Configuration(newBase.resources.configuration)
+        configuration.setLocale(locale)
+        super.attachBaseContext(newBase.createConfigurationContext(configuration))
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -235,20 +281,25 @@ class NexaApplication : Application() {
         secureStorage = SecureStorage(this)
         keystoreManager = CryptoKeystoreManager(this)
         appearancePrefs = com.nexa.app.data.local.preferences.AppearancePreferences(this)
+        chatsPrefs = com.nexa.app.data.local.preferences.ChatsPreferences(this)
+        accessibilityPrefs = com.nexa.app.data.local.preferences.AccessibilityPreferences(this)
+        nearbyMeshPrefs = com.nexa.app.data.local.preferences.NearbyMeshPreferences(this)
+        languagePrefs = com.nexa.app.data.local.preferences.LanguagePreferences(this)
 
         // 2. Initialize encrypted SQLite database with SQLCipher SupportFactory
         val dbPassphrase = secureStorage.getOrCreateDatabasePassphrase()
         database = NexaDatabase.getInstance(this, dbPassphrase)
 
         // 3. Initialize remote API service
-        apiService = AuthApiServiceImpl()
+        apiService = AuthApiServiceImpl(appContext = applicationContext)
 
         // 4. Initialize domain repository coordinator
         authRepository = AuthRepositoryImpl(
             apiService = apiService,
             userDao = database.userDao(),
             keystoreManager = keystoreManager,
-            secureStorage = secureStorage
+            secureStorage = secureStorage,
+            appContext = applicationContext
         )
 
         // 5. Initialize network monitoring & WebSocket pipeline
@@ -362,11 +413,18 @@ class NexaApplication : Application() {
         // 9. Initialize Privacy-First Notification Subsystem & Channels
         notificationPrefs = com.nexa.app.data.local.preferences.NotificationPrefs(this)
         com.nexa.app.core.notification.NexaNotificationChannelManager.createAllNotificationChannels(this)
-        notificationDispatcher = com.nexa.app.core.notification.NexaNotificationDispatcher(this, notificationPrefs)
+        soundPreferences = com.nexa.app.data.local.preferences.SoundPreferences(this)
+        soundManager = com.nexa.app.core.sound.NexaSoundManager(this, soundPreferences)
+        conversationPrefs = com.nexa.app.data.local.preferences.ConversationPreferences(this)
+        notificationDispatcher = com.nexa.app.core.notification.NexaNotificationDispatcher(
+            this,
+            notificationPrefs,
+            soundManager,
+            conversationPrefs
+        )
 
         // 10. Initialize Chat Repository with Outbox, WebSocket, Data SMS, DTN, and Double Ratchet E2EE
         chatPrivacyPrefs = com.nexa.app.data.local.preferences.ChatPrivacyPrefs(this)
-        conversationPrefs = com.nexa.app.data.local.preferences.ConversationPreferences(this)
         chatRepository = ChatRepositoryImpl(
             messageDao = database.messageDao(),
             chatDao = database.chatDao(),
@@ -380,7 +438,11 @@ class NexaApplication : Application() {
             doubleRatchetEngine = doubleRatchetEngine,
             contactDao = database.contactDao(),
             chatPrivacyPrefs = chatPrivacyPrefs,
-            notificationDispatcher = notificationDispatcher
+            notificationDispatcher = notificationDispatcher,
+            chatDraftDao = database.chatDraftDao(),
+            messageReactionDao = database.messageReactionDao(),
+            messageAttachmentDao = database.messageAttachmentDao(),
+            conversationPreferences = conversationPrefs
         )
 
         // 10b. Initialize Universal Multi-Transport Ingestion Pipeline
@@ -452,6 +514,20 @@ class NexaApplication : Application() {
             }
         )
         (chatRepository as? ChatRepositoryImpl)?.universalTransportIngest = universalTransportIngest
+        scheduledMessageManager = com.nexa.app.data.manager.ScheduledMessageManagerImpl(
+            context = this,
+            scheduledMessageDao = database.scheduledMessageDao(),
+            chatRepository = chatRepository,
+            secureStorage = secureStorage
+        )
+        (chatRepository as? ChatRepositoryImpl)?.scheduledMessageManager = scheduledMessageManager
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch {
+            try {
+                scheduledMessageManager.reconcilePendingSchedules()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to reconcile pending schedules", e)
+            }
+        }
         (dtnRepository as? DtnRepositoryImpl)?.apply {
             this.universalTransportIngest = this@NexaApplication.universalTransportIngest
             this.doubleRatchetEngine = this@NexaApplication.doubleRatchetEngine
@@ -548,6 +624,13 @@ class NexaApplication : Application() {
             keystoreManager = keystoreManager,
             doubleRatchetEngine = doubleRatchetEngine
         )
+        statusRepository = com.nexa.app.data.repository.StatusRepositoryImpl(
+            statusUpdateDao = database.statusUpdateDao(),
+            statusViewDao = database.statusViewDao(),
+            userDao = database.userDao(),
+            contactDao = database.contactDao()
+        )
+
         try {
             com.nexa.app.data.remote.worker.RequestSyncWorker.schedulePeriodicSync(this)
         } catch (e: Exception) {
@@ -571,6 +654,7 @@ class NexaApplication : Application() {
         // 15. Initialize Hardware-Accelerated Video Compression & Perceptual Optimization Subsystem
         videoCompressionEngine = com.nexa.app.core.media.VideoCompressionEngine(this)
         mediaPrefs = com.nexa.app.data.local.preferences.MediaPrefs(this)
+        mediaAutoReceivePrefs = com.nexa.app.data.local.preferences.MediaAutoReceivePreferences(this)
         mediaProcessingRepository = com.nexa.app.data.repository.MediaProcessingRepositoryImpl(
             context = this,
             compressionEngine = videoCompressionEngine
@@ -594,6 +678,7 @@ class NexaApplication : Application() {
             sandboxSink = quarantineSandboxSink,
             quarantineDao = database.quarantineDao()
         )
+        nexaSecurityEngine = com.nexa.app.core.security.NexaSecurityEngine(this)
         try {
             com.nexa.app.data.remote.security.RuleSyncWorker.scheduleWeeklySync(this)
         } catch (e: Exception) {
@@ -639,6 +724,15 @@ class NexaApplication : Application() {
         )
 
         instance = this
+
+        // Apply Nearby Discovery opt-in across process restarts. Discovery stays OFF by default.
+        if (nearbyMeshPrefs.state.value.nearbyDiscoveryEnabled) {
+            try {
+                dtnRepository.startMesh()
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to restore Nearby Mesh", e)
+            }
+        }
 
         // 19. Seed Development Demo Conversations if debug or auth bypass is enabled
         CoroutineScope(Dispatchers.IO).launch {
