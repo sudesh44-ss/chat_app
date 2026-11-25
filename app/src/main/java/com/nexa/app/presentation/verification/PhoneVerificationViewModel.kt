@@ -123,6 +123,7 @@ class PhoneVerificationViewModel(
     }
 
     fun startTruecallerVerification(
+        activity: android.app.Activity? = null,
         authorizationCode: String? = null,
         codeVerifier: String? = null,
         payload: String? = null,
@@ -133,49 +134,57 @@ class PhoneVerificationViewModel(
             val nonceResult = truecallerManager.initiateVerification()
             nonceResult.fold(
                 onSuccess = { nonce ->
-                    if (authorizationCode.isNullOrBlank() && (payload.isNullOrBlank() || signature.isNullOrBlank())) {
+                    // Case 1: In test mode or explicit verification credentials passed
+                    if (truecallerManager.isTestMode || !authorizationCode.isNullOrBlank() || (!payload.isNullOrBlank() && !signature.isNullOrBlank())) {
+                        executeBackendTruecallerVerification(
+                            authorizationCode = authorizationCode ?: if (truecallerManager.isTestMode) "mock_tc_auth_code" else null,
+                            codeVerifier = codeVerifier ?: if (truecallerManager.isTestMode) "mock_tc_code_verifier" else null,
+                            payload = payload,
+                            signature = signature
+                        )
+                        return@fold
+                    }
+
+                    // Case 2: Production mode with Activity -> Launch Truecaller 1-Tap OAuth flow
+                    if (activity != null) {
+                        val callback = object : com.truecaller.android.sdk.oAuth.TcOAuthCallback {
+                            override fun onSuccess(tcOAuthData: com.truecaller.android.sdk.oAuth.TcOAuthData) {
+                                viewModelScope.launch {
+                                    executeBackendTruecallerVerification(
+                                        authorizationCode = tcOAuthData.authorizationCode,
+                                        codeVerifier = truecallerManager.currentCodeVerifier
+                                    )
+                                }
+                            }
+
+                            override fun onFailure(tcOAuthError: com.truecaller.android.sdk.oAuth.TcOAuthError) {
+                                val errorMsg = mapTruecallerError(tcOAuthError.errorCode, tcOAuthError.errorMessage)
+                                _uiState.update {
+                                    it.copy(
+                                        isTruecallerLoading = false,
+                                        errorMessage = errorMsg
+                                    )
+                                }
+                            }
+                        }
+
+                        val launchResult = truecallerManager.startOAuthFlow(activity, callback)
+                        launchResult.onFailure { err ->
+                            _uiState.update {
+                                it.copy(
+                                    isTruecallerLoading = false,
+                                    errorMessage = err.message ?: "Failed to launch Truecaller verification"
+                                )
+                            }
+                        }
+                    } else {
                         _uiState.update {
                             it.copy(
                                 isTruecallerLoading = false,
-                                errorMessage = "Truecaller 1-Tap consent required. Please grant Truecaller verification permission or use SMS OTP."
+                                errorMessage = "Activity context is required to launch Truecaller 1-Tap."
                             )
                         }
-                        return@fold
                     }
-                    val verifyResult = truecallerManager.verifyWithBackend(
-                        payload = payload,
-                        signature = signature,
-                        accessToken = null,
-                        authorizationCode = authorizationCode,
-                        codeVerifier = codeVerifier,
-                        googleAuthToken = _uiState.value.googleToken,
-                        email = _uiState.value.email,
-                        name = _uiState.value.name,
-                        avatarUrl = _uiState.value.avatarUrl,
-                        gender = _uiState.value.gender,
-                        age = _uiState.value.age,
-                        bio = _uiState.value.bio,
-                        isReverify = _uiState.value.isReverify
-                    )
-                    verifyResult.fold(
-                        onSuccess = { profile ->
-                            _uiState.update {
-                                it.copy(
-                                    isTruecallerLoading = false,
-                                    verifiedProfile = profile,
-                                    successMessage = "Verified via Truecaller!"
-                                )
-                            }
-                        },
-                        onFailure = { err ->
-                            _uiState.update {
-                                it.copy(
-                                    isTruecallerLoading = false,
-                                    errorMessage = err.message ?: "Truecaller verification failed"
-                                )
-                            }
-                        }
-                    )
                 },
                 onFailure = { err ->
                     _uiState.update {
@@ -186,6 +195,61 @@ class PhoneVerificationViewModel(
                     }
                 }
             )
+        }
+    }
+
+    private suspend fun executeBackendTruecallerVerification(
+        authorizationCode: String?,
+        codeVerifier: String?,
+        payload: String? = null,
+        signature: String? = null
+    ) {
+        val s = _uiState.value
+        val verifyResult = truecallerManager.verifyWithBackend(
+            payload = payload,
+            signature = signature,
+            accessToken = null,
+            authorizationCode = authorizationCode,
+            codeVerifier = codeVerifier,
+            googleAuthToken = s.googleToken,
+            email = s.email,
+            name = s.name,
+            avatarUrl = s.avatarUrl,
+            gender = s.gender,
+            age = s.age,
+            bio = s.bio,
+            isReverify = s.isReverify
+        )
+        verifyResult.fold(
+            onSuccess = { profile ->
+                _uiState.update {
+                    it.copy(
+                        isTruecallerLoading = false,
+                        verifiedProfile = profile,
+                        successMessage = "Verified via Truecaller!"
+                    )
+                }
+            },
+            onFailure = { err ->
+                _uiState.update {
+                    it.copy(
+                        isTruecallerLoading = false,
+                        errorMessage = err.message ?: "Truecaller verification failed"
+                    )
+                }
+            }
+        )
+    }
+
+    private fun mapTruecallerError(errorCode: Int, errorMessage: String?): String {
+        return when (errorCode) {
+            1 -> "Truecaller user not verified or account inactive (Code 1)"
+            2 -> "Truecaller 1-Tap verification was cancelled or denied by user (Code 2)"
+            3 -> "Invalid Truecaller request or configuration (Code 3)"
+            4 -> "Truecaller Client ID unauthorized. Check developer portal SHA-1 fingerprint (Code 4)"
+            10 -> "Truecaller SDK internal error. Please try SMS OTP (Code 10)"
+            13 -> "Truecaller verification dismissed (Code 13)"
+            else -> errorMessage?.takeIf { it.isNotBlank() } ?: "Truecaller error (Code: $errorCode)"
         }
     }
 

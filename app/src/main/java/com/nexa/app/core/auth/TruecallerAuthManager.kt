@@ -1,16 +1,23 @@
 package com.nexa.app.core.auth
 
+import android.app.Activity
 import android.content.Context
-import android.content.Intent
 import android.content.pm.PackageManager
 import android.util.Log
+import androidx.fragment.app.FragmentActivity
 import com.nexa.app.domain.model.UserProfile
 import com.nexa.app.domain.repository.AuthRepository
+import com.truecaller.android.sdk.oAuth.CodeVerifierUtil
+import com.truecaller.android.sdk.oAuth.TcOAuthCallback
+import com.truecaller.android.sdk.oAuth.TcSdk
+import com.truecaller.android.sdk.oAuth.TcSdkOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.withContext
+import java.security.MessageDigest
+import java.security.SecureRandom
 
 /**
  * State representing Truecaller 1-Tap verification progress.
@@ -27,31 +34,63 @@ sealed interface TruecallerAuthState {
 }
 
 /**
- * TruecallerAuthManager encapsulates 1-Tap phone verification via Truecaller SDK / Intent.
+ * TruecallerAuthManager encapsulates 1-Tap phone verification via Truecaller OAuth SDK v3.
  *
  * Flow:
- * 1. Checks if the official Truecaller application (package: com.truecaller) is installed.
+ * 1. Checks if the official Truecaller application (package: com.truecaller) is installed and OAuth is usable.
  * 2. Fetches a server-generated cryptographic nonce from NEXA Go backend to prevent replay attacks.
- * 3. Launches Truecaller 1-Tap consent flow.
- * 4. Captures the signed profile payload + RSA signature.
- * 5. Sends the signed payload to NEXA Go backend (/api/v1/auth/truecaller/verify) for independent
- *    cryptographic verification against Truecaller public keys.
- * 6. Commits session locally upon backend validation.
+ * 3. Prepares PKCE parameters (codeVerifier and codeChallenge) and sets OAuth state/scopes.
+ * 4. Launches Truecaller 1-Tap consent bottom-sheet via TcSdk.getInstance().getAuthorizationCode(fragmentActivity).
+ * 5. On user consent, receives authorization code in TcOAuthCallback.
+ * 6. Sends authorization code + codeVerifier to NEXA Go backend (/api/v1/auth/truecaller/verify) for validation.
+ * 7. Commits session locally upon backend validation.
  */
 class TruecallerAuthManager(
     private val authRepository: AuthRepository,
-    private val isTestMode: Boolean = false,
+    val isTestMode: Boolean = false,
     private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher = Dispatchers.IO
 ) {
     companion object {
         private const val TAG = "TruecallerAuthManager"
         const val TRUECALLER_PACKAGE = "com.truecaller"
+
+        fun generateCodeVerifier(): String {
+            return try {
+                CodeVerifierUtil.generateRandomCodeVerifier() ?: generateSecurePkceVerifier()
+            } catch (_: Throwable) {
+                generateSecurePkceVerifier()
+            }
+        }
+
+        fun generateCodeChallenge(verifier: String): String {
+            return try {
+                CodeVerifierUtil.getCodeChallenge(verifier) ?: computeSha256Challenge(verifier)
+            } catch (_: Throwable) {
+                computeSha256Challenge(verifier)
+            }
+        }
+
+        private fun generateSecurePkceVerifier(): String {
+            val bytes = ByteArray(64)
+            SecureRandom().nextBytes(bytes)
+            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        }
+
+        private fun computeSha256Challenge(verifier: String): String {
+            val digest = MessageDigest.getInstance("SHA-256")
+            val hash = digest.digest(verifier.toByteArray(Charsets.US_ASCII))
+            return java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(hash)
+        }
     }
 
     private val _state = MutableStateFlow<TruecallerAuthState>(TruecallerAuthState.Idle)
     val state: StateFlow<TruecallerAuthState> = _state.asStateFlow()
 
-    private var currentNonce: String? = null
+    var currentNonce: String? = null
+        private set
+
+    var currentCodeVerifier: String? = null
+        private set
 
     /**
      * Checks if Truecaller is installed and eligible for 1-Tap verification.
@@ -77,18 +116,11 @@ class TruecallerAuthManager(
         var isOAuthUsable = isInstalled
         if (isInstalled) {
             try {
-                val tcSdkClass = Class.forName("com.truecaller.android.sdk.oAuth.TcSdk")
-                val getInstanceMethod = tcSdkClass.getMethod("getInstance")
-                val tcSdk = getInstanceMethod.invoke(null)
-                if (tcSdk != null) {
-                    val isUsableMethod = tcSdkClass.getMethod("isOAuthFlowUsable")
-                    isOAuthUsable = isUsableMethod.invoke(tcSdk) as? Boolean ?: isInstalled
-                    Log.d(TAG, "TcSdk.getInstance().isOAuthFlowUsable = $isOAuthUsable")
+                if (TcSdk.getInstance().isOAuthFlowUsable) {
+                    isOAuthUsable = true
                 }
-            } catch (_: ClassNotFoundException) {
-                // Truecaller SDK class not linked at runtime; package visibility stands
             } catch (e: Exception) {
-                Log.w(TAG, "TcSdk evaluation error: ${e.message}")
+                Log.d(TAG, "TcSdk.isOAuthFlowUsable check: ${e.message}")
             }
         }
 
@@ -118,6 +150,61 @@ class TruecallerAuthManager(
     }
 
     /**
+     * Launches the Truecaller 1-Tap OAuth bottom-sheet consent dialog using FragmentActivity.
+     */
+    fun startOAuthFlow(activity: Activity, callback: TcOAuthCallback): Result<Unit> {
+        if (isTestMode) {
+            return Result.success(Unit)
+        }
+
+        val fragmentActivity = activity as? FragmentActivity
+            ?: return Result.failure(
+                IllegalStateException("Activity must be a FragmentActivity to display Truecaller bottom-sheet")
+            )
+
+        val nonce = currentNonce ?: return Result.failure(
+            IllegalStateException("Truecaller verification nonce not initialized. Call initiateVerification() first.")
+        )
+
+        return try {
+            // Initialize TcSdk with caller callback and TcSdkOptions
+            val tcSdkOptions = TcSdkOptions.Builder(fragmentActivity, callback)
+                .sdkOptions(TcSdkOptions.OPTION_VERIFY_ONLY_TC_USERS)
+                .buttonShapeOptions(TcSdkOptions.BUTTON_SHAPE_ROUNDED)
+                .build()
+
+            TcSdk.init(tcSdkOptions)
+
+            if (!TcSdk.getInstance().isOAuthFlowUsable) {
+                val err = "Truecaller 1-Tap OAuth flow is not usable on this device. Truecaller app must be logged in."
+                _state.value = TruecallerAuthState.Error(err, "TC_FLOW_UNUSABLE")
+                return Result.failure(IllegalStateException(err))
+            }
+
+            // Generate RFC 7636 PKCE codeVerifier and codeChallenge
+            val verifier = generateCodeVerifier()
+            currentCodeVerifier = verifier
+            val codeChallenge = generateCodeChallenge(verifier)
+
+            // Configure TcSdk OAuth parameters
+            TcSdk.getInstance().apply {
+                setOAuthState(nonce)
+                setOAuthScopes(arrayOf("openid", "phone", "profile"))
+                setCodeChallenge(codeChallenge)
+            }
+
+            // Launch bottom-sheet consent
+            TcSdk.getInstance().getAuthorizationCode(fragmentActivity)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to launch Truecaller getAuthorizationCode: ${e.message}", e)
+            val errMsg = e.message ?: "Failed to launch Truecaller consent"
+            _state.value = TruecallerAuthState.Error(errMsg, "TC_LAUNCH_FAILED")
+            Result.failure(e)
+        }
+    }
+
+    /**
      * Verifies the Truecaller signed profile response or OAuth authorization code with NEXA Go backend.
      */
     suspend fun verifyWithBackend(
@@ -138,13 +225,14 @@ class TruecallerAuthManager(
         _state.value = TruecallerAuthState.VerifyingWithBackend
         try {
             val nonce = currentNonce
+            val effectiveVerifier = codeVerifier ?: currentCodeVerifier
             val result = authRepository.verifyWithTruecaller(
                 payload = payload,
                 signature = signature,
                 requestNonce = nonce,
                 accessToken = accessToken,
                 authorizationCode = authorizationCode,
-                codeVerifier = codeVerifier,
+                codeVerifier = effectiveVerifier,
                 googleAuthToken = googleAuthToken,
                 email = email,
                 name = name,
@@ -171,6 +259,7 @@ class TruecallerAuthManager(
      */
     fun reset() {
         currentNonce = null
+        currentCodeVerifier = null
         _state.value = TruecallerAuthState.Idle
     }
 }

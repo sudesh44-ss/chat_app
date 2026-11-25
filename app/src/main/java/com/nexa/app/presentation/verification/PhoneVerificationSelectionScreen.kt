@@ -223,7 +223,7 @@ fun PhoneVerificationSelectionScreen(
                     TruecallerCard(
                         isInstalled = uiState.isTruecallerInstalled,
                         isLoading = uiState.isTruecallerLoading,
-                        onVerifyClick = { viewModel.startTruecallerVerification() },
+                        onVerifyClick = { viewModel.startTruecallerVerification(activity) },
                         onFallbackToOtp = { viewModel.selectMethod(VerificationMethod.FIREBASE_OTP) }
                     )
                 }

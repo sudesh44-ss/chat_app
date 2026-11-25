@@ -2,6 +2,13 @@ package com.nexa.app.core.auth
 
 import android.app.Activity
 import android.util.Log
+import com.google.firebase.FirebaseException
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
+import com.google.firebase.auth.FirebaseTooManyRequestsException
+import com.google.firebase.auth.PhoneAuthCredential
+import com.google.firebase.auth.PhoneAuthOptions
+import com.google.firebase.auth.PhoneAuthProvider
 import com.nexa.app.domain.model.UserProfile
 import com.nexa.app.domain.repository.AuthRepository
 import kotlinx.coroutines.Dispatchers
@@ -64,11 +71,13 @@ class FirebasePhoneAuthManager(
             val msg = e.message ?: ""
             val className = e.javaClass.simpleName
             return when {
+                e is FirebaseAuthInvalidCredentialsException ||
                 className.contains("FirebaseAuthInvalidCredentialsException") ||
                 msg.contains("invalid-verification-code", ignoreCase = true) ||
                 msg.contains("invalid phone", ignoreCase = true) -> {
                     "Invalid phone number or OTP verification code. Please check and try again." to "INVALID_CREDENTIALS"
                 }
+                e is FirebaseTooManyRequestsException ||
                 className.contains("FirebaseTooManyRequestsException") ||
                 msg.contains("too-many-requests", ignoreCase = true) ||
                 msg.contains("quota exceeded", ignoreCase = true) -> {
@@ -139,116 +148,52 @@ class FirebasePhoneAuthManager(
         }
 
         try {
-            // Attempt reflection lookup of com.google.firebase.auth.FirebaseAuth
-            val firebaseAuthClass = Class.forName("com.google.firebase.auth.FirebaseAuth")
-            val getInstanceMethod = firebaseAuthClass.getMethod("getInstance")
-            val authInstance = getInstanceMethod.invoke(null)
-
-            if (authInstance == null) {
-                val err = "FirebaseAuth instance is unavailable."
-                _state.value = FirebaseAuthState.Error(err, "FIREBASE_UNAVAILABLE")
-                return@withContext Result.failure(IllegalStateException(err))
-            }
-
+            val firebaseAuth = FirebaseAuth.getInstance()
             Log.i(TAG, "Triggering Firebase Phone Auth for $cleanPhone with Activity: ${activity.localClassName}")
 
-            // Dispatch PhoneAuthOptions using PhoneAuthProvider via reflection
-            val phoneAuthProviderClass = Class.forName("com.google.firebase.auth.PhoneAuthProvider")
-            val phoneAuthOptionsBuilderClass = Class.forName("com.google.firebase.auth.PhoneAuthOptions\$Builder")
-            val newBuilderMethod = phoneAuthProviderClass.getMethod("newPhoneAuthOptionsBuilder", firebaseAuthClass)
-                ?: phoneAuthOptionsBuilderClass.getConstructor(firebaseAuthClass)
-
-            // Dynamic callbacks listener implementation
             return@withContext suspendCancellableCoroutine<Result<String>> { continuation ->
-                try {
-                    val callbacksClass = Class.forName("com.google.firebase.auth.PhoneAuthProvider\$OnVerificationStateChangedCallbacks")
-                    
-                    // Use a dynamic proxy or invocation handler for OnVerificationStateChangedCallbacks
-                    val invocationHandler = java.lang.reflect.InvocationHandler { _, method, args ->
-                        when (method.name) {
-                            "onVerificationCompleted" -> {
-                                val credential = args?.getOrNull(0)
-                                Log.i(TAG, "Instant verification completed by carrier / SMS Retriever")
-                                if (credential != null) {
-                                    // Extract token / sign in
-                                    handleInstantVerification(authInstance, credential)
-                                }
-                                null
-                            }
-                            "onVerificationFailed" -> {
-                                val exception = args?.getOrNull(0) as? Throwable ?: Exception("Unknown verification failure")
-                                val (mappedMsg, code) = mapFirebaseException(exception)
-                                Log.e(TAG, "Firebase verification failed: $mappedMsg (code: $code)", exception)
-                                _state.value = FirebaseAuthState.Error(mappedMsg, code)
-                                if (continuation.isActive) {
-                                    continuation.resume(Result.failure(exception))
-                                }
-                                null
-                            }
-                            "onCodeSent" -> {
-                                val verId = args?.getOrNull(0) as? String ?: UUID.randomUUID().toString()
-                                Log.i(TAG, "Firebase OTP Code sent, verificationId: $verId")
-                                activeVerificationId = verId
-                                _state.value = FirebaseAuthState.CodeSent(
-                                    verificationId = verId,
-                                    phone = cleanPhone,
-                                    timeoutSeconds = 60
-                                )
-                                if (continuation.isActive) {
-                                    continuation.resume(Result.success(verId))
-                                }
-                                null
-                            }
-                            else -> null
+                val callbacks = object : PhoneAuthProvider.OnVerificationStateChangedCallbacks() {
+                    override fun onVerificationCompleted(credential: PhoneAuthCredential) {
+                        Log.i(TAG, "Instant verification completed by carrier / SMS Retriever")
+                        handleInstantVerification(firebaseAuth, credential)
+                    }
+
+                    override fun onVerificationFailed(exception: FirebaseException) {
+                        val (mappedMsg, code) = mapFirebaseException(exception)
+                        Log.e(TAG, "Firebase verification failed: $mappedMsg (code: $code)", exception)
+                        _state.value = FirebaseAuthState.Error(mappedMsg, code)
+                        if (continuation.isActive) {
+                            continuation.resume(Result.failure(exception))
                         }
                     }
 
-                    val proxyCallbacks = java.lang.reflect.Proxy.newProxyInstance(
-                        callbacksClass.classLoader,
-                        arrayOf(callbacksClass),
-                        invocationHandler
-                    )
-
-                    // Build PhoneAuthOptions:
-                    // PhoneAuthOptions.newBuilder(firebaseAuth)
-                    //   .setPhoneNumber(cleanPhone)
-                    //   .setTimeout(60L, TimeUnit.SECONDS)
-                    //   .setActivity(activity)
-                    //   .setCallbacks(proxyCallbacks)
-                    //   .build()
-                    val builder = if (newBuilderMethod is java.lang.reflect.Method) {
-                        newBuilderMethod.invoke(null, authInstance)
-                    } else {
-                        (newBuilderMethod as java.lang.reflect.Constructor<*>).newInstance(authInstance)
-                    }
-
-                    builder.javaClass.getMethod("setPhoneNumber", String::class.java).invoke(builder, cleanPhone)
-                    builder.javaClass.getMethod("setTimeout", java.lang.Long::class.java, TimeUnit::class.java)
-                        .invoke(builder, java.lang.Long.valueOf(60L), TimeUnit.SECONDS)
-                    builder.javaClass.getMethod("setActivity", Activity::class.java).invoke(builder, activity)
-                    builder.javaClass.getMethod("setCallbacks", callbacksClass).invoke(builder, proxyCallbacks)
-
-                    val options = builder.javaClass.getMethod("build").invoke(builder)
-
-                    // PhoneAuthProvider.verifyPhoneNumber(options)
-                    val verifyPhoneNumberMethod = phoneAuthProviderClass.getMethod("verifyPhoneNumber", options.javaClass)
-                    verifyPhoneNumberMethod.invoke(null, options)
-
-                } catch (e: Exception) {
-                    val (mappedMsg, code) = mapFirebaseException(e)
-                    Log.e(TAG, "Exception configuring PhoneAuthOptions: $mappedMsg", e)
-                    _state.value = FirebaseAuthState.Error(mappedMsg, code)
-                    if (continuation.isActive) {
-                        continuation.resume(Result.failure(e))
+                    override fun onCodeSent(
+                        verificationId: String,
+                        token: PhoneAuthProvider.ForceResendingToken
+                    ) {
+                        Log.i(TAG, "Firebase OTP Code sent, verificationId: $verificationId")
+                        activeVerificationId = verificationId
+                        _state.value = FirebaseAuthState.CodeSent(
+                            verificationId = verificationId,
+                            phone = cleanPhone,
+                            timeoutSeconds = 60
+                        )
+                        if (continuation.isActive) {
+                            continuation.resume(Result.success(verificationId))
+                        }
                     }
                 }
+
+                val options = PhoneAuthOptions.newBuilder(firebaseAuth)
+                    .setPhoneNumber(cleanPhone)
+                    .setTimeout(60L, TimeUnit.SECONDS)
+                    .setActivity(activity)
+                    .setCallbacks(callbacks)
+                    .build()
+
+                PhoneAuthProvider.verifyPhoneNumber(options)
             }
 
-        } catch (e: ClassNotFoundException) {
-            val errMsg = "Firebase Auth SDK not found in runtime classpath. Ensure google-services.json and Firebase dependencies are present."
-            Log.e(TAG, errMsg, e)
-            _state.value = FirebaseAuthState.Error(errMsg, "FIREBASE_NOT_CONFIGURED")
-            Result.failure(e)
         } catch (e: Exception) {
             val (mappedMsg, code) = mapFirebaseException(e)
             Log.e(TAG, "Firebase SDK dispatch error: $mappedMsg", e)
@@ -257,67 +202,25 @@ class FirebasePhoneAuthManager(
         }
     }
 
-    private fun handleInstantVerification(authInstance: Any, credential: Any) {
+    private fun handleInstantVerification(firebaseAuth: FirebaseAuth, credential: PhoneAuthCredential) {
         try {
-            val signInMethod = authInstance.javaClass.getMethod(
-                "signInWithCredential",
-                Class.forName("com.google.firebase.auth.AuthCredential")
-            )
-            val task = signInMethod.invoke(authInstance, credential)
-            // Listen to task completion
-            val addOnSuccessListenerMethod = task.javaClass.getMethod(
-                "addOnSuccessListener",
-                Class.forName("com.google.android.gms.tasks.OnSuccessListener")
-            )
-            val successHandler = java.lang.reflect.InvocationHandler { _, _, args ->
-                val authResult = args?.getOrNull(0)
-                if (authResult != null) {
-                    val getUserMethod = authResult.javaClass.getMethod("getUser")
-                    val user = getUserMethod.invoke(authResult)
-                    if (user != null) {
-                        fetchUserIdToken(user)
+            firebaseAuth.signInWithCredential(credential)
+                .addOnSuccessListener { authResult ->
+                    authResult.user?.getIdToken(false)?.addOnSuccessListener { tokenResult ->
+                        val token = tokenResult.token
+                        if (!token.isNullOrBlank()) {
+                            _state.value = FirebaseAuthState.Verified(
+                                idToken = token,
+                                phone = activePhone ?: ""
+                            )
+                        }
                     }
                 }
-                null
-            }
-            val listenerClass = Class.forName("com.google.android.gms.tasks.OnSuccessListener")
-            val proxyListener = java.lang.reflect.Proxy.newProxyInstance(
-                listenerClass.classLoader,
-                arrayOf(listenerClass),
-                successHandler
-            )
-            addOnSuccessListenerMethod.invoke(task, proxyListener)
+                .addOnFailureListener { e ->
+                    Log.e(TAG, "Failed handling instant verification credential", e)
+                }
         } catch (e: Exception) {
             Log.e(TAG, "Failed handling instant verification credential", e)
-        }
-    }
-
-    private fun fetchUserIdToken(user: Any) {
-        try {
-            val getIdTokenMethod = user.javaClass.getMethod("getIdToken", Boolean::class.javaPrimitiveType)
-            val task = getIdTokenMethod.invoke(user, false)
-            val addOnSuccessListenerMethod = task.javaClass.getMethod(
-                "addOnSuccessListener",
-                Class.forName("com.google.android.gms.tasks.OnSuccessListener")
-            )
-            val listenerClass = Class.forName("com.google.android.gms.tasks.OnSuccessListener")
-            val proxyListener = java.lang.reflect.Proxy.newProxyInstance(
-                listenerClass.classLoader,
-                arrayOf(listenerClass)
-            ) { _, _, args ->
-                val getResultMethod = args?.getOrNull(0)?.javaClass?.getMethod("getToken")
-                val token = getResultMethod?.invoke(args?.getOrNull(0)) as? String
-                if (!token.isNullOrBlank()) {
-                    _state.value = FirebaseAuthState.Verified(
-                        idToken = token,
-                        phone = activePhone ?: ""
-                    )
-                }
-                null
-            }
-            addOnSuccessListenerMethod.invoke(task, proxyListener)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed extracting ID token from FirebaseUser", e)
         }
     }
 
@@ -347,52 +250,17 @@ class FirebasePhoneAuthManager(
 
         // Live credential verification
         try {
-            val phoneAuthProviderClass = Class.forName("com.google.firebase.auth.PhoneAuthProvider")
-            val getCredentialMethod = phoneAuthProviderClass.getMethod("getCredential", String::class.java, String::class.java)
-            val credential = getCredentialMethod.invoke(null, verificationId, cleanCode)
-
-            val firebaseAuthClass = Class.forName("com.google.firebase.auth.FirebaseAuth")
-            val getInstanceMethod = firebaseAuthClass.getMethod("getInstance")
-            val authInstance = getInstanceMethod.invoke(null)
+            val credential = PhoneAuthProvider.getCredential(verificationId, cleanCode)
+            val firebaseAuth = FirebaseAuth.getInstance()
 
             return@withContext suspendCancellableCoroutine<Result<String>> { continuation ->
-                try {
-                    val signInMethod = authInstance.javaClass.getMethod(
-                        "signInWithCredential",
-                        Class.forName("com.google.firebase.auth.AuthCredential")
-                    )
-                    val task = signInMethod.invoke(authInstance, credential)
-
-                    val addOnSuccessListenerMethod = task.javaClass.getMethod(
-                        "addOnSuccessListener",
-                        Class.forName("com.google.android.gms.tasks.OnSuccessListener")
-                    )
-                    val addOnFailureListenerMethod = task.javaClass.getMethod(
-                        "addOnFailureListener",
-                        Class.forName("com.google.android.gms.tasks.OnFailureListener")
-                    )
-
-                    val successListenerClass = Class.forName("com.google.android.gms.tasks.OnSuccessListener")
-                    val failureListenerClass = Class.forName("com.google.android.gms.tasks.OnFailureListener")
-
-                    val successProxy = java.lang.reflect.Proxy.newProxyInstance(
-                        successListenerClass.classLoader,
-                        arrayOf(successListenerClass)
-                    ) { _, _, args ->
-                        val authResult = args?.getOrNull(0)
-                        if (authResult != null) {
-                            val getUserMethod = authResult.javaClass.getMethod("getUser")
-                            val user = getUserMethod.invoke(authResult)
-                            if (user != null) {
-                                val getIdTokenMethod = user.javaClass.getMethod("getIdToken", Boolean::class.javaPrimitiveType)
-                                val tokenTask = getIdTokenMethod.invoke(user, false)
-
-                                val tokenSuccessProxy = java.lang.reflect.Proxy.newProxyInstance(
-                                    successListenerClass.classLoader,
-                                    arrayOf(successListenerClass)
-                                ) { _, _, tokenArgs ->
-                                    val getTokenMethod = tokenArgs?.getOrNull(0)?.javaClass?.getMethod("getToken")
-                                    val idToken = getTokenMethod?.invoke(tokenArgs?.getOrNull(0)) as? String
+                firebaseAuth.signInWithCredential(credential)
+                    .addOnSuccessListener { authResult ->
+                        val user = authResult.user
+                        if (user != null) {
+                            user.getIdToken(false)
+                                .addOnSuccessListener { tokenResult ->
+                                    val idToken = tokenResult.token
                                     if (!idToken.isNullOrBlank()) {
                                         val phone = activePhone ?: ""
                                         _state.value = FirebaseAuthState.Verified(idToken = idToken, phone = phone)
@@ -404,37 +272,26 @@ class FirebasePhoneAuthManager(
                                         _state.value = FirebaseAuthState.Error(err.message ?: "", "EMPTY_TOKEN")
                                         if (continuation.isActive) continuation.resume(Result.failure(err))
                                     }
-                                    null
                                 }
-                                tokenTask.javaClass.getMethod("addOnSuccessListener", successListenerClass).invoke(tokenTask, tokenSuccessProxy)
-                            }
+                                .addOnFailureListener { e ->
+                                    val (mappedMsg, code) = mapFirebaseException(e)
+                                    _state.value = FirebaseAuthState.Error(mappedMsg, code)
+                                    if (continuation.isActive) continuation.resume(Result.failure(e))
+                                }
+                        } else {
+                            val err = Exception("FirebaseUser is null after credential verification")
+                            _state.value = FirebaseAuthState.Error(err.message ?: "", "NULL_USER")
+                            if (continuation.isActive) continuation.resume(Result.failure(err))
                         }
-                        null
                     }
-
-                    val failureProxy = java.lang.reflect.Proxy.newProxyInstance(
-                        failureListenerClass.classLoader,
-                        arrayOf(failureListenerClass)
-                    ) { _, _, args ->
-                        val exception = args?.getOrNull(0) as? Throwable ?: Exception("OTP validation rejected")
+                    .addOnFailureListener { exception ->
                         val (mappedMsg, code) = mapFirebaseException(exception)
                         Log.e(TAG, "Firebase credential sign-in failed: $mappedMsg", exception)
                         _state.value = FirebaseAuthState.Error(mappedMsg, code)
                         if (continuation.isActive) {
                             continuation.resume(Result.failure(exception))
                         }
-                        null
                     }
-
-                    addOnSuccessListenerMethod.invoke(task, successProxy)
-                    addOnFailureListenerMethod.invoke(task, failureProxy)
-
-                } catch (e: Exception) {
-                    val (mappedMsg, code) = mapFirebaseException(e)
-                    Log.e(TAG, "Error during verifyOtp task execution: $mappedMsg", e)
-                    _state.value = FirebaseAuthState.Error(mappedMsg, code)
-                    if (continuation.isActive) continuation.resume(Result.failure(e))
-                }
             }
 
         } catch (e: Exception) {

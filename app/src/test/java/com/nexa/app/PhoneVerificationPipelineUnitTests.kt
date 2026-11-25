@@ -183,6 +183,20 @@ class PhoneVerificationPipelineUnitTests {
         assertEquals("VERIFICATION_FAILED", (state as TruecallerAuthState.Error).code)
     }
 
+    // 9b. Truecaller PKCE Code Verifier & Challenge Generation
+    @Test
+    fun testTruecallerManager_PkceGeneration() {
+        val verifier = TruecallerAuthManager.generateCodeVerifier()
+        assertNotNull(verifier)
+        assertTrue("PKCE verifier length must be between 43 and 128 characters", verifier.length in 43..128)
+        assertFalse("PKCE verifier must not contain padding", verifier.contains("="))
+
+        val challenge = TruecallerAuthManager.generateCodeChallenge(verifier)
+        assertNotNull(challenge)
+        assertTrue("PKCE challenge must not be empty", challenge.isNotEmpty())
+        assertFalse("PKCE challenge must not contain padding", challenge.contains("="))
+    }
+
     // 10. PhoneVerificationViewModel Method Switching
     @Test
     fun testPhoneVerificationViewModel_SwitchMethods() {
