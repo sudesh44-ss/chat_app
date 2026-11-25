@@ -47,7 +47,8 @@ data class NotificationPreferences(
     val quietHoursStartHour: Int = 23,
     val quietHoursStartMinute: Int = 0,
     val quietHoursEndHour: Int = 7,
-    val quietHoursEndMinute: Int = 0
+    val quietHoursEndMinute: Int = 0,
+    val quietHoursDays: Set<Int> = setOf(1, 2, 3, 4, 5, 6, 7) // 1=Mon .. 7=Sun
 ) {
     val quietHoursStart: LocalTime
         get() = LocalTime.of(quietHoursStartHour.coerceIn(0, 23), quietHoursStartMinute.coerceIn(0, 59))
@@ -57,6 +58,17 @@ data class NotificationPreferences(
 
     val quietHoursFormatted: String
         get() = String.format("%02d:%02d – %02d:%02d", quietHoursStartHour, quietHoursStartMinute, quietHoursEndHour, quietHoursEndMinute)
+
+    val quietHoursDaysFormatted: String
+        get() = when {
+            quietHoursDays.size == 7 -> "Every day"
+            quietHoursDays == setOf(1, 2, 3, 4, 5) -> "Weekdays"
+            quietHoursDays == setOf(6, 7) -> "Weekends"
+            else -> {
+                val dayNames = mapOf(1 to "Mon", 2 to "Tue", 3 to "Wed", 4 to "Thu", 5 to "Fri", 6 to "Sat", 7 to "Sun")
+                quietHoursDays.sorted().joinToString(", ") { dayNames[it] ?: "" }
+            }
+        }
 }
 
 /**
@@ -98,8 +110,18 @@ class NotificationPrefs(
             quietHoursStartHour = prefs.getInt(KEY_QUIET_HOURS_START_HOUR, 23),
             quietHoursStartMinute = prefs.getInt(KEY_QUIET_HOURS_START_MIN, 0),
             quietHoursEndHour = prefs.getInt(KEY_QUIET_HOURS_END_HOUR, 7),
-            quietHoursEndMinute = prefs.getInt(KEY_QUIET_HOURS_END_MIN, 0)
+            quietHoursEndMinute = prefs.getInt(KEY_QUIET_HOURS_END_MIN, 0),
+            quietHoursDays = parseQuietHoursDays(prefs.getString(KEY_QUIET_HOURS_DAYS, "1,2,3,4,5,6,7"))
         )
+    }
+
+    private fun parseQuietHoursDays(str: String?): Set<Int> {
+        if (str.isNullOrBlank()) return setOf(1, 2, 3, 4, 5, 6, 7)
+        val parsed = str.split(",")
+            .mapNotNull { it.trim().toIntOrNull() }
+            .filter { it in 1..7 }
+            .toSet()
+        return if (parsed.isEmpty()) setOf(1, 2, 3, 4, 5, 6, 7) else parsed
     }
 
     fun setDirectMessagesEnabled(enabled: Boolean) {
@@ -177,6 +199,28 @@ class NotificationPrefs(
         _preferencesState.value = getSnapshot()
     }
 
+    fun setQuietHoursDays(days: Set<Int>) {
+        val validDays = days.filter { it in 1..7 }.toSet()
+        val toSave = if (validDays.isEmpty()) setOf(1, 2, 3, 4, 5, 6, 7) else validDays
+        val serialized = toSave.sorted().joinToString(",")
+        prefs.edit().putString(KEY_QUIET_HOURS_DAYS, serialized).apply()
+        _preferencesState.value = getSnapshot()
+    }
+
+    fun toggleQuietHoursDay(day: Int) {
+        if (day !in 1..7) return
+        val currentDays = getSnapshot().quietHoursDays.toMutableSet()
+        if (currentDays.contains(day)) {
+            // Keep at least 1 day selected
+            if (currentDays.size > 1) {
+                currentDays.remove(day)
+            }
+        } else {
+            currentDays.add(day)
+        }
+        setQuietHoursDays(currentDays)
+    }
+
     fun reset() {
         prefs.edit().clear().apply()
         _preferencesState.value = getSnapshot()
@@ -201,5 +245,6 @@ class NotificationPrefs(
         private const val KEY_QUIET_HOURS_START_MIN = "quiet_hours_start_min"
         private const val KEY_QUIET_HOURS_END_HOUR = "quiet_hours_end_hour"
         private const val KEY_QUIET_HOURS_END_MIN = "quiet_hours_end_min"
+        private const val KEY_QUIET_HOURS_DAYS = "quiet_hours_days"
     }
 }

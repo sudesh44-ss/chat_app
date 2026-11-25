@@ -63,7 +63,12 @@ fun SettingsScreen(
     modifier: Modifier = Modifier
 ) {
     val isDark = isSystemInDarkTheme()
-    val backgroundColor = if (isDark) Color.Black else Color.White
+    val isAmoled = com.nexa.app.core.theme.isNexaAmoled()
+    val backgroundColor = when {
+        !isDark -> Color.White
+        isAmoled -> Color.Black
+        else -> com.nexa.app.core.theme.NexaDarkCharcoalBackground
+    }
     val snackbarHostState = remember { SnackbarHostState() }
 
     Scaffold(
@@ -112,8 +117,8 @@ fun SettingsScreen(
 
                 item {
                     NexaSettingsItem(
-                        title = "Privacy & Safety",
-                        subtitle = "Blocked contacts and safety controls",
+                        title = "Blocked Contacts",
+                        subtitle = "Blocked users and blocking controls",
                         iconRes = R.drawable.ic_nexa_block,
                         onClick = { onNavigateDestination(SettingsDestination.PRIVACY_AND_SAFETY) }
                     )

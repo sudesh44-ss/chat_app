@@ -83,6 +83,9 @@ class NexaApplication : Application() {
         private set
 
     lateinit var chatRepository: ChatRepository
+
+    /** Module 3: encrypted SMS fallback (independent transport, zero SMS permissions). */
+    lateinit var smsFallbackRepository: com.nexa.app.domain.repository.SmsFallbackRepository
         private set
 
     lateinit var scheduledMessageManager: com.nexa.app.domain.manager.ScheduledMessageManager
@@ -259,6 +262,9 @@ class NexaApplication : Application() {
     lateinit var languagePrefs: com.nexa.app.data.local.preferences.LanguagePreferences
         private set
 
+    lateinit var nexaStorageManager: com.nexa.app.core.storage.NexaStorageManager
+        private set
+
     override fun attachBaseContext(newBase: Context) {
         val selectedTag = newBase
             .getSharedPreferences("nexa_language_preferences", Context.MODE_PRIVATE)
@@ -285,6 +291,8 @@ class NexaApplication : Application() {
         accessibilityPrefs = com.nexa.app.data.local.preferences.AccessibilityPreferences(this)
         nearbyMeshPrefs = com.nexa.app.data.local.preferences.NearbyMeshPreferences(this)
         languagePrefs = com.nexa.app.data.local.preferences.LanguagePreferences(this)
+        nexaStorageManager = com.nexa.app.core.storage.NexaStorageManager(this)
+        nexaStorageManager.initStorageTree()
 
         // 2. Initialize encrypted SQLite database with SQLCipher SupportFactory
         val dbPassphrase = secureStorage.getOrCreateDatabasePassphrase()
@@ -514,6 +522,44 @@ class NexaApplication : Application() {
             }
         )
         (chatRepository as? ChatRepositoryImpl)?.universalTransportIngest = universalTransportIngest
+
+        // 10c. Module 3 — Encrypted SMS fallback transport
+        // Independent SMS session keys (Keystore-wrapped), NX1 protocol, SQLCipher persistence.
+        // Performs no network calls; provisioning travels over the existing E2EE control channel.
+        val smsKeyVault = com.nexa.app.data.repository.sms.KeystoreSmsKeyVault(
+            keyMaterialDao = database.smsKeyMaterialDao(),
+            keystoreManager = keystoreManager
+        )
+        val smsSessionManager = com.nexa.app.data.repository.sms.SmsSessionManager(
+            sessionDao = database.smsSessionDao(),
+            keyVault = smsKeyVault,
+            myNxIdProvider = { secureStorage.getActiveNxId() ?: "NX-ANONYMOUS" }
+        )
+        val smsPartStore = com.nexa.app.data.repository.sms.RoomSmsInboundPartStore(
+            database.smsInboundPartDao()
+        )
+        val smsFallbackRepo = com.nexa.app.data.repository.sms.SmsFallbackRepositoryImpl(
+            database = database,
+            messageDao = database.messageDao(),
+            chatDao = database.chatDao(),
+            contactDao = database.contactDao(),
+            userDao = database.userDao(),
+            secureStorage = secureStorage,
+            sessionManager = smsSessionManager,
+            packetDao = database.smsPacketDao(),
+            partDao = database.smsInboundPartDao(),
+            assembler = com.nexa.app.core.sms.nx1.SmsMultipartAssembler(smsPartStore),
+            internetAvailable = { networkMonitor.isOnline.value },
+            meshAvailable = { false },
+            smsCapable = { com.nexa.app.data.remote.sms.SmsComposerLauncher.isSmsCapable(this) }
+        )
+        smsFallbackRepository = smsFallbackRepo
+        universalTransportIngest.smsProvisioningHandler = { peerNxId, peerPublicKeyHex ->
+            smsFallbackRepo.registerPeerProvisioningKey(peerNxId, peerPublicKeyHex)
+        }
+        (chatRepository as? ChatRepositoryImpl)?.smsProvisioningPublicKeyProvider = {
+            smsFallbackRepo.localProvisioningPublicKey()
+        }
         scheduledMessageManager = com.nexa.app.data.manager.ScheduledMessageManagerImpl(
             context = this,
             scheduledMessageDao = database.scheduledMessageDao(),

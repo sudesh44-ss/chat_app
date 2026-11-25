@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -23,6 +24,11 @@ type idempotencyEntry struct {
 	senderNxId    string
 	payloadSha256 string
 	expiresAt     int64
+}
+
+type typingRateLimiter struct {
+	count       int
+	windowStart time.Time
 }
 
 type Hub struct {
@@ -47,6 +53,16 @@ type Hub struct {
 
 	// Identity store to lookup registered device FCM tokens
 	identityStore identity.IdentityRepository
+
+	// Presence manager
+	presenceManager *PresenceManager
+
+	// Group membership provider
+	groupProvider GroupMembershipProvider
+
+	// Typing rate limiting: session pointer -> lastTypingCount, windowStart
+	typingRateMu sync.Mutex
+	typingRate   map[*ClientSession]*typingRateLimiter
 
 	// In-memory telemetry & traffic police metrics (Zero DB write IOPS)
 	relayedMessagesCount      uint64
@@ -79,10 +95,13 @@ func NewHub(buffer queue.Buffer) *Hub {
 		blindTokens: make(map[string]*ClientSession),
 		buffer:      buffer,
 		instanceID:  generateID("inst"),
+		typingRate:  make(map[*ClientSession]*typingRateLimiter),
 	}
 	if buffer != nil {
 		h.redisClient = buffer.GetClient()
 	}
+	h.presenceManager = NewPresenceManager(h.redisClient)
+	h.groupProvider = NewInMemoryGroupProvider()
 	return h
 }
 
@@ -98,13 +117,31 @@ func (h *Hub) SetConnectionValidator(validator ConnectionValidator) {
 	h.connValidator = validator
 }
 
+func (h *Hub) SetPresenceManager(pm *PresenceManager) {
+	h.presenceManager = pm
+}
+
+func (h *Hub) SetGroupProvider(gp GroupMembershipProvider) {
+	h.groupProvider = gp
+}
+
 func (h *Hub) Register(session *ClientSession) {
 	h.sessionsMu.Lock()
 	if _, ok := h.sessions[session.NxId]; !ok {
 		h.sessions[session.NxId] = make(map[string]*ClientSession)
 	}
+	if existing, exists := h.sessions[session.NxId][session.DeviceId]; exists && existing != session {
+		log.Printf("[Hub] Single-active-device policy: closing existing session for %s (Device: %s)", session.NxId, session.DeviceId)
+		existing.Close()
+	}
 	h.sessions[session.NxId][session.DeviceId] = session
 	h.sessionsMu.Unlock()
+
+	if h.presenceManager != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = h.presenceManager.SetPresence(ctx, session.NxId, wire.PresenceStatus_PRESENCE_ONLINE, DefaultPresenceTTL)
+		cancel()
+	}
 
 	log.Printf("[Hub] Registered active session for NX-ID: %s (Device: %s)", session.NxId, session.DeviceId)
 
@@ -156,6 +193,7 @@ func (h *Hub) RegisterRoutingTokens(tokenHexes []string, session *ClientSession)
 
 func (h *Hub) Unregister(session *ClientSession) {
 	h.sessionsMu.Lock()
+	allOffline := false
 	if devices, ok := h.sessions[session.NxId]; ok {
 		if existing, found := devices[session.DeviceId]; found && existing == session {
 			delete(devices, session.DeviceId)
@@ -167,9 +205,20 @@ func (h *Hub) Unregister(session *ClientSession) {
 		}
 		if len(devices) == 0 {
 			delete(h.sessions, session.NxId)
+			allOffline = true
 		}
 	}
 	h.sessionsMu.Unlock()
+
+	if allOffline && h.presenceManager != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = h.presenceManager.SetPresence(ctx, session.NxId, wire.PresenceStatus_PRESENCE_OFFLINE, OfflinePresenceTTL)
+		cancel()
+	}
+
+	h.typingRateMu.Lock()
+	delete(h.typingRate, session)
+	h.typingRateMu.Unlock()
 
 	h.blindTokensMu.Lock()
 	for token, s := range h.blindTokens {
@@ -207,6 +256,126 @@ func (h *Hub) RouteDecodedPacket(sender *ClientSession, packet *wire.NexaWirePac
 		}
 		if encoded, err := ackPacket.Encode(); err == nil {
 			sender.SafeSend(encoded)
+		}
+		return
+	}
+
+	// Handle Presence Updates (PACKET_PRESENCE)
+	if packet.Type == wire.PacketType_PACKET_PRESENCE && packet.Presence != nil {
+		if sender.Authenticated && sender.NxId == packet.SenderNxId {
+			status := packet.Presence.Status
+			if h.presenceManager != nil {
+				ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+				_ = h.presenceManager.SetPresence(ctx, sender.NxId, status, DefaultPresenceTTL)
+				cancel()
+			}
+			if packet.RecipientNxId != "" && packet.RecipientNxId != "SERVER" {
+				if status == wire.PresenceStatus_PRESENCE_HIDDEN {
+					log.Printf("[Hub] Presence reciprocity: dropped presence forward from hidden sender %s", sender.NxId)
+					return
+				}
+				h.sessionsMu.RLock()
+				recipientDevices, isOnline := h.sessions[packet.RecipientNxId]
+				var targets []*ClientSession
+				if isOnline {
+					for _, s := range recipientDevices {
+						targets = append(targets, s)
+					}
+				}
+				h.sessionsMu.RUnlock()
+				for _, s := range targets {
+					s.SafeSend(rawBytes)
+				}
+			}
+		}
+		return
+	}
+
+	// Message Edit & Delete For Everyone Control Events
+	if packet.Type == wire.PacketType_PACKET_MESSAGE_EDIT || packet.Type == wire.PacketType_PACKET_MESSAGE_DELETE {
+		var targetPacketId string
+		if packet.MessageEdit != nil {
+			targetPacketId = packet.MessageEdit.TargetPacketId
+		} else if packet.MessageDelete != nil {
+			targetPacketId = packet.MessageDelete.TargetPacketId
+		}
+
+		if targetPacketId == "" {
+			log.Printf("[Hub] Security rejection: edit/delete packet with empty targetPacketId from %s", sender.NxId)
+			return
+		}
+
+		// Verify sender is original sender from idempotency tracking
+		if val, exists := h.idempotency.Load(targetPacketId); exists {
+			entry := val.(idempotencyEntry)
+			if entry.senderNxId != sender.NxId {
+				log.Printf("[Hub] Security rejection: user %s tried to edit/delete packet %s originally sent by %s",
+					sender.NxId, targetPacketId, entry.senderNxId)
+				return
+			}
+		} else if h.redisClient != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			val, err := h.redisClient.Get(ctx, "idemp:"+targetPacketId).Result()
+			cancel()
+			if err == nil {
+				parts := strings.Split(val, ":")
+				if len(parts) > 0 && parts[0] != sender.NxId {
+					log.Printf("[Hub] Security rejection: Redis idemp check: user %s not original sender of %s (%s)",
+						sender.NxId, targetPacketId, parts[0])
+					return
+				}
+			}
+		}
+
+		// Forward to group or recipient
+		if packet.GroupId != "" || strings.HasPrefix(packet.RecipientNxId, "GRP-") {
+			groupId := packet.GroupId
+			if groupId == "" {
+				groupId = packet.RecipientNxId
+			}
+			h.routeGroupPacket(sender, groupId, packet, rawBytes)
+			return
+		}
+
+		// Immediate Server Acceptance ACK back to sender
+		serverAck := &wire.NexaWirePacket{
+			PacketId:      packet.PacketId + "_srv_ack",
+			Type:          wire.PacketType_PACKET_ACK,
+			SenderNxId:    "SERVER",
+			RecipientNxId: sender.NxId,
+			Timestamp:     time.Now().UnixMilli(),
+			Ack: &wire.DeliveryAckPayload{
+				OriginalPacketId: packet.PacketId,
+				Status:           wire.AckStatus_ACK_SERVER_RECEIVED,
+			},
+		}
+		if ackBytes, err := serverAck.Encode(); err == nil {
+			sender.SafeSend(ackBytes)
+		}
+
+		// 1-to-1 forward
+		h.sessionsMu.RLock()
+		recipientDevices, isOnline := h.sessions[packet.RecipientNxId]
+		var targets []*ClientSession
+		if isOnline {
+			for _, s := range recipientDevices {
+				targets = append(targets, s)
+			}
+		}
+		h.sessionsMu.RUnlock()
+
+		if len(targets) > 0 {
+			delivered := 0
+			for _, s := range targets {
+				if s.SafeSend(rawBytes) {
+					delivered++
+				}
+			}
+			if delivered == 0 {
+				h.bufferOffline(packet.RecipientNxId, rawBytes)
+			}
+		} else {
+			h.bufferOffline(packet.RecipientNxId, rawBytes)
 		}
 		return
 	}
@@ -334,6 +503,16 @@ func (h *Hub) RouteDecodedPacket(sender *ClientSession, packet *wire.NexaWirePac
 		}
 	}
 
+	// Group message routing (validates membership BEFORE dispatching server ACK)
+	if packet.GroupId != "" || strings.HasPrefix(packet.RecipientNxId, "GRP-") {
+		groupId := packet.GroupId
+		if groupId == "" {
+			groupId = packet.RecipientNxId
+		}
+		h.routeGroupPacket(sender, groupId, packet, rawBytes)
+		return
+	}
+
 	// 2. Immediate Server Acknowledgment (ACK_SERVER_RECEIVED) back to sender
 	if packet.Type == wire.PacketType_PACKET_MESSAGE {
 		serverAck := &wire.NexaWirePacket{
@@ -372,7 +551,32 @@ func (h *Hub) RouteDecodedPacket(sender *ClientSession, packet *wire.NexaWirePac
 
 	// 3. Transient packets (Typing Indicators) are RAM-only and NEVER buffered offline
 	if packet.Type == wire.PacketType_PACKET_TYPING {
+		// Rate limiting: max 5 typing packets per second per session
+		h.typingRateMu.Lock()
+		limiter, ok := h.typingRate[sender]
+		now := time.Now()
+		if !ok || now.Sub(limiter.windowStart) > time.Second {
+			h.typingRate[sender] = &typingRateLimiter{count: 1, windowStart: now}
+		} else {
+			limiter.count++
+			if limiter.count > 5 {
+				h.typingRateMu.Unlock()
+				return
+			}
+		}
+		h.typingRateMu.Unlock()
+
 		atomic.AddUint64(&h.relayedTypingCount, 1)
+
+		if packet.GroupId != "" || strings.HasPrefix(packet.RecipientNxId, "GRP-") {
+			groupId := packet.GroupId
+			if groupId == "" {
+				groupId = packet.RecipientNxId
+			}
+			h.routeGroupPacket(sender, groupId, packet, rawBytes)
+			return
+		}
+
 		h.sessionsMu.RLock()
 		recipientDevices, isOnline := h.sessions[packet.RecipientNxId]
 		var targets []*ClientSession
@@ -563,37 +767,125 @@ func (h *Hub) flushPendingQueue(recipientId string, session *ClientSession) {
 	if h.buffer == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	claimedEntries, err := h.buffer.ClaimPending(ctx, recipientId, 50, 30*time.Second)
-	if err != nil {
-		log.Printf("[Hub] Error claiming pending packets for %s: %v", recipientId, err)
-		return
-	}
-
-	if len(claimedEntries) == 0 {
-		// Fallback check for any legacy packets in pending:<recipientId>
-		legacyPackets, _ := h.buffer.PopAllPending(ctx, recipientId)
-		for _, raw := range legacyPackets {
-			session.SafeSend(raw)
+	const maxBatches = 10
+	for batch := 0; batch < maxBatches; batch++ {
+		claimedEntries, err := h.buffer.ClaimPending(ctx, recipientId, 50, 30*time.Second)
+		if err != nil {
+			log.Printf("[Hub] Error claiming pending packets for %s: %v", recipientId, err)
+			break
 		}
-		return
-	}
 
-	log.Printf("[Hub] Claimed %d pending packets in-flight for freshly connected NX-ID: %s (Device: %s)", len(claimedEntries), recipientId, session.DeviceId)
-	for i, entry := range claimedEntries {
-		if !session.SafeSend(entry.Payload) {
-			log.Printf("[Hub] Session send failed for entry %s to %s. Reverting in-flight.", entry.MessageID, recipientId)
-			for j := len(claimedEntries) - 1; j >= i; j-- {
-				_ = h.buffer.RevertInFlight(ctx, recipientId, claimedEntries[j].MessageID)
-				atomic.AddUint64(&h.revertedDeliveryCount, 1)
+		if len(claimedEntries) == 0 {
+			if batch == 0 {
+				// Fallback check for any legacy packets in pending:<recipientId>
+				legacyPackets, _ := h.buffer.PopAllPending(ctx, recipientId)
+				for _, raw := range legacyPackets {
+					session.SafeSend(raw)
+				}
 			}
 			break
 		}
-		atomic.AddUint64(&h.claimedInFlightCount, 1)
-		atomic.AddUint64(&h.offlineFlushedCount, 1)
+
+		log.Printf("[Hub] Claimed %d pending packets in-flight (batch %d) for freshly connected NX-ID: %s (Device: %s)", len(claimedEntries), batch+1, recipientId, session.DeviceId)
+		failed := false
+		for i, entry := range claimedEntries {
+			if !session.SafeSend(entry.Payload) {
+				log.Printf("[Hub] Session send failed for entry %s to %s. Reverting in-flight.", entry.MessageID, recipientId)
+				for j := len(claimedEntries) - 1; j >= i; j-- {
+					_ = h.buffer.RevertInFlight(ctx, recipientId, claimedEntries[j].MessageID)
+					atomic.AddUint64(&h.revertedDeliveryCount, 1)
+				}
+				failed = true
+				break
+			}
+			atomic.AddUint64(&h.claimedInFlightCount, 1)
+			atomic.AddUint64(&h.offlineFlushedCount, 1)
+		}
+
+		if failed || len(claimedEntries) < 50 {
+			break
+		}
 	}
+}
+
+func (h *Hub) routeGroupPacket(sender *ClientSession, groupId string, packet *wire.NexaWirePacket, rawBytes []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// 1. Group membership validation: sender must be an active member
+	if h.groupProvider != nil {
+		isMember, err := h.groupProvider.IsMember(ctx, groupId, sender.NxId)
+		if err != nil || !isMember {
+			log.Printf("[Hub] Group security rejection: %s is not an active member of group %s", sender.NxId, groupId)
+			return
+		}
+	}
+
+	// 2. Server acceptance ACK to sender (for messages, edits, deletes)
+	if packet.Type == wire.PacketType_PACKET_MESSAGE || packet.Type == wire.PacketType_PACKET_MESSAGE_EDIT || packet.Type == wire.PacketType_PACKET_MESSAGE_DELETE {
+		serverAck := &wire.NexaWirePacket{
+			PacketId:      packet.PacketId + "_srv_ack",
+			Type:          wire.PacketType_PACKET_ACK,
+			SenderNxId:    "SERVER",
+			RecipientNxId: sender.NxId,
+			Timestamp:     time.Now().UnixMilli(),
+			Ack: &wire.DeliveryAckPayload{
+				OriginalPacketId: packet.PacketId,
+				Status:           wire.AckStatus_ACK_SERVER_RECEIVED,
+			},
+		}
+		if ackBytes, err := serverAck.Encode(); err == nil {
+			sender.SafeSend(ackBytes)
+		}
+	}
+
+	// 3. Look up group members
+	var members []string
+	if h.groupProvider != nil {
+		var err error
+		members, err = h.groupProvider.GetGroupMembers(ctx, groupId)
+		if err != nil {
+			log.Printf("[Hub] Error fetching members for group %s: %v", groupId, err)
+			return
+		}
+	}
+
+	// 4. Server-side fan-out (up to 400 members)
+	for _, memberNxId := range members {
+		if memberNxId == sender.NxId {
+			continue // Do not reflect back to sender
+		}
+
+		h.sessionsMu.RLock()
+		devices, isOnline := h.sessions[memberNxId]
+		var targets []*ClientSession
+		if isOnline {
+			for _, s := range devices {
+				targets = append(targets, s)
+			}
+		}
+		h.sessionsMu.RUnlock()
+
+		if len(targets) > 0 {
+			delivered := 0
+			for _, s := range targets {
+				if s.SafeSend(rawBytes) {
+					delivered++
+					atomic.AddUint64(&h.relayedMessagesCount, 1)
+				}
+			}
+			if delivered == 0 && packet.Type != wire.PacketType_PACKET_TYPING {
+				h.bufferOffline(memberNxId, rawBytes)
+			}
+		} else if packet.Type != wire.PacketType_PACKET_TYPING {
+			// Offline: Buffer into recipient's queue
+			h.bufferOffline(memberNxId, rawBytes)
+		}
+	}
+	log.Printf("[Hub] Group fan-out completed for %s in %s (total targets: %d)", packet.PacketId, groupId, len(members)-1)
 }
 
 // FlushTokensQueue flushes any buffered DTN envelopes for the specified routing tokens from ephemeral Redis.

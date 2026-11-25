@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material3.Divider
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -30,12 +32,15 @@ import com.nexa.app.presentation.common.glass.NexaGlassSurface
 enum class ChatOverflowAction {
     VIEW_PROFILE,
     SEARCH_CHAT,
+    BACKUP_POLICY,
     DELETE_CHAT,
     CLEAR_CHAT,
     SHARED_FILES,
     PINNED_MESSAGES,
     MUTE_NOTIFICATIONS,
-    ARCHIVE_CHAT
+    ARCHIVE_CHAT,
+    BLOCK_CONTACT,
+    UNBLOCK_CONTACT
 }
 
 /**
@@ -45,6 +50,7 @@ enum class ChatOverflowAction {
 @Composable
 fun NexaChatOverflowMenu(
     isGhostModeActive: Boolean = false,
+    isContactBlocked: Boolean = false,
     onActionSelected: (ChatOverflowAction) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
@@ -85,6 +91,16 @@ fun NexaChatOverflowMenu(
                 tint = contentColor,
                 onClick = {
                     onActionSelected(ChatOverflowAction.SEARCH_CHAT)
+                    onDismiss()
+                }
+            )
+
+            OverflowMenuItem(
+                title = "Backup Policy",
+                imageVector = Icons.Default.CloudSync,
+                tint = contentColor,
+                onClick = {
+                    onActionSelected(ChatOverflowAction.BACKUP_POLICY)
                     onDismiss()
                 }
             )
@@ -148,6 +164,28 @@ fun NexaChatOverflowMenu(
                     onDismiss()
                 }
             )
+
+            if (isContactBlocked) {
+                OverflowMenuItem(
+                    title = "Unblock Contact",
+                    iconRes = R.drawable.ic_nexa_block,
+                    tint = contentColor,
+                    onClick = {
+                        onActionSelected(ChatOverflowAction.UNBLOCK_CONTACT)
+                        onDismiss()
+                    }
+                )
+            } else {
+                OverflowMenuItem(
+                    title = "Block Contact",
+                    iconRes = R.drawable.ic_nexa_block,
+                    tint = dangerColor,
+                    onClick = {
+                        onActionSelected(ChatOverflowAction.BLOCK_CONTACT)
+                        onDismiss()
+                    }
+                )
+            }
         }
     }
 }
@@ -168,6 +206,36 @@ private fun OverflowMenuItem(
     ) {
         Icon(
             painter = painterResource(id = iconRes),
+            contentDescription = title,
+            tint = tint,
+            modifier = Modifier.size(18.dp)
+        )
+        Spacer(modifier = Modifier.width(14.dp))
+        Text(
+            text = title,
+            color = tint,
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+@Composable
+private fun OverflowMenuItem(
+    title: String,
+    imageVector: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: Color,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = imageVector,
             contentDescription = title,
             tint = tint,
             modifier = Modifier.size(18.dp)

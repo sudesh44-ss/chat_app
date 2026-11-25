@@ -28,7 +28,143 @@ class DriveAppDataService(
     private val jsonMediaType = "application/json; charset=UTF-8".toMediaType()
 
     /**
+     * Lists all backup files inside Google Drive's isolated `appDataFolder`.
+     * Retrieves both multi-point backups (nexa_backup_*.vault) and legacy backups (nx_secure_backup.vault).
+     */
+    suspend fun listBackupFiles(): List<DriveFile> = withContext(Dispatchers.IO) {
+        val token = authManager.getAccessToken()
+        val query = "trashed = false and (name = '$BACKUP_FILE_NAME' or name contains 'nexa_backup_')"
+        val encodedQuery = URLEncoder.encode(query, "UTF-8")
+        val fields = URLEncoder.encode("files(id,name,modifiedTime,size,appProperties)", "UTF-8")
+        val url = "https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=$encodedQuery&fields=$fields&pageSize=50"
+
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .header("Authorization", "Bearer $token")
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (response.code == 401) {
+                authManager.invalidateToken(token)
+                throw IOException("Drive authorization expired (HTTP 401)")
+            }
+
+            if (!response.isSuccessful) {
+                throw IOException("Failed to list backups from appDataFolder: HTTP ${response.code} ${response.message}")
+            }
+
+            val body = response.body?.string().orEmpty()
+            val json = JSONObject(body)
+            val filesArray = json.optJSONArray("files") ?: return@withContext emptyList()
+
+            val resultList = mutableListOf<DriveFile>()
+            for (i in 0 until filesArray.length()) {
+                val item = filesArray.getJSONObject(i)
+                val id = item.optString("id")
+                val name = item.optString("name")
+                val modifiedTime = item.optString("modifiedTime")
+                val size = item.optLong("size", 0L)
+
+                val appProps = mutableMapOf<String, String>()
+                val propsObj = item.optJSONObject("appProperties")
+                propsObj?.keys()?.forEach { key ->
+                    propsObj.optString(key)?.let { appProps[key] = it }
+                }
+
+                resultList.add(
+                    DriveFile(
+                        id = id,
+                        name = name,
+                        modifiedTime = modifiedTime,
+                        size = size,
+                        appProperties = appProps
+                    )
+                )
+            }
+            resultList
+        }
+    }
+
+    /**
+     * Queries specific file metadata by ID from Google Drive.
+     */
+    suspend fun getFileMetadata(fileId: String): DriveFile? = withContext(Dispatchers.IO) {
+        val token = authManager.getAccessToken()
+        val fields = URLEncoder.encode("id,name,modifiedTime,size,appProperties", "UTF-8")
+        val url = "https://www.googleapis.com/drive/v3/files/$fileId?fields=$fields"
+
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .header("Authorization", "Bearer $token")
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (response.code == 401) {
+                authManager.invalidateToken(token)
+                throw IOException("Drive authorization expired (HTTP 401)")
+            }
+
+            if (response.code == 404) return@withContext null
+            if (!response.isSuccessful) {
+                throw IOException("Failed to fetch file metadata: HTTP ${response.code} ${response.message}")
+            }
+
+            val body = response.body?.string().orEmpty()
+            val item = JSONObject(body)
+            val id = item.optString("id")
+            val name = item.optString("name")
+            val modifiedTime = item.optString("modifiedTime")
+            val size = item.optLong("size", 0L)
+
+            val appProps = mutableMapOf<String, String>()
+            val propsObj = item.optJSONObject("appProperties")
+            propsObj?.keys()?.forEach { key ->
+                propsObj.optString(key)?.let { appProps[key] = it }
+            }
+
+            DriveFile(
+                id = id,
+                name = name,
+                modifiedTime = modifiedTime,
+                size = size,
+                appProperties = appProps
+            )
+        }
+    }
+
+    /**
+     * Updates appProperties metadata of a remote file on Google Drive.
+     */
+    suspend fun updateFileAppProperties(fileId: String, appProperties: Map<String, String>): Boolean = withContext(Dispatchers.IO) {
+        val token = authManager.getAccessToken()
+        val url = "https://www.googleapis.com/drive/v3/files/$fileId"
+
+        val metadataJson = JSONObject().apply {
+            val propsObj = JSONObject()
+            appProperties.forEach { (k, v) -> propsObj.put(k, v) }
+            put("appProperties", propsObj)
+        }
+
+        val request = Request.Builder()
+            .url(url)
+            .patch(metadataJson.toString().toRequestBody(jsonMediaType))
+            .header("Authorization", "Bearer $token")
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (response.code == 401) {
+                authManager.invalidateToken(token)
+                throw IOException("Drive authorization expired (HTTP 401)")
+            }
+            response.isSuccessful
+        }
+    }
+
+    /**
      * Queries the hidden `appDataFolder` for an existing backup vault file.
+     * Retained for backward compatibility.
      */
     suspend fun getExistingBackupMetadata(): DriveFile? = withContext(Dispatchers.IO) {
         val token = authManager.getAccessToken()
@@ -82,12 +218,13 @@ class DriveAppDataService(
     }
 
     /**
-     * Initiates a resumable upload session on Google Drive.
+     * Initiates a resumable upload session on Google Drive for a new or existing backup file.
      * Returns the session URI to which binary slices can be streamed.
      */
     suspend fun startResumableUploadSession(
         vaultFile: File,
-        versionEpoch: Long,
+        backupFileName: String,
+        appProperties: Map<String, String> = emptyMap(),
         existingFileId: String? = null
     ): String = withContext(Dispatchers.IO) {
         val token = authManager.getAccessToken()
@@ -102,12 +239,11 @@ class DriveAppDataService(
 
         val metadataJson = JSONObject().apply {
             if (!isUpdate) {
-                put("name", BACKUP_FILE_NAME)
+                put("name", backupFileName)
                 put("parents", org.json.JSONArray().put("appDataFolder"))
             }
-            val appProps = JSONObject().apply {
-                put("version_epoch", versionEpoch.toString())
-            }
+            val appProps = JSONObject()
+            appProperties.forEach { (k, v) -> appProps.put(k, v) }
             put("appProperties", appProps)
         }
 
@@ -139,6 +275,20 @@ class DriveAppDataService(
             sessionUri
         }
     }
+
+    /**
+     * Backward-compatible overload for legacy single-file callers.
+     */
+    suspend fun startResumableUploadSession(
+        vaultFile: File,
+        versionEpoch: Long,
+        existingFileId: String? = null
+    ): String = startResumableUploadSession(
+        vaultFile = vaultFile,
+        backupFileName = BACKUP_FILE_NAME,
+        appProperties = mapOf("version_epoch" to versionEpoch.toString()),
+        existingFileId = existingFileId
+    )
 
     /**
      * Downloads an encrypted backup vault from Google Drive into a local cache destination.
@@ -207,6 +357,42 @@ class DriveAppDataService(
             }
 
             processDownloadStream(response, partFile, destinationFile, expectedEtag, onProgress)
+        }
+    }
+
+    /**
+     * Downloads a specific byte range of a remote vault file (e.g. for header validation).
+     */
+    suspend fun downloadVaultRange(
+        fileId: String,
+        destinationFile: File,
+        startByte: Long,
+        endByte: Long
+    ): Boolean = withContext(Dispatchers.IO) {
+        val token = authManager.getAccessToken()
+        val url = "https://www.googleapis.com/drive/v3/files/$fileId?alt=media"
+
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .header("Authorization", "Bearer $token")
+            .header("Range", "bytes=$startByte-$endByte")
+            .build()
+
+        client.newCall(request).execute().use { response ->
+            if (response.code == 401) {
+                authManager.invalidateToken(token)
+                throw IOException("Drive authorization expired (HTTP 401)")
+            }
+            if (!response.isSuccessful && response.code !in listOf(200, 206)) {
+                throw IOException("Range download failed with HTTP ${response.code}")
+            }
+            val body = response.body ?: throw IOException("Empty response body from Drive media download")
+            destinationFile.parentFile?.mkdirs()
+            FileOutputStream(destinationFile).use { fos ->
+                body.byteStream().copyTo(fos)
+            }
+            destinationFile.exists() && destinationFile.length() > 0
         }
     }
 

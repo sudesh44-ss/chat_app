@@ -77,7 +77,8 @@ class OnboardingUnitTests {
             bio: String?,
             googleUid: String,
             googleAuthToken: String?,
-            isReverify: Boolean
+            isReverify: Boolean,
+            email: String?
         ): Result<InitiateReverseVerifyResponseDto> {
             isReverseVerifyCalled = true
             isOtpSentCalled = true

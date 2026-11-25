@@ -1,5 +1,6 @@
 package com.nexa.app
 
+import com.nexa.app.core.notification.NexaMentionParser
 import com.nexa.app.core.notification.NexaNotificationChannelManager
 import com.nexa.app.core.notification.NotificationCooldownTracker
 import com.nexa.app.core.notification.QuietHoursEngine
@@ -21,6 +22,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.time.LocalDateTime
 import java.time.LocalTime
 
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -112,6 +114,57 @@ class NotificationEngineAndSettingsUnitTests {
     }
 
     @Test
+    fun quietHours_weekdayOvernightScheduling_handlesDayTransitions() {
+        // Monday only (day 1), 22:00 to 07:00
+        val mondayOnlySettings = NotificationPreferences(
+            isQuietHoursEnabled = true,
+            quietHoursStartHour = 22,
+            quietHoursStartMinute = 0,
+            quietHoursEndHour = 7,
+            quietHoursEndMinute = 0,
+            quietHoursDays = setOf(1)
+        )
+
+        // Monday 2026-11-23 at 22:30 -> In window on selected day (Suppressed)
+        val mondayNight = LocalDateTime.of(2026, 11, 23, 22, 30) // Monday
+        assertEquals(1, mondayNight.dayOfWeek.value)
+        assertTrue(QuietHoursEngine.shouldSuppressNotification(false, mondayOnlySettings, mondayNight))
+
+        // Tuesday 2026-11-24 at 02:00 -> Belongs to Monday overnight window (Suppressed)
+        val tuesdayEarly = LocalDateTime.of(2026, 11, 24, 2, 0) // Tuesday
+        assertEquals(2, tuesdayEarly.dayOfWeek.value)
+        assertTrue(QuietHoursEngine.shouldSuppressNotification(false, mondayOnlySettings, tuesdayEarly))
+
+        // Tuesday 2026-11-24 at 07:05 -> Outside morning window (Not suppressed)
+        val tuesdayMorning = LocalDateTime.of(2026, 11, 24, 7, 5)
+        assertFalse(QuietHoursEngine.shouldSuppressNotification(false, mondayOnlySettings, tuesdayMorning))
+
+        // Tuesday 2026-11-24 at 22:30 -> Tuesday not in selectedDays (Not suppressed)
+        val tuesdayNight = LocalDateTime.of(2026, 11, 24, 22, 30)
+        assertFalse(QuietHoursEngine.shouldSuppressNotification(false, mondayOnlySettings, tuesdayNight))
+
+        // Wednesday 2026-11-25 at 02:00 -> Tuesday was not selected (Not suppressed)
+        val wednesdayEarly = LocalDateTime.of(2026, 11, 25, 2, 0)
+        assertFalse(QuietHoursEngine.shouldSuppressNotification(false, mondayOnlySettings, wednesdayEarly))
+    }
+
+    @Test
+    fun quietHours_statusDescription() {
+        val disabledSettings = NotificationPreferences(isQuietHoursEnabled = false)
+        assertEquals("Disabled", QuietHoursEngine.getQuietHoursStatusDescription(disabledSettings))
+
+        val activeSettings = NotificationPreferences(
+            isQuietHoursEnabled = true,
+            quietHoursStartHour = 0,
+            quietHoursStartMinute = 0,
+            quietHoursEndHour = 23,
+            quietHoursEndMinute = 59,
+            quietHoursDays = setOf(1, 2, 3, 4, 5, 6, 7)
+        )
+        assertTrue(QuietHoursEngine.getQuietHoursStatusDescription(activeSettings).startsWith("Active now"))
+    }
+
+    @Test
     fun quietHours_incomingCalls_respectsBypassSetting() {
         val allowCallBypassSettings = NotificationPreferences(
             isQuietHoursEnabled = true,
@@ -134,6 +187,29 @@ class NotificationEngineAndSettingsUnitTests {
 
         // Call bypass disabled -> Call IS suppressed
         assertTrue(QuietHoursEngine.shouldSuppressNotification(true, blockCallBypassSettings, midnight))
+    }
+
+    @Test
+    fun mentionParser_detectsMentionsAccurately() {
+        val myNxId = "NX-DEV-1234"
+        val myName = "Alice Smith"
+
+        // Direct handle match
+        assertTrue(NexaMentionParser.isDirectMention("Hey @Alice check this", myNxId, myName))
+        assertTrue(NexaMentionParser.isDirectMention("Hey @alicesmith look", myNxId, myName))
+
+        // NX-ID match
+        assertTrue(NexaMentionParser.isDirectMention("Call @NX-DEV-1234 now", myNxId, myName))
+        assertTrue(NexaMentionParser.isDirectMention("Call @DEV-1234 now", myNxId, myName))
+
+        // Broadcast mentions
+        assertTrue(NexaMentionParser.isDirectMention("Meeting at 3 @all", myNxId, myName))
+        assertTrue(NexaMentionParser.isDirectMention("@everyone please mute", myNxId, myName))
+
+        // Non-mentions and email addresses
+        assertFalse(NexaMentionParser.isDirectMention("Contact me at alice@domain.com", myNxId, myName))
+        assertFalse(NexaMentionParser.isDirectMention("Hello Alice without at symbol", myNxId, myName))
+        assertFalse(NexaMentionParser.isDirectMention("Talking to @Bob about lunch", myNxId, myName))
     }
 
     @Test
@@ -187,6 +263,21 @@ class NotificationEngineAndSettingsUnitTests {
     }
 
     @Test
+    fun quietHoursDays_formattingAndDefaults() {
+        val allDays = NotificationPreferences(quietHoursDays = setOf(1, 2, 3, 4, 5, 6, 7))
+        assertEquals("Every day", allDays.quietHoursDaysFormatted)
+
+        val weekdays = NotificationPreferences(quietHoursDays = setOf(1, 2, 3, 4, 5))
+        assertEquals("Weekdays", weekdays.quietHoursDaysFormatted)
+
+        val weekends = NotificationPreferences(quietHoursDays = setOf(6, 7))
+        assertEquals("Weekends", weekends.quietHoursDaysFormatted)
+
+        val custom = NotificationPreferences(quietHoursDays = setOf(1, 3, 5))
+        assertEquals("Mon, Wed, Fri", custom.quietHoursDaysFormatted)
+    }
+
+    @Test
     fun notificationViewModel_eventsUpdateStateProperly() = runTest {
         val inMemoryStorage = mutableMapOf<String, Any>()
         val mockPrefs = object : android.content.SharedPreferences {
@@ -212,6 +303,7 @@ class NotificationEngineAndSettingsUnitTests {
         assertTrue(initial.messagePreviewEnabled)
         assertEquals(LockScreenMode.HIDE_CONTENT, initial.lockScreenVisibility)
         assertFalse(initial.isQuietHoursEnabled)
+        assertEquals(7, initial.quietHoursDays.size)
 
         // Toggle message preview off
         viewModel.onEvent(NotificationSettingsEvent.ToggleMessagePreview(false))
@@ -236,10 +328,26 @@ class NotificationEngineAndSettingsUnitTests {
         assertEquals(45, updated.quietHoursEndMinute)
         assertEquals("22:30 – 06:45", updated.quietHoursFormatted)
 
+        // Toggle weekday selection
+        viewModel.onEvent(NotificationSettingsEvent.SetQuietHoursDays(setOf(1, 2, 3, 4, 5)))
+        advanceUntilIdle()
+        assertEquals(setOf(1, 2, 3, 4, 5), viewModel.preferencesState.value.quietHoursDays)
+        assertEquals("Weekdays", viewModel.preferencesState.value.quietHoursDaysFormatted)
+
+        // Toggle day 1 (removes Monday)
+        viewModel.onEvent(NotificationSettingsEvent.ToggleQuietHoursDay(1))
+        advanceUntilIdle()
+        assertFalse(viewModel.preferencesState.value.quietHoursDays.contains(1))
+
         // Verify system permission state tracking
         viewModel.onEvent(NotificationSettingsEvent.UpdateSystemPermissionState(false))
         advanceUntilIdle()
         assertFalse(viewModel.isSystemPermissionGranted.value)
+
+        // Verify disabled channels tracking
+        viewModel.onEvent(NotificationSettingsEvent.UpdateDisabledChannels(listOf(NexaNotificationChannelManager.CHANNEL_MESSAGES_DIRECT)))
+        advanceUntilIdle()
+        assertEquals(1, viewModel.disabledChannels.value.size)
     }
 
     private class MockEditor(private val storage: MutableMap<String, Any>) : android.content.SharedPreferences.Editor {

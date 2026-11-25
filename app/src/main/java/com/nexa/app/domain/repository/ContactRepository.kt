@@ -96,4 +96,6 @@ interface ContactRepository {
         Result.success(Unit)
     suspend fun getBlockedUsers(): Result<List<com.nexa.app.data.remote.dto.BlockedUserItemDto>> =
         Result.success(emptyList())
+    fun getBlockedContactsFlow(): Flow<List<ContactEntity>> = getContactsByStatus(ContactStatus.BLOCKED)
+    suspend fun isUserBlocked(targetNxId: String): Boolean = false
 }

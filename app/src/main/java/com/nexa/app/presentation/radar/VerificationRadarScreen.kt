@@ -30,6 +30,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Shield
 import androidx.compose.material.icons.filled.Warning
@@ -88,7 +89,10 @@ fun VerificationRadarScreen(
     age: Int?,
     gender: String?,
     bio: String?,
-    expiresInSeconds: Int = 90,
+    email: String? = null,
+    expiresInSeconds: Int = 120,
+    sessionId: String = "",
+    gatewayNumber: String? = null,
     isReverify: Boolean = false,
     onBack: () -> Unit,
     onVerificationSuccess: (nxId: String, name: String, phone: String, avatarUrl: String?) -> Unit
@@ -108,8 +112,11 @@ fun VerificationRadarScreen(
             age = age,
             gender = gender,
             bio = bio,
+            email = email,
             expiresInSeconds = expiresInSeconds,
             isReverify = isReverify,
+            sessionId = sessionId,
+            gatewayNumber = gatewayNumber,
             context = context
         )
     }
@@ -326,6 +333,32 @@ fun VerificationRadarScreen(
                                             )
                                         )
                                     }
+                                }
+                            }
+
+                            // RCS chat warning banner
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Info,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Text(
+                                        text = "Ensure the message is sent as a standard SMS (not RCS chat) from your registered SIM.",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        lineHeight = 16.sp
+                                    )
                                 }
                             }
 

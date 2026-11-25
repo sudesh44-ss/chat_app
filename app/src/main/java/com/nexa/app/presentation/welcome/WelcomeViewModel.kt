@@ -31,6 +31,7 @@ data class WelcomeUiState(
     val isSuccess: Boolean = false,
     val isInstantLogin: Boolean = false,
     val requireSimVerification: Boolean = false,
+    val isExistingUser: Boolean = false,
     val googleResponse: GoogleAuthResponse? = null,
     val proceedToPhoneOnly: Boolean = false
 )
@@ -138,15 +139,20 @@ class WelcomeViewModel(
                                         )
                                     }
                                 }
-                                "REQUIRE_SIM_VERIFICATION" -> {
+                                "REQUIRE_SIM_VERIFICATION", "EXISTING_USER" -> {
+                                    val resolvedName = resp.fullName ?: resp.prefillName ?: displayName
                                     _uiState.update {
                                         it.copy(
                                             isLoading = false,
                                             googleIdToken = token,
                                             userEmail = email,
-                                            suggestedName = displayName,
-                                            googleResponse = resp,
+                                            suggestedName = resolvedName,
+                                            googleResponse = resp.copy(
+                                                fullName = resp.fullName ?: resolvedName,
+                                                prefillName = resp.prefillName ?: resolvedName
+                                            ),
                                             requireSimVerification = true,
+                                            isExistingUser = true,
                                             errorMessage = null
                                         )
                                     }

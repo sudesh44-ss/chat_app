@@ -17,6 +17,7 @@ import com.nexa.app.presentation.chat.ChatViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
@@ -123,7 +124,9 @@ class ChatPrivacyAndTransportUnitTests {
 
         assertTrue("Read receipts must default to true", privacyPrefs.readReceiptsEnabled)
         assertEquals("Typing indicator must default to EVERYONE", TypingPrivacyMode.EVERYONE, privacyPrefs.typingIndicatorMode)
+        assertTrue("Show online status must default to true", privacyPrefs.showOnlineStatus)
         assertEquals("Online presence must default to EVERYONE", OnlinePrivacyMode.EVERYONE, privacyPrefs.onlinePresenceMode)
+        assertEquals("Offline presence must default to TAKING_A_BREAK", com.nexa.app.data.local.preferences.OfflinePresenceMode.TAKING_A_BREAK, privacyPrefs.offlinePresenceMode)
         assertTrue("Transport badges must default to true", privacyPrefs.showTransportBadges)
         assertEquals("Default route mode must be AUTO", TransportRouteMode.AUTO, privacyPrefs.preferredTransportRoute)
     }
@@ -133,20 +136,87 @@ class ChatPrivacyAndTransportUnitTests {
         val fakePrefs = FakeSharedPreferences()
         val privacyPrefs = ChatPrivacyPrefs(fakePrefs)
 
+        // 1. Read receipts
         privacyPrefs.readReceiptsEnabled = false
         assertFalse(privacyPrefs.readReceiptsEnabled)
 
+        // 2. Typing indicator
         privacyPrefs.typingIndicatorMode = TypingPrivacyMode.NOBODY
         assertEquals(TypingPrivacyMode.NOBODY, privacyPrefs.typingIndicatorMode)
 
+        // 3. Show online status
+        privacyPrefs.showOnlineStatus = false
+        assertFalse(privacyPrefs.showOnlineStatus)
+
+        // 4. Who can see my online status
         privacyPrefs.onlinePresenceMode = OnlinePrivacyMode.MY_CONTACTS
         assertEquals(OnlinePrivacyMode.MY_CONTACTS, privacyPrefs.onlinePresenceMode)
 
+        // 5. When I'm offline
+        privacyPrefs.offlinePresenceMode = com.nexa.app.data.local.preferences.OfflinePresenceMode.LAST_SEEN_RECENTLY
+        assertEquals(com.nexa.app.data.local.preferences.OfflinePresenceMode.LAST_SEEN_RECENTLY, privacyPrefs.offlinePresenceMode)
+
+        // 6. Show transport badges
         privacyPrefs.showTransportBadges = false
         assertFalse(privacyPrefs.showTransportBadges)
 
+        // 7. Preferred route
         privacyPrefs.preferredTransportRoute = TransportRouteMode.MESH
         assertEquals(TransportRouteMode.MESH, privacyPrefs.preferredTransportRoute)
+
+        // Re-read from a fresh instance backed by the same storage to guarantee restoration
+        val restoredPrefs = ChatPrivacyPrefs(fakePrefs)
+        assertFalse("Restored readReceiptsEnabled must be false", restoredPrefs.readReceiptsEnabled)
+        assertEquals("Restored typingIndicatorMode must be NOBODY", TypingPrivacyMode.NOBODY, restoredPrefs.typingIndicatorMode)
+        assertFalse("Restored showOnlineStatus must be false", restoredPrefs.showOnlineStatus)
+        assertEquals("Restored onlinePresenceMode must be MY_CONTACTS", OnlinePrivacyMode.MY_CONTACTS, restoredPrefs.onlinePresenceMode)
+        assertEquals("Restored offlinePresenceMode must be LAST_SEEN_RECENTLY", com.nexa.app.data.local.preferences.OfflinePresenceMode.LAST_SEEN_RECENTLY, restoredPrefs.offlinePresenceMode)
+        assertFalse("Restored showTransportBadges must be false", restoredPrefs.showTransportBadges)
+        assertEquals("Restored preferredTransportRoute must be MESH", TransportRouteMode.MESH, restoredPrefs.preferredTransportRoute)
+    }
+
+    @Test
+    fun chatPrivacyPrefs_corruptedValues_safelyFallbackToDefaults() {
+        val fakePrefs = FakeSharedPreferences()
+        fakePrefs.edit()
+            .putString("typing_indicator_mode", "CORRUPTED_VALUE")
+            .putString("online_presence_mode", "INVALID_MODE")
+            .putString("offline_status_mode", "UNKNOWN_STATUS")
+            .putString("preferred_transport_route", "NON_EXISTENT")
+            .apply()
+
+        val privacyPrefs = ChatPrivacyPrefs(fakePrefs)
+        assertEquals(TypingPrivacyMode.EVERYONE, privacyPrefs.typingIndicatorMode)
+        assertEquals(OnlinePrivacyMode.EVERYONE, privacyPrefs.onlinePresenceMode)
+        assertEquals(com.nexa.app.data.local.preferences.OfflinePresenceMode.TAKING_A_BREAK, privacyPrefs.offlinePresenceMode)
+        assertEquals(TransportRouteMode.AUTO, privacyPrefs.preferredTransportRoute)
+    }
+
+    @Test
+    fun offlinePresenceMode_statusText_formatsCorrectlyForAllModes() {
+        val name = "Bob"
+        assertEquals("Offline", com.nexa.app.data.local.preferences.OfflinePresenceMode.SHOW_OFFLINE.statusText(name))
+        assertEquals("Last seen recently", com.nexa.app.data.local.preferences.OfflinePresenceMode.LAST_SEEN_RECENTLY.statusText(name))
+        assertEquals("Bob is taking a break — back soon", com.nexa.app.data.local.preferences.OfflinePresenceMode.TAKING_A_BREAK.statusText(name))
+
+        assertEquals("Show Offline", com.nexa.app.data.local.preferences.OfflinePresenceMode.SHOW_OFFLINE.label)
+        assertEquals("Show Last Seen Recently", com.nexa.app.data.local.preferences.OfflinePresenceMode.LAST_SEEN_RECENTLY.label)
+        assertEquals("Taking a Break", com.nexa.app.data.local.preferences.OfflinePresenceMode.TAKING_A_BREAK.label)
+    }
+
+    @Test
+    fun enumLabels_andDisplayProperties_areAccurate() {
+        assertEquals("Everyone", TypingPrivacyMode.EVERYONE.label)
+        assertEquals("Nobody", TypingPrivacyMode.NOBODY.label)
+
+        assertEquals("Everyone", OnlinePrivacyMode.EVERYONE.label)
+        assertEquals("My Contacts", OnlinePrivacyMode.MY_CONTACTS.label)
+        assertEquals("Nobody", OnlinePrivacyMode.NOBODY.label)
+
+        assertEquals("Auto (Recommended)", TransportRouteMode.AUTO.label)
+        assertEquals("Internet Only", TransportRouteMode.INTERNET.label)
+        assertEquals("Local Mesh Only", TransportRouteMode.MESH.label)
+        assertEquals("Binary Data SMS", TransportRouteMode.SMS.label)
     }
 
     @Test
@@ -197,6 +267,56 @@ class ChatPrivacyAndTransportUnitTests {
         advanceUntilIdle()
 
         assertTrue("Typing pulse must be dispatched when mode is EVERYONE", typingSentCount >= 1)
+    }
+
+    @Test
+    fun presenceGatekeeper_whenOnlineStatusDisabledOrNobody_suppressesPresenceObservation() = runTest {
+        val presenceFlow = MutableSharedFlow<Pair<String, Boolean>>(extraBufferCapacity = 8)
+        val fakeRepository = object : ChatRepository {
+            override fun getMessages(conversationId: String): Flow<List<Message>> = flowOf(emptyList())
+            override fun getConversations(): Flow<List<ChatConversation>> = flowOf(emptyList())
+            override suspend fun sendMessage(
+                recipientNxId: String,
+                text: String,
+                transport: TransportType,
+                destinationPhone: String?
+            ): Result<Message> = Result.failure(UnsupportedOperationException())
+            override suspend fun markConversationRead(conversationId: String) {}
+            override suspend fun createOrGetConversation(participantNxId: String, participantName: String?): ChatConversation {
+                return ChatConversation("c1", participantNxId, participantName ?: participantNxId, "", 0L, 0)
+            }
+            override fun startConnection() {}
+            override fun stopConnection() {}
+            override fun getConnectionState(): StateFlow<ConnectionState> = MutableStateFlow(ConnectionState.Connected)
+            override suspend fun handleIncomingDataSmsPacket(packet: NexaWirePacket) {}
+            override fun sendTypingIndicator(recipientNxId: String, conversationId: String, isTyping: Boolean) {}
+            override fun getTypingEvents(): Flow<Pair<String, Boolean>> = flowOf()
+            override fun getPresenceEvents(): Flow<Pair<String, Boolean>> = presenceFlow
+        }
+
+        val fakePrefs = FakeSharedPreferences()
+        val privacyPrefs = ChatPrivacyPrefs(fakePrefs)
+        val viewModel = ChatViewModel(chatRepository = fakeRepository, chatPrivacyPrefs = privacyPrefs)
+        viewModel.onEvent(ChatUiEvent.Init("c1", "NX-PEER-1", "Alice"))
+        advanceUntilIdle()
+
+        // 1. When enabled, peer online event is reflected
+        presenceFlow.tryEmit(Pair("NX-PEER-1", true))
+        advanceUntilIdle()
+        assertTrue("Peer online must be visible when privacy settings allow it", viewModel.uiState.value.isPeerOnline)
+
+        // 2. When showOnlineStatus is toggled OFF, peer online must be suppressed (reciprocal privacy)
+        privacyPrefs.showOnlineStatus = false
+        presenceFlow.tryEmit(Pair("NX-PEER-1", true))
+        advanceUntilIdle()
+        assertFalse("Peer online must be suppressed when user disables showOnlineStatus", viewModel.uiState.value.isPeerOnline)
+
+        // 3. When onlinePresenceMode is NOBODY, peer online must also be suppressed
+        privacyPrefs.showOnlineStatus = true
+        privacyPrefs.onlinePresenceMode = OnlinePrivacyMode.NOBODY
+        presenceFlow.tryEmit(Pair("NX-PEER-1", true))
+        advanceUntilIdle()
+        assertFalse("Peer online must be suppressed when user sets presenceMode to NOBODY", viewModel.uiState.value.isPeerOnline)
     }
 
     @Test

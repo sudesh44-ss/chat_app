@@ -1,79 +1,86 @@
 package com.nexa.app.presentation.settings.notifications
 
+import android.Manifest
 import android.app.TimePickerDialog
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.CellTower
-import androidx.compose.material.icons.filled.DoNotDisturb
-import androidx.compose.material.icons.filled.Group
-import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Notifications
-import androidx.compose.material.icons.filled.RadioButtonChecked
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.Schedule
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.NotificationsOff
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.core.content.PermissionChecker
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import com.nexa.app.R
 import com.nexa.app.core.notification.NexaNotificationChannelManager
-import com.nexa.app.core.theme.NexaBadgeMonospace
+import com.nexa.app.core.notification.QuietHoursEngine
+import com.nexa.app.core.theme.NexaPureBlack
+import com.nexa.app.core.theme.NexaPureWhite
 import com.nexa.app.core.theme.NexaVerifiedGreen
-import com.nexa.app.core.theme.NexaWarningOrange
+import com.nexa.app.core.theme.isNexaAmoled
 import com.nexa.app.data.local.preferences.LockScreenMode
-import com.nexa.app.presentation.settings.components.SystemPermissionWarningBanner
+import com.nexa.app.presentation.settings.components.SettingsCard
+import com.nexa.app.presentation.settings.components.SettingsDetailPage
+import com.nexa.app.presentation.settings.components.SettingsDivider
+import com.nexa.app.presentation.settings.components.SettingsSectionLabel
+import com.nexa.app.presentation.settings.components.SettingsSwitchRow
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Redesigned Notifications Settings Screen for NEXA.
+ *
+ * Implements:
+ * 1. Direct Message Alerts & Message Preview privacy.
+ * 2. Group Chats alerts & Mentions Only filtering.
+ * 3. Incoming Voice & Video Call Alerts with Quiet Hours exception.
+ * 4. Lock Screen Privacy selection (Show All, Hide Sensitive Content, Don't Show).
+ * 5. Full Quiet Hours scheduling (Start/End times, 7-day weekday pills, live status).
+ * 6. File Transfer Progress & Mesh Discovery toggles.
+ * 7. Live Android permission & disabled notification channel detection.
+ * 8. Full theme compliance (System, Dark, AMOLED, Light).
+ */
 @Composable
 fun NotificationSettingsScreen(
     viewModel: NotificationSettingsViewModel,
@@ -83,454 +90,439 @@ fun NotificationSettingsScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val state by viewModel.preferencesState.collectAsState()
     val isSystemPermissionGranted by viewModel.isSystemPermissionGranted.collectAsState()
+    val disabledChannels by viewModel.disabledChannels.collectAsState()
 
-    // Sync system notification permission on resume
+    // Permission launcher for Android 13+ (TIRAMISU, API 33)
+    val permissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        viewModel.onEvent(NotificationSettingsEvent.UpdateSystemPermissionState(granted))
+        val disabled = NexaNotificationChannelManager.getDisabledChannels(context)
+        viewModel.onEvent(NotificationSettingsEvent.UpdateDisabledChannels(disabled))
+    }
+
+    // Refresh notification & channel permission state on resume
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 val enabled = NotificationManagerCompat.from(context).areNotificationsEnabled()
                 viewModel.onEvent(NotificationSettingsEvent.UpdateSystemPermissionState(enabled))
+                val disabled = NexaNotificationChannelManager.getDisabledChannels(context)
+                viewModel.onEvent(NotificationSettingsEvent.UpdateDisabledChannels(disabled))
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        text = "Notifications",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold
+    SettingsDetailPage(
+        title = "Notifications",
+        onBack = onBack
+    ) {
+        // 1. Permission Warning Banner (displayed only when notifications are disabled)
+        if (!isSystemPermissionGranted) {
+            NotificationPermissionBanner(
+                onAction = {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        val status = ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
+                        if (status != PermissionChecker.PERMISSION_GRANTED) {
+                            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                        } else {
+                            NexaNotificationChannelManager.openAppNotificationSettings(context)
+                        }
+                    } else {
+                        NexaNotificationChannelManager.openAppNotificationSettings(context)
+                    }
+                }
+            )
+        }
+
+        // 2. Disabled Channel Notice (if user disabled individual channels in Android OS)
+        if (disabledChannels.isNotEmpty() && isSystemPermissionGranted) {
+            DisabledChannelWarningCard(
+                disabledChannels = disabledChannels,
+                onOpenChannel = { channelId ->
+                    NexaNotificationChannelManager.openChannelSettings(context, channelId)
+                }
+            )
+        }
+
+        // ==========================================
+        // SECTION 1: DIRECT MESSAGES
+        // ==========================================
+        SettingsSectionLabel(text = "Direct Messages")
+        SettingsCard {
+            SettingsSwitchRow(
+                title = "Direct Message Alerts",
+                subtitle = "Heads-up alert banners and notifications for private chats",
+                checked = state.directMessagesEnabled,
+                onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleDirectMessages(it)) }
+            )
+
+            SettingsDivider()
+
+            SettingsSwitchRow(
+                title = "Message Preview",
+                subtitle = "Show decrypted text snippet in notification previews",
+                checked = state.messagePreviewEnabled,
+                enabled = state.directMessagesEnabled,
+                onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleMessagePreview(it)) }
+            )
+
+            SettingsDivider()
+
+            ChannelLinkRow(
+                label = "Configure Sound & Vibration in Android",
+                onClick = {
+                    NexaNotificationChannelManager.openChannelSettings(
+                        context,
+                        NexaNotificationChannelManager.CHANNEL_MESSAGES_DIRECT
                     )
-                },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = "Back"
-                        )
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background
-                )
+                }
             )
-        },
-        containerColor = MaterialTheme.colorScheme.background
-    ) { paddingValues ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 18.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(18.dp)
-        ) {
-            // System Permission Warning Banner
-            SystemPermissionWarningBanner(
-                isSystemPermissionGranted = isSystemPermissionGranted,
-                onOpenAppSettings = { NexaNotificationChannelManager.openAppNotificationSettings(context) }
+        }
+
+        // ==========================================
+        // SECTION 2: GROUP CHATS
+        // ==========================================
+        SettingsSectionLabel(text = "Group Chats")
+        SettingsCard {
+            SettingsSwitchRow(
+                title = "Group Notifications",
+                subtitle = "Notification tray alerts and soft chimes for group conversations",
+                checked = state.groupsEnabled,
+                onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleGroups(it)) }
             )
 
-            // Section 1: Direct Messages
-            SettingsCategoryCard(
-                categoryTitle = "Direct Messages",
-                categoryIcon = Icons.AutoMirrored.Filled.Chat,
-                accentColor = MaterialTheme.colorScheme.primary
-            ) {
-                SwitchSettingRow(
-                    title = "Direct Message Alerts",
-                    subtitle = "Heads-up alert banners and notifications for private chats",
-                    checked = state.directMessagesEnabled,
-                    onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleDirectMessages(it)) }
-                )
+            SettingsDivider()
 
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+            SettingsSwitchRow(
+                title = "Mentions Only",
+                subtitle = "Only alert when your @handle or name is directly mentioned",
+                checked = state.groupMentionsOnly,
+                enabled = state.groupsEnabled,
+                onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleGroupMentionsOnly(it)) }
+            )
 
-                SwitchSettingRow(
-                    title = "Message Preview",
-                    subtitle = "Show decrypted text snippet in the notification banner",
-                    checked = state.messagePreviewEnabled,
-                    enabled = state.directMessagesEnabled,
-                    onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleMessagePreview(it)) }
-                )
+            SettingsDivider()
 
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+            ChannelLinkRow(
+                label = "Configure Group Channel Settings",
+                onClick = {
+                    NexaNotificationChannelManager.openChannelSettings(
+                        context,
+                        NexaNotificationChannelManager.CHANNEL_MESSAGES_GROUP
+                    )
+                }
+            )
+        }
 
-                ChannelConfigLinkRow(
-                    label = "Configure Sound & Vibration in Android",
-                    onClick = {
-                        NexaNotificationChannelManager.openChannelSettings(
-                            context,
-                            NexaNotificationChannelManager.CHANNEL_MESSAGES_DIRECT
-                        )
-                    }
-                )
-            }
+        // ==========================================
+        // SECTION 3: VOICE & VIDEO CALLS
+        // ==========================================
+        SettingsSectionLabel(text = "Voice & Video Calls")
+        SettingsCard {
+            SettingsSwitchRow(
+                title = "Incoming Call Alerts",
+                subtitle = "Ringtone and full-screen alerts for incoming P2P calls",
+                checked = state.callsEnabled,
+                onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleCalls(it)) }
+            )
 
-            // Section 2: Group Messages
-            SettingsCategoryCard(
-                categoryTitle = "Group Chats",
-                categoryIcon = Icons.Default.Group,
-                accentColor = NexaVerifiedGreen
-            ) {
-                SwitchSettingRow(
-                    title = "Group Notifications",
-                    subtitle = "Notification tray alerts and soft chimes for group messages",
-                    checked = state.groupsEnabled,
-                    onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleGroups(it)) }
-                )
+            SettingsDivider()
 
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+            SettingsSwitchRow(
+                title = "Allow Calls During Quiet Hours",
+                subtitle = "Urgent incoming calls can bypass DND quiet hours suppression",
+                checked = state.allowCallsDuringQuietHours,
+                enabled = state.callsEnabled,
+                onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleAllowCallsDuringQuietHours(it)) }
+            )
 
-                SwitchSettingRow(
-                    title = "Mentions Only",
-                    subtitle = "Only alert when your @handle or name is directly mentioned",
-                    checked = state.groupMentionsOnly,
-                    enabled = state.groupsEnabled,
-                    onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleGroupMentionsOnly(it)) }
-                )
+            SettingsDivider()
 
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
+            ChannelLinkRow(
+                label = "Configure Ringtone in Android Settings",
+                onClick = {
+                    NexaNotificationChannelManager.openChannelSettings(
+                        context,
+                        NexaNotificationChannelManager.CHANNEL_CALLS_INCOMING
+                    )
+                }
+            )
+        }
 
-                ChannelConfigLinkRow(
-                    label = "Configure Group Channel Settings",
-                    onClick = {
-                        NexaNotificationChannelManager.openChannelSettings(
-                            context,
-                            NexaNotificationChannelManager.CHANNEL_MESSAGES_GROUP
-                        )
-                    }
-                )
-            }
+        // ==========================================
+        // SECTION 4: LOCK SCREEN PRIVACY
+        // ==========================================
+        SettingsSectionLabel(text = "Lock Screen Privacy")
+        SettingsCard {
+            Text(
+                text = "Controls how encrypted notifications appear when your device is locked:",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp)
+            )
 
-            // Section 3: Calls
-            SettingsCategoryCard(
-                categoryTitle = "Voice & Video Calls",
-                categoryIcon = Icons.Default.Call,
-                accentColor = NexaWarningOrange
-            ) {
-                SwitchSettingRow(
-                    title = "Incoming Call Alerts",
-                    subtitle = "Ringtone and full-screen notifications for incoming P2P calls",
-                    checked = state.callsEnabled,
-                    onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleCalls(it)) }
-                )
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
-
-                SwitchSettingRow(
-                    title = "Allow Calls During Quiet Hours",
-                    subtitle = "Urgent incoming calls can bypass DND quiet hours",
-                    checked = state.allowCallsDuringQuietHours,
-                    enabled = state.callsEnabled,
-                    onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleAllowCallsDuringQuietHours(it)) }
-                )
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
-
-                ChannelConfigLinkRow(
-                    label = "Configure Ringtone in Android Settings",
-                    onClick = {
-                        NexaNotificationChannelManager.openChannelSettings(
-                            context,
-                            NexaNotificationChannelManager.CHANNEL_CALLS_INCOMING
-                        )
-                    }
+            LockScreenMode.values().forEachIndexed { index, mode ->
+                if (index > 0) SettingsDivider()
+                LockScreenModeOptionRow(
+                    mode = mode,
+                    isSelected = state.lockScreenVisibility == mode,
+                    onSelect = { viewModel.onEvent(NotificationSettingsEvent.SetLockScreenMode(mode)) }
                 )
             }
+        }
 
-            // Section 4: Lock Screen Privacy (Zero E2EE Leaks)
-            SettingsCategoryCard(
-                categoryTitle = "Lock Screen Privacy",
-                categoryIcon = Icons.Default.Lock,
-                accentColor = NexaBadgeMonospace
-            ) {
-                Text(
-                    text = "Controls how encrypted notifications appear on your Android lock screen:",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
+        // ==========================================
+        // SECTION 5: QUIET HOURS (DO NOT DISTURB)
+        // ==========================================
+        SettingsSectionLabel(text = "Quiet Hours (Do Not Disturb)")
+        SettingsCard {
+            SettingsSwitchRow(
+                title = "Enable Quiet Hours",
+                subtitle = "Mute chimes and vibrations during your chosen schedule",
+                checked = state.isQuietHoursEnabled,
+                onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleQuietHours(it)) }
+            )
 
-                Spacer(modifier = Modifier.height(8.dp))
+            if (state.isQuietHoursEnabled) {
+                SettingsDivider()
 
-                LockScreenMode.values().forEach { mode ->
-                    val isSelected = state.lockScreenVisibility == mode
-                    Row(
+                // Status Indicator Badge
+                val isCurrentlyActive = QuietHoursEngine.isWithinQuietHoursWindow(state)
+                val statusDescription = QuietHoursEngine.getQuietHoursStatusDescription(state)
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { viewModel.onEvent(NotificationSettingsEvent.SetLockScreenMode(mode)) }
-                            .padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(
-                            imageVector = if (isSelected) Icons.Default.RadioButtonChecked else Icons.Default.RadioButtonUnchecked,
-                            contentDescription = null,
-                            tint = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.size(20.dp)
-                        )
-                        Spacer(modifier = Modifier.width(12.dp))
-                        Column {
-                            Text(
-                                text = mode.label,
-                                style = MaterialTheme.typography.bodyMedium,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal
+                            .size(8.dp)
+                            .background(
+                                color = if (isCurrentlyActive) NexaVerifiedGreen else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                                shape = CircleShape
                             )
-                            Text(
-                                text = mode.description,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = statusDescription,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Medium,
+                        color = if (isCurrentlyActive) NexaVerifiedGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+
+                SettingsDivider()
+
+                // Start & End Time Pickers
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    QuietHoursTimeButton(
+                        label = "START TIME",
+                        hour = state.quietHoursStartHour,
+                        minute = state.quietHoursStartMinute,
+                        onTimeSelected = { h, m ->
+                            viewModel.onEvent(
+                                NotificationSettingsEvent.SetQuietHoursWindow(
+                                    startHour = h,
+                                    startMin = m,
+                                    endHour = state.quietHoursEndHour,
+                                    endMin = state.quietHoursEndMinute
+                                )
+                            )
+                        }
+                    )
+
+                    Text(
+                        text = "to",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    QuietHoursTimeButton(
+                        label = "END TIME",
+                        hour = state.quietHoursEndHour,
+                        minute = state.quietHoursEndMinute,
+                        onTimeSelected = { h, m ->
+                            viewModel.onEvent(
+                                NotificationSettingsEvent.SetQuietHoursWindow(
+                                    startHour = state.quietHoursStartHour,
+                                    startMin = state.quietHoursStartMinute,
+                                    endHour = h,
+                                    endMin = m
+                                )
+                            )
+                        }
+                    )
+                }
+
+                SettingsDivider()
+
+                // 7-Day Weekday Selector Pills
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                ) {
+                    Text(
+                        text = "ACTIVE DAYS: ${state.quietHoursDaysFormatted.uppercase()}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 0.6.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        val dayLabels = listOf("M", "T", "W", "T", "F", "S", "S")
+                        for (day in 1..7) {
+                            val isSelected = state.quietHoursDays.contains(day)
+                            DayPillButton(
+                                label = dayLabels[day - 1],
+                                isSelected = isSelected,
+                                onClick = { viewModel.onEvent(NotificationSettingsEvent.ToggleQuietHoursDay(day)) }
                             )
                         }
                     }
                 }
-            }
 
-            // Section 5: Quiet Hours / DND
-            SettingsCategoryCard(
-                categoryTitle = "Quiet Hours (Do Not Disturb)",
-                categoryIcon = Icons.Default.DoNotDisturb,
-                accentColor = MaterialTheme.colorScheme.error
-            ) {
-                SwitchSettingRow(
-                    title = "Enable Quiet Hours",
-                    subtitle = "Mute chimes and vibrations during your chosen schedule",
-                    checked = state.isQuietHoursEnabled,
-                    onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleQuietHours(it)) }
-                )
+                SettingsDivider()
 
-                if (state.isQuietHoursEnabled) {
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Start Time Selector
-                        TimeSelectorButton(
-                            label = "Start Time",
-                            hour = state.quietHoursStartHour,
-                            minute = state.quietHoursStartMinute,
-                            onTimeSelected = { h, m ->
-                                viewModel.onEvent(
-                                    NotificationSettingsEvent.SetQuietHoursWindow(
-                                        startHour = h,
-                                        startMin = m,
-                                        endHour = state.quietHoursEndHour,
-                                        endMin = state.quietHoursEndMinute
-                                    )
-                                )
-                            }
-                        )
-
-                        Text("to", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-
-                        // End Time Selector
-                        TimeSelectorButton(
-                            label = "End Time",
-                            hour = state.quietHoursEndHour,
-                            minute = state.quietHoursEndMinute,
-                            onTimeSelected = { h, m ->
-                                viewModel.onEvent(
-                                    NotificationSettingsEvent.SetQuietHoursWindow(
-                                        startHour = state.quietHoursStartHour,
-                                        startMin = state.quietHoursStartMinute,
-                                        endHour = h,
-                                        endMin = m
-                                    )
-                                )
-                            }
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Zero Server Knowledge: Quiet hours operate strictly on your phone's clock (${state.quietHoursFormatted}).",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f)
-                    )
-                }
-            }
-
-            // Section 6: Transfers & Nearby Mesh Discovery
-            SettingsCategoryCard(
-                categoryTitle = "Transfers & Mesh Discovery",
-                categoryIcon = Icons.Default.CellTower,
-                accentColor = MaterialTheme.colorScheme.tertiary
-            ) {
-                SwitchSettingRow(
-                    title = "File Transfer Progress",
-                    subtitle = "Silent ongoing progress bar while streaming files over WebRTC",
-                    checked = state.fileTransfersEnabled,
-                    onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleFileTransfers(it)) }
-                )
-
-                HorizontalDivider(modifier = Modifier.padding(vertical = 4.dp), color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.25f))
-
-                SwitchSettingRow(
-                    title = "Mesh Discovery Alerts",
-                    subtitle = "Passive silent ping when new Bluetooth LE mesh nodes connect (debounced)",
-                    checked = state.meshDiscoveryAlertsEnabled,
-                    onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleMeshDiscovery(it)) }
+                Text(
+                    text = "Zero Server Knowledge: Quiet hours operate strictly on your phone's clock with support for overnight schedules.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f),
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                 )
             }
-
-            // System Channels Master Link
-            OutlinedButton(
-                onClick = { NexaNotificationChannelManager.openAppNotificationSettings(context) },
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 6.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text("Manage All Notification Channels in Android Settings")
-            }
-
-            Spacer(modifier = Modifier.height(16.dp))
         }
-    }
-}
 
-@Composable
-private fun SettingsCategoryCard(
-    categoryTitle: String,
-    categoryIcon: ImageVector,
-    accentColor: androidx.compose.ui.graphics.Color,
-    content: @Composable () -> Unit
-) {
-    Card(
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
-                shape = RoundedCornerShape(16.dp)
+        // ==========================================
+        // SECTION 6: TRANSFERS & MESH DISCOVERY
+        // ==========================================
+        SettingsSectionLabel(text = "Transfers & Mesh Discovery")
+        SettingsCard {
+            SettingsSwitchRow(
+                title = "File Transfer Progress",
+                subtitle = "Silent ongoing progress bar while streaming files over WebRTC",
+                checked = state.fileTransfersEnabled,
+                onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleFileTransfers(it)) }
             )
-    ) {
-        Column(
+
+            SettingsDivider()
+
+            SettingsSwitchRow(
+                title = "Mesh Discovery Alerts",
+                subtitle = "Passive silent ping when new Bluetooth LE mesh nodes connect (debounced)",
+                checked = state.meshDiscoveryAlertsEnabled,
+                onCheckedChange = { viewModel.onEvent(NotificationSettingsEvent.ToggleMeshDiscovery(it)) }
+            )
+        }
+
+        // ==========================================
+        // SECTION 7: SYSTEM CHANNELS MASTER LINK
+        // ==========================================
+        OutlinedButton(
+            onClick = { NexaNotificationChannelManager.openAppNotificationSettings(context) },
+            shape = RoundedCornerShape(14.dp),
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
+                .padding(vertical = 4.dp)
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .size(32.dp)
-                        .background(accentColor.copy(alpha = 0.15f), CircleShape),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = categoryIcon,
-                        contentDescription = null,
-                        tint = accentColor,
-                        modifier = Modifier.size(18.dp)
-                    )
-                }
-                Spacer(modifier = Modifier.width(10.dp))
-                Text(
-                    text = categoryTitle,
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold
-                )
-            }
-
-            content()
+            Icon(
+                painter = painterResource(id = R.drawable.ic_nexa_settings),
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "Manage All Notification Channels in Android Settings",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium
+            )
         }
+
+        Spacer(modifier = Modifier.height(16.dp))
     }
 }
 
 @Composable
-private fun SwitchSettingRow(
-    title: String,
-    subtitle: String,
-    checked: Boolean,
-    enabled: Boolean = true,
-    onCheckedChange: (Boolean) -> Unit
+private fun LockScreenModeOptionRow(
+    mode: LockScreenMode,
+    isSelected: Boolean,
+    onSelect: () -> Unit
 ) {
+    val isDark = isSystemInDarkTheme()
+    val primaryText = if (isDark) Color.White else Color(0xFF111111)
+    val secondaryText = if (isDark) Color(0xFFA0A7B5) else Color(0xFF555B66)
+
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 4.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
+            .clickable(onClick = onSelect)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = title,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.SemiBold,
-                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
+        RadioButton(
+            selected = isSelected,
+            onClick = onSelect,
+            colors = RadioButtonDefaults.colors(
+                selectedColor = MaterialTheme.colorScheme.primary,
+                unselectedColor = secondaryText
             )
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = if (enabled) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
-            )
-        }
+        )
 
         Spacer(modifier = Modifier.width(12.dp))
 
-        Switch(
-            checked = checked,
-            onCheckedChange = onCheckedChange,
-            enabled = enabled
-        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = mode.label,
+                fontSize = 14.sp,
+                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.SemiBold,
+                color = primaryText
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = mode.description,
+                fontSize = 12.sp,
+                color = secondaryText
+            )
+        }
     }
 }
 
 @Composable
-private fun ChannelConfigLinkRow(
-    label: String,
-    onClick: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(vertical = 6.dp),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-            color = MaterialTheme.colorScheme.primary
-        )
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.size(16.dp)
-        )
-    }
-}
-
-@Composable
-private fun TimeSelectorButton(
+private fun QuietHoursTimeButton(
     label: String,
     hour: Int,
     minute: Int,
     onTimeSelected: (Int, Int) -> Unit
 ) {
     val context = LocalContext.current
+    val isDark = isSystemInDarkTheme()
+    val isAmoled = isNexaAmoled()
+    val buttonBg = when {
+        !isDark -> Color(0xFFF1F5F9)
+        isAmoled -> Color(0xFF161618)
+        else -> Color(0xFF242933)
+    }
+
     Surface(
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-        shape = RoundedCornerShape(10.dp),
+        color = buttonBg,
+        shape = RoundedCornerShape(12.dp),
         modifier = Modifier.clickable {
             TimePickerDialog(
                 context,
@@ -544,14 +536,17 @@ private fun TimeSelectorButton(
         }
     ) {
         Column(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 10.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Text(
                 text = label,
-                style = MaterialTheme.typography.labelSmall,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.5.sp,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
+            Spacer(modifier = Modifier.height(2.dp))
             Text(
                 text = String.format("%02d:%02d", hour, minute),
                 style = MaterialTheme.typography.titleMedium.copy(
@@ -559,6 +554,188 @@ private fun TimeSelectorButton(
                     fontWeight = FontWeight.Bold
                 ),
                 color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+@Composable
+private fun DayPillButton(
+    label: String,
+    isSelected: Boolean,
+    onClick: () -> Unit
+) {
+    val isDark = isSystemInDarkTheme()
+    val isAmoled = isNexaAmoled()
+
+    val bg = when {
+        isSelected -> MaterialTheme.colorScheme.primary
+        !isDark -> Color(0xFFF1F5F9)
+        isAmoled -> Color(0xFF161618)
+        else -> Color(0xFF242933)
+    }
+
+    val textCol = when {
+        isSelected -> NexaPureBlack
+        isDark -> NexaPureWhite
+        else -> Color(0xFF111111)
+    }
+
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .background(bg, CircleShape)
+            .border(
+                width = 1.dp,
+                color = if (isSelected) MaterialTheme.colorScheme.primary else Color(0x22888888),
+                shape = CircleShape
+            )
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = label,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+            color = textCol
+        )
+    }
+}
+
+@Composable
+private fun ChannelLinkRow(
+    label: String,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = label,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+            color = MaterialTheme.colorScheme.primary
+        )
+        Icon(
+            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(16.dp)
+        )
+    }
+}
+
+@Composable
+private fun NotificationPermissionBanner(
+    onAction: () -> Unit
+) {
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.9f)
+        ),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onAction)
+    ) {
+        Row(
+            modifier = Modifier.padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.NotificationsOff,
+                contentDescription = "Notifications Disabled",
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(28.dp)
+            )
+
+            Spacer(modifier = Modifier.width(14.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "Notifications Disabled in System Settings",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+                Text(
+                    text = "Android is currently blocking all alerts. Tap here to enable notifications.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
+                )
+            }
+
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onErrorContainer,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun DisabledChannelWarningCard(
+    disabledChannels: List<String>,
+    onOpenChannel: (String) -> Unit
+) {
+    val firstChannel = disabledChannels.first()
+    val channelLabel = when (firstChannel) {
+        NexaNotificationChannelManager.CHANNEL_MESSAGES_DIRECT -> "Direct Messages"
+        NexaNotificationChannelManager.CHANNEL_MESSAGES_GROUP -> "Group Chats"
+        NexaNotificationChannelManager.CHANNEL_CALLS_INCOMING -> "Incoming Calls"
+        NexaNotificationChannelManager.CHANNEL_FILE_TRANSFER -> "File Transfers"
+        NexaNotificationChannelManager.CHANNEL_MESH_DISCOVERY -> "Mesh Discovery"
+        else -> "Notification Channel"
+    }
+
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = Color(0x33FFB74D)
+        ),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { onOpenChannel(firstChannel) }
+    ) {
+        Row(
+            modifier = Modifier.padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.WarningAmber,
+                contentDescription = "Channel Disabled",
+                tint = Color(0xFFFFB74D),
+                modifier = Modifier.size(24.dp)
+            )
+
+            Spacer(modifier = Modifier.width(12.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "$channelLabel channel is disabled",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Text(
+                    text = "Android is blocking alerts for this category. Tap to configure channel settings.",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Icon(
+                imageVector = Icons.Default.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp)
             )
         }
     }

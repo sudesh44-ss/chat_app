@@ -108,6 +108,9 @@ class SecurityAndMultiDeviceTests {
     }
 
     class FakeMessageDao : MessageDao {
+        override suspend fun updateMessageContent(packetId: String, newContent: String, editedAt: Long): Int = 0
+        override suspend fun tombstoneMessage(packetId: String, tombstoneText: String): Int = 0
+        override suspend fun getUnreadIncomingPacketIds(conversationId: String): List<String> = emptyList()
         val messages = mutableMapOf<String, MessageEntity>()
 
         override fun getMessagesFlow(conversationId: String): Flow<List<MessageEntity>> =
@@ -303,6 +306,33 @@ class SecurityAndMultiDeviceTests {
         }
 
         override suspend fun countActiveChats(): Int = chats.values.count { !it.isArchived }
+
+        override suspend fun setPriorityBackup(conversationId: String, isPriority: Boolean, updatedAt: Long): Int {
+            val existing = chats[conversationId] ?: return 0
+            chats[conversationId] = existing.copy(isPriorityBackup = isPriority, updatedAt = updatedAt)
+            return 1
+        }
+        override fun getPriorityChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.isPriorityBackup })
+        override fun getPriorityPersonalChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.isPriorityBackup && it.chatType != "GROUP" })
+        override fun getPriorityGroupChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.isPriorityBackup && it.chatType == "GROUP" })
+        override suspend fun getPriorityChatIds(): List<String> = chats.values.filter { it.isPriorityBackup }.map { it.conversationId }
+        override fun getPriorityChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.isPriorityBackup })
+        override fun getPriorityPersonalChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.isPriorityBackup && it.chatType != "GROUP" })
+        override fun getPriorityGroupChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.isPriorityBackup && it.chatType == "GROUP" })
+        override suspend fun clearAllPriorityBackups(updatedAt: Long): Int {
+            chats.values.filter { it.isPriorityBackup }.forEach { chats[it.conversationId] = it.copy(isPriorityBackup = false, updatedAt = updatedAt) }
+            return 1
+        }
+        override suspend fun setConversationBackupPolicy(conversationId: String, policy: String, customCategoriesJson: String?, isPriority: Boolean, updatedAt: Long): Int {
+            val existing = chats[conversationId] ?: return 0
+            chats[conversationId] = existing.copy(backupPolicy = policy, customBackupCategories = customCategoriesJson, isPriorityBackup = isPriority, updatedAt = updatedAt)
+            return 1
+        }
+        override fun getAllPersonalChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.chatType != "GROUP" })
+        override fun getAllGroupChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.chatType == "GROUP" })
+        override suspend fun getAllChatsForBackup(): List<ChatEntity> = chats.values.toList()
+        override fun getExcludedChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.backupPolicy == "EXCLUDED" })
+        override fun getCustomPolicyChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.backupPolicy == "CUSTOM" })
     }
 
     class FakeUserDao : UserDao {
@@ -313,12 +343,22 @@ class SecurityAndMultiDeviceTests {
             return 1L
         }
 
+        override fun getProfileByNxIdFlow(nxId: String): Flow<UserEntity?> = flowOf(if (user?.nxId == nxId) user else null)
+        override suspend fun getProfileByNxId(nxId: String): UserEntity? = if (user?.nxId == nxId) user else null
         override suspend fun getLocalProfile(): UserEntity? = user
         override fun getActiveUserFlow(): Flow<UserEntity?> = flowOf(user)
         override suspend fun getActiveNxId(): String? = user?.nxId
         override suspend fun countVerifiedUsers(): Int = if (user?.isVerified == true) 1 else 0
         override suspend fun updateFullName(nxId: String, fullName: String): Int = 1
         override suspend fun updatePhoneNumber(nxId: String, phoneNumber: String): Int = 1
+        override suspend fun deleteDemoProfile(): Int {
+            if (user?.nxId == "NX-DEV-USER") { user = null; return 1 }
+            return 0
+        }
+        override suspend fun deleteProfileByNxId(nxId: String): Int {
+            if (user?.nxId == nxId) { user = null; return 1 }
+            return 0
+        }
         override suspend fun clearProfile(): Int {
             user = null
             return 1
@@ -380,6 +420,9 @@ class SecurityAndMultiDeviceTests {
         }
 
         override suspend fun updateDeviceContactPhotoUri(nxId: String, photoUri: String?): Int = 1
+        override suspend fun isUserBlocked(nxId: String): Boolean = false
+        override fun isUserBlockedSync(nxId: String): Boolean = false
+        override suspend fun getBlockedContactsList(): List<ContactEntity> = emptyList()
     }
 
     class FakeRatchetDao : RatchetDao {

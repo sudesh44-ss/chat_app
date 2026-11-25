@@ -85,13 +85,15 @@ type SessionRevoker interface {
 }
 
 type AuthHandler struct {
-	store             identity.IdentityRepository
-	otpService        *OtpService
-	reverseSmsService *ReverseSmsService
-	googleVerifier    *GoogleVerifier
-	supabaseVerifier  *SupabaseVerifier
-	challengeStore    ChallengeStore
-	revoker           SessionRevoker
+	store              identity.IdentityRepository
+	otpService         *OtpService
+	reverseSmsService  *ReverseSmsService
+	googleVerifier     *GoogleVerifier
+	supabaseVerifier   *SupabaseVerifier
+	firebaseVerifier   *FirebaseVerifier
+	truecallerVerifier *TruecallerVerifier
+	challengeStore     ChallengeStore
+	revoker            SessionRevoker
 }
 
 func NewAuthHandler(store identity.IdentityRepository, otpService *OtpService, googleVerifier *GoogleVerifier) *AuthHandler {
@@ -100,12 +102,14 @@ func NewAuthHandler(store identity.IdentityRepository, otpService *OtpService, g
 		revSms.SetGoogleVerifier(googleVerifier)
 	}
 	return &AuthHandler{
-		store:             store,
-		otpService:        otpService,
-		reverseSmsService: revSms,
-		googleVerifier:    googleVerifier,
-		supabaseVerifier:  NewSupabaseVerifier(),
-		challengeStore:    NewMemoryChallengeStore(),
+		store:              store,
+		otpService:         otpService,
+		reverseSmsService:  revSms,
+		googleVerifier:     googleVerifier,
+		supabaseVerifier:   NewSupabaseVerifier(),
+		firebaseVerifier:   NewFirebaseVerifier(),
+		truecallerVerifier: NewTruecallerVerifier(),
+		challengeStore:     NewMemoryChallengeStore(),
 	}
 }
 
@@ -115,9 +119,27 @@ func (h *AuthHandler) SetChallengeStore(cs ChallengeStore) {
 	}
 }
 
+func (h *AuthHandler) SetFirebaseVerifier(fv *FirebaseVerifier) {
+	if fv != nil {
+		h.firebaseVerifier = fv
+	}
+}
+
+func (h *AuthHandler) SetTruecallerVerifier(tv *TruecallerVerifier) {
+	if tv != nil {
+		h.truecallerVerifier = tv
+	}
+}
+
 func (h *AuthHandler) SetRedisClient(client *redis.Client) {
 	if h.reverseSmsService != nil {
 		h.reverseSmsService.SetRedisClient(client)
+	}
+	if h.firebaseVerifier != nil {
+		h.firebaseVerifier.SetRedisClient(client)
+	}
+	if h.truecallerVerifier != nil {
+		h.truecallerVerifier.SetRedisClient(client)
 	}
 }
 
@@ -126,11 +148,19 @@ func (h *AuthHandler) SetSessionRevoker(revoker SessionRevoker) {
 }
 
 func (h *AuthHandler) RegisterRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("/api/auth/google", h.handleGoogleAuth)
+	mux.HandleFunc("/api/verify/truecaller", h.handleTruecallerVerify)
+	mux.HandleFunc("/api/verify/firebase-phone", h.handleFirebaseVerify)
+	mux.HandleFunc("/api/verify/sms-radar/init", h.handleInitiateReverseVerify)
+	mux.HandleFunc("/api/verify/sms-radar/webhook", h.handleInboundSmsWebhook)
 	mux.HandleFunc("/api/v1/auth/otp/request", h.handleOtpRequest)
 	mux.HandleFunc("/api/v1/auth/otp/verify", h.handleOtpVerify)
 	mux.HandleFunc("/api/v1/auth/google", h.handleGoogleAuth)
 	mux.HandleFunc("/api/v1/auth/google/verify", h.handleGoogleVerify)
 	mux.HandleFunc("/api/v1/auth/supabase/verify", h.handleSupabaseVerify)
+	mux.HandleFunc("/api/v1/auth/firebase/verify", h.handleFirebaseVerify)
+	mux.HandleFunc("/api/v1/auth/truecaller/verify", h.handleTruecallerVerify)
+	mux.HandleFunc("/api/v1/auth/truecaller/nonce", h.handleTruecallerNonce)
 	mux.HandleFunc("/api/v1/auth/login-challenge", h.handleLoginChallenge)
 	mux.HandleFunc("/api/v1/auth/login-verify", h.handleLoginVerify)
 	mux.HandleFunc("/api/v1/auth/initiate-reverse-verify", h.handleInitiateReverseVerify)
@@ -1106,7 +1136,7 @@ func (h *AuthHandler) handleGoogleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	existingAcc, isExisting := h.store.GetAccountByGoogleID(claims.Subject)
+	existingAcc, isExisting := h.store.GetAccountByGoogleIDOrEmail(claims.Subject, claims.Email)
 	if !isExisting {
 		// New User: proceed to Profile Setup Screen with Google pre-filled metadata
 		w.Header().Set("Content-Type", "application/json")
@@ -1114,10 +1144,20 @@ func (h *AuthHandler) handleGoogleAuth(w http.ResponseWriter, r *http.Request) {
 			"status":         "NEW_USER",
 			"google_uid":     claims.Subject,
 			"email":          claims.Email,
+			"full_name":      claims.Name,
+			"fullName":       claims.Name,
+			"name":           claims.Name,
 			"prefill_name":   claims.Name,
+			"avatar_url":     claims.Picture,
 			"prefill_avatar": claims.Picture,
 		})
 		return
+	}
+
+	// Link Google UID if matched by verified email
+	if existingAcc.GoogleID == "" && claims.Subject != "" {
+		existingAcc.GoogleID = claims.Subject
+		_ = h.store.UpdateAccount(existingAcc)
 	}
 
 	// Existing user: check if this is the same physical device/hardware key
@@ -1133,6 +1173,15 @@ func (h *AuthHandler) handleGoogleAuth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	activeDevices := h.store.GetDevicesForAccount(existingAcc.NxID)
+	hasActiveDevice := len(activeDevices) > 0
+	activeDeviceName := ""
+	activeDeviceID := ""
+	if hasActiveDevice {
+		activeDeviceName = activeDevices[0].DeviceName
+		activeDeviceID = activeDevices[0].DeviceID
+	}
+
 	if isSameDevice {
 		// Scenario 1: Same device - Issue cryptographic challenge to verify hardware key possession
 		chal, err := h.challengeStore.CreateChallenge(r.Context(), existingAcc.NxID, req.DeviceID, 60*time.Second)
@@ -1143,16 +1192,33 @@ func (h *AuthHandler) handleGoogleAuth(w http.ResponseWriter, r *http.Request) {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"status":             "REQUIRE_DEVICE_CHALLENGE",
-			"challenge_id":       chal.ChallengeID,
-			"challenge":          chal.Challenge,
-			"nx_id":              existingAcc.NxID,
-			"device_id":          req.DeviceID,
-			"expires_in_seconds": 60,
-			"timestamp":          chal.CreatedAt,
+			"status":                  "REQUIRE_DEVICE_CHALLENGE",
+			"challenge_id":            chal.ChallengeID,
+			"challenge":               chal.Challenge,
+			"nx_id":                   existingAcc.NxID,
+			"nxId":                    existingAcc.NxID,
+			"device_id":               req.DeviceID,
+			"expires_in_seconds":      60,
+			"timestamp":               chal.CreatedAt,
+			"full_name":               existingAcc.ProfileName,
+			"fullName":                existingAcc.ProfileName,
+			"name":                    existingAcc.ProfileName,
+			"prefill_name":            existingAcc.ProfileName,
+			"avatar_url":              existingAcc.AvatarUrl,
+			"registered_phone_masked": maskPhone(existingAcc.PhoneNumber),
+			"masked_phone":            maskPhone(existingAcc.PhoneNumber),
+			"maskedPhone":             maskPhone(existingAcc.PhoneNumber),
+			"phone_number":            existingAcc.PhoneNumber,
+			"phone_verified":          existingAcc.PhoneVerified,
+			"public_key_ed25519":      existingAcc.PublicKeyHex,
+			"is_same_device":          true,
+			"has_active_device":       hasActiveDevice,
+			"active_device_name":      activeDeviceName,
+			"active_device_id":        activeDeviceID,
 			"user": map[string]interface{}{
 				"nx_id":      existingAcc.NxID,
 				"name":       existingAcc.ProfileName,
+				"full_name":  existingAcc.ProfileName,
 				"phone":      existingAcc.PhoneNumber,
 				"avatar_url": existingAcc.AvatarUrl,
 			},
@@ -1160,15 +1226,38 @@ func (h *AuthHandler) handleGoogleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Scenario 2: New device / device switch -> Require reverse SMS verification challenge
+	// Scenario 2: New device / device switch -> Return structured EXISTING_USER payload for Account Recovery
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":                  "REQUIRE_SIM_VERIFICATION",
+		"status":                  "EXISTING_USER",
 		"action":                  "REQUIRE_SIM_REVERIFY",
 		"google_uid":              existingAcc.GoogleID,
+		"nx_id":                   existingAcc.NxID,
+		"nxId":                    existingAcc.NxID,
+		"full_name":               existingAcc.ProfileName,
+		"fullName":                existingAcc.ProfileName,
+		"name":                    existingAcc.ProfileName,
+		"prefill_name":            existingAcc.ProfileName,
+		"avatar_url":              existingAcc.AvatarUrl,
+		"prefill_avatar":          existingAcc.AvatarUrl,
 		"registered_phone_masked": maskPhone(existingAcc.PhoneNumber),
+		"masked_phone":            maskPhone(existingAcc.PhoneNumber),
+		"maskedPhone":             maskPhone(existingAcc.PhoneNumber),
 		"phone_number":            existingAcc.PhoneNumber,
+		"phone_verified":          existingAcc.PhoneVerified,
+		"public_key_ed25519":      existingAcc.PublicKeyHex,
+		"is_same_device":          false,
+		"has_active_device":       hasActiveDevice,
+		"active_device_name":      activeDeviceName,
+		"active_device_id":        activeDeviceID,
 		"inbound_receiver_number": h.reverseSmsService.inboundReceiverNum,
+		"user": map[string]interface{}{
+			"nx_id":      existingAcc.NxID,
+			"name":       existingAcc.ProfileName,
+			"full_name":  existingAcc.ProfileName,
+			"phone":      existingAcc.PhoneNumber,
+			"avatar_url": existingAcc.AvatarUrl,
+		},
 	})
 }
 
@@ -1678,4 +1767,487 @@ func (h *AuthHandler) handleLoginVerify(w http.ResponseWriter, r *http.Request) 
 			"avatar_url": account.AvatarUrl,
 		},
 	})
+}
+
+// Truecaller Nonce generation for client SDK requestNonce binding
+func (h *AuthHandler) handleTruecallerNonce(w http.ResponseWriter, r *http.Request) {
+	nonceBytes := make([]byte, 8)
+	if _, err := rand.Read(nonceBytes); err != nil {
+		http.Error(w, "Failed to generate nonce", http.StatusInternalServerError)
+		return
+	}
+	nonce := fmt.Sprintf("NX-TC-%s", hex.EncodeToString(nonceBytes))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"nonce":      nonce,
+		"created_at": time.Now().UnixMilli(),
+		"expires_in": 300,
+	})
+}
+
+type FirebaseVerifyRequest struct {
+	FirebaseIdToken string `json:"firebase_id_token"`
+	GoogleAuthToken string `json:"google_auth_token,omitempty"`
+	Email           string `json:"email,omitempty"`
+	Name            string `json:"name,omitempty"`
+	AvatarURL       string `json:"avatar_url,omitempty"`
+	Gender          string `json:"gender,omitempty"`
+	Age             *int   `json:"age,omitempty"`
+	Bio             string `json:"bio,omitempty"`
+	PublicKeyHex    string `json:"public_key_hex"`
+	DhPublicKeyHex  string `json:"dh_public_key_hex,omitempty"`
+	DeviceID        string `json:"device_id,omitempty"`
+	DeviceName      string `json:"device_name,omitempty"`
+	IsReverify      bool   `json:"is_reverify,omitempty"`
+}
+
+func (h *AuthHandler) handleFirebaseVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req FirebaseVerifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Malformed request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if strings.TrimSpace(req.FirebaseIdToken) == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Missing firebase_id_token",
+			"code":  "MISSING_TOKEN",
+		})
+		return
+	}
+
+	// 1. Independently verify Firebase ID Token
+	if h.firebaseVerifier == nil {
+		h.firebaseVerifier = NewFirebaseVerifier()
+	}
+	claims, err := h.firebaseVerifier.VerifyIdToken(req.FirebaseIdToken)
+	if err != nil {
+		log.Printf("[FirebaseVerify] Token validation rejected from %s: %v", getClientIP(r), err)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+			"code":  "FIREBASE_VERIFICATION_FAILED",
+		})
+		return
+	}
+
+	// 2. Validate Google Identity if token provided
+	googleUID := ""
+	if req.GoogleAuthToken != "" && h.googleVerifier != nil {
+		gClaims, err := h.googleVerifier.VerifyIdToken(req.GoogleAuthToken)
+		if err == nil && gClaims != nil {
+			googleUID = gClaims.Subject
+			if req.Email == "" && gClaims.Email != "" {
+				req.Email = gClaims.Email
+			}
+			if req.Name == "" && gClaims.Name != "" {
+				req.Name = gClaims.Name
+			}
+		}
+	}
+
+	// 3. Finalize Phone Verified Session
+	resp, status, err := h.finalizePhoneVerifiedSession(
+		claims.PhoneNumber,
+		googleUID,
+		req.Email,
+		req.Name,
+		req.AvatarURL,
+		req.Gender,
+		req.Age,
+		req.Bio,
+		req.PublicKeyHex,
+		req.DhPublicKeyHex,
+		req.DeviceID,
+		req.DeviceName,
+		"firebase_phone_otp",
+	)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+			"code":  "VERIFICATION_COMMIT_FAILED",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(resp)
+}
+
+type TruecallerVerifyRequest struct {
+	PayloadBase64   string `json:"payload,omitempty"`
+	SignatureBase64 string `json:"signature,omitempty"`
+	RequestNonce    string `json:"request_nonce,omitempty"`
+	AccessToken       string `json:"access_token,omitempty"`
+	AuthorizationCode string `json:"authorization_code,omitempty"`
+	CodeVerifier      string `json:"code_verifier,omitempty"`
+	GoogleAuthToken   string `json:"google_auth_token,omitempty"`
+	Email           string `json:"email,omitempty"`
+	Name            string `json:"name,omitempty"`
+	AvatarURL       string `json:"avatar_url,omitempty"`
+	Gender          string `json:"gender,omitempty"`
+	Age             *int   `json:"age,omitempty"`
+	Bio             string `json:"bio,omitempty"`
+	PublicKeyHex    string `json:"public_key_hex"`
+	DhPublicKeyHex  string `json:"dh_public_key_hex,omitempty"`
+	DeviceID        string `json:"device_id,omitempty"`
+	DeviceName      string `json:"device_name,omitempty"`
+	IsReverify      bool   `json:"is_reverify,omitempty"`
+}
+
+func (h *AuthHandler) handleTruecallerVerify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req TruecallerVerifyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Malformed request body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if h.truecallerVerifier == nil {
+		h.truecallerVerifier = NewTruecallerVerifier()
+	}
+
+	verifiedPhone := ""
+	if req.PayloadBase64 != "" && req.SignatureBase64 != "" {
+		// Profile payload mode
+		profile, err := h.truecallerVerifier.VerifyProfilePayload(req.PayloadBase64, req.SignatureBase64, req.RequestNonce)
+		if err != nil {
+			log.Printf("[TruecallerVerify] Payload verification rejected from %s: %v", getClientIP(r), err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "TRUECALLER_VERIFICATION_FAILED",
+			})
+			return
+		}
+		verifiedPhone = profile.PhoneNumber
+		if req.Name == "" && profile.FirstName != "" {
+			req.Name = strings.TrimSpace(profile.FirstName + " " + profile.LastName)
+		}
+		if req.AvatarURL == "" && profile.AvatarURL != "" {
+			req.AvatarURL = profile.AvatarURL
+		}
+		if req.Gender == "" && profile.Gender != "" {
+			req.Gender = profile.Gender
+		}
+	} else if req.AuthorizationCode != "" && req.CodeVerifier != "" {
+		// OAuth PKCE code exchange mode
+		userInfo, err := h.truecallerVerifier.ExchangeCodeAndVerify(req.AuthorizationCode, req.CodeVerifier)
+		if err != nil {
+			log.Printf("[TruecallerVerify] Code exchange rejected from %s: %v", getClientIP(r), err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "TRUECALLER_VERIFICATION_FAILED",
+			})
+			return
+		}
+		verifiedPhone = userInfo.PhoneNumber
+		if req.Name == "" {
+			req.Name = strings.TrimSpace(userInfo.GivenName + " " + userInfo.FamilyName)
+		}
+		if req.AvatarURL == "" && userInfo.Picture != "" {
+			req.AvatarURL = userInfo.Picture
+		}
+	} else if req.AccessToken != "" {
+		// OAuth token mode
+		userInfo, err := h.truecallerVerifier.VerifyOAuthToken(req.AccessToken)
+		if err != nil {
+			log.Printf("[TruecallerVerify] OAuth verification rejected from %s: %v", getClientIP(r), err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUnauthorized)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": err.Error(),
+				"code":  "TRUECALLER_VERIFICATION_FAILED",
+			})
+			return
+		}
+		verifiedPhone = userInfo.PhoneNumber
+		if req.Name == "" {
+			req.Name = strings.TrimSpace(userInfo.GivenName + " " + userInfo.FamilyName)
+		}
+		if req.AvatarURL == "" && userInfo.Picture != "" {
+			req.AvatarURL = userInfo.Picture
+		}
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": "Missing Truecaller payload/signature, authorization_code, or access_token",
+			"code":  "MISSING_TRUECALLER_PROOF",
+		})
+		return
+	}
+
+	// Validate Google Identity if token provided
+	googleUID := ""
+	if req.GoogleAuthToken != "" && h.googleVerifier != nil {
+		gClaims, err := h.googleVerifier.VerifyIdToken(req.GoogleAuthToken)
+		if err == nil && gClaims != nil {
+			googleUID = gClaims.Subject
+			if req.Email == "" && gClaims.Email != "" {
+				req.Email = gClaims.Email
+			}
+			if req.Name == "" && gClaims.Name != "" {
+				req.Name = gClaims.Name
+			}
+		}
+	}
+
+	// Finalize session
+	resp, status, err := h.finalizePhoneVerifiedSession(
+		verifiedPhone,
+		googleUID,
+		req.Email,
+		req.Name,
+		req.AvatarURL,
+		req.Gender,
+		req.Age,
+		req.Bio,
+		req.PublicKeyHex,
+		req.DhPublicKeyHex,
+		req.DeviceID,
+		req.DeviceName,
+		"truecaller",
+	)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": err.Error(),
+			"code":  "VERIFICATION_COMMIT_FAILED",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (h *AuthHandler) finalizePhoneVerifiedSession(
+	rawPhone string,
+	googleUID string,
+	email string,
+	name string,
+	avatarURL string,
+	gender string,
+	age *int,
+	bio string,
+	pubKeyHex string,
+	dhPubKeyHex string,
+	deviceID string,
+	deviceName string,
+	verificationMethod string,
+) (map[string]interface{}, int, error) {
+	canonicalPhone, err := CanonicalizePhone(rawPhone)
+	if err != nil {
+		return nil, http.StatusBadRequest, fmt.Errorf("invalid phone format: %w", err)
+	}
+
+	// Validate 32-byte Ed25519 public key hex
+	cleanPubHex := strings.TrimSpace(pubKeyHex)
+	pubBytes, err := hex.DecodeString(cleanPubHex)
+	if err != nil || len(pubBytes) != 32 {
+		return nil, http.StatusBadRequest, errors.New("invalid 32-byte Ed25519 public key hex")
+	}
+
+	now := time.Now().UnixMilli()
+
+	devID := deviceID
+	if devID == "" {
+		devID = fmt.Sprintf("dev_%d", now)
+	}
+	devName := deviceName
+	if devName == "" {
+		devName = "Android Device"
+	}
+
+	// Check 1-Number = 1-NX-ID policy
+	existingAcc, found := h.store.GetAccountByPhone(canonicalPhone)
+	if found && existingAcc != nil {
+		// Phone number already bound. Check Google identity compatibility
+		if googleUID != "" && existingAcc.GoogleID != "" && existingAcc.GoogleID != googleUID {
+			return nil, http.StatusConflict, errors.New("this mobile number is already linked to another NEXA account")
+		}
+
+		// Re-verification or device recovery: update missing fields
+		if existingAcc.GoogleID == "" && googleUID != "" {
+			existingAcc.GoogleID = googleUID
+		}
+		if existingAcc.Email == "" && email != "" {
+			existingAcc.Email = email
+		}
+		if name != "" && existingAcc.ProfileName == "" {
+			existingAcc.ProfileName = name
+		}
+		existingAcc.PhoneVerified = true
+		existingAcc.UpdatedAt = now
+		_ = h.store.UpdateAccount(existingAcc)
+
+		// Atomic device replacement & old session revocation
+		device := &identity.Device{
+			DeviceID:     devID,
+			AccountID:    existingAcc.ID,
+			NxID:         existingAcc.NxID,
+			DeviceName:   devName,
+			PublicKeyHex: cleanPubHex,
+			DhKeyHex:     dhPubKeyHex,
+			IsRevoked:    false,
+			CreatedAt:    now,
+			LastActiveAt: now,
+		}
+		revokedDevs, err := h.store.RegisterDeviceReplacingOthers(device, "replaced by "+verificationMethod+" verification")
+		if err != nil {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to register device: %w", err)
+		}
+
+		if h.revoker != nil {
+			for _, rID := range revokedDevs {
+				_ = h.revoker.RevokeDeviceSession(existingAcc.NxID, rID, "device replaced by "+verificationMethod+" verification")
+			}
+		}
+
+		// Generate 30-day session token
+		tokenBytes := make([]byte, 32)
+		rand.Read(tokenBytes)
+		sessionToken := "nexa_sess_" + hex.EncodeToString(tokenBytes)
+
+		session := &identity.Session{
+			Token:     sessionToken,
+			AccountID: existingAcc.ID,
+			NxID:      existingAcc.NxID,
+			DeviceID:  devID,
+			ExpiresAt: now + (30 * 24 * 60 * 60 * 1000),
+			IsRevoked: false,
+			CreatedAt: now,
+		}
+		_ = h.store.CreateSession(session)
+
+		return map[string]interface{}{
+			"status":              "VERIFIED",
+			"nx_id":               existingAcc.NxID,
+			"session_auth_token":  sessionToken,
+			"session_token":       sessionToken,
+			"verification_method": verificationMethod,
+			"verified_at":         now,
+			"name":                existingAcc.ProfileName,
+			"phone":               existingAcc.PhoneNumber,
+			"email":               existingAcc.Email,
+			"avatar_url":          existingAcc.AvatarUrl,
+			"is_existing_user":    true,
+		}, http.StatusOK, nil
+	}
+
+	// Brand new account allocation
+	allocatedNxID, err := h.store.AllocateNxID(cleanPubHex)
+	if err != nil {
+		return nil, http.StatusInternalServerError, fmt.Errorf("failed to allocate NX-ID: %w", err)
+	}
+
+	usrIDPrefix := "usr_rand"
+	if len(pubBytes) >= 8 {
+		usrIDPrefix = fmt.Sprintf("usr_%s", hex.EncodeToString(pubBytes[:8]))
+	}
+
+	ageVal := 0
+	if age != nil {
+		ageVal = *age
+	}
+
+	cleanName := strings.TrimSpace(name)
+	if cleanName == "" {
+		cleanName = "NEXA User"
+	}
+
+	account := &identity.UserAccount{
+		ID:                    usrIDPrefix,
+		NxID:                  allocatedNxID,
+		PublicKeyHex:          cleanPubHex,
+		DhKeyHex:              dhPubKeyHex,
+		PhoneNumber:           canonicalPhone,
+		PhoneVerified:         true,
+		IsDiscoverableByPhone: true,
+		GoogleID:              googleUID,
+		Email:                 email,
+		ProfileName:           cleanName,
+		AvatarUrl:             avatarURL,
+		Bio:                   bio,
+		Gender:                gender,
+		Age:                   ageVal,
+		CreatedAt:             now,
+		UpdatedAt:             now,
+	}
+
+	if err := h.store.CreateAccount(account); err != nil {
+		if existing, found := h.store.GetAccountByNxID(allocatedNxID); found {
+			account = existing
+		} else {
+			return nil, http.StatusInternalServerError, fmt.Errorf("failed to commit account: %w", err)
+		}
+	}
+
+	// Register device
+	device := &identity.Device{
+		DeviceID:     devID,
+		AccountID:    account.ID,
+		NxID:         account.NxID,
+		DeviceName:   devName,
+		PublicKeyHex: cleanPubHex,
+		DhKeyHex:     dhPubKeyHex,
+		IsRevoked:    false,
+		CreatedAt:    now,
+		LastActiveAt: now,
+	}
+	if _, err := h.store.RegisterDeviceReplacingOthers(device, "new account "+verificationMethod+" verification"); err != nil {
+		_ = h.store.RegisterDevice(device)
+	}
+
+	// Create 30-day session
+	tokenBytes := make([]byte, 32)
+	rand.Read(tokenBytes)
+	sessionToken := "nexa_sess_" + hex.EncodeToString(tokenBytes)
+
+	session := &identity.Session{
+		Token:     sessionToken,
+		AccountID: account.ID,
+		NxID:      account.NxID,
+		DeviceID:  devID,
+		ExpiresAt: now + (30 * 24 * 60 * 60 * 1000),
+		IsRevoked: false,
+		CreatedAt: now,
+	}
+	_ = h.store.CreateSession(session)
+
+	return map[string]interface{}{
+		"status":              "VERIFIED",
+		"nx_id":               account.NxID,
+		"session_auth_token":  sessionToken,
+		"session_token":       sessionToken,
+		"verification_method": verificationMethod,
+		"verified_at":         now,
+		"name":                account.ProfileName,
+		"phone":               account.PhoneNumber,
+		"email":               account.Email,
+		"avatar_url":          account.AvatarUrl,
+		"is_existing_user":    false,
+	}, http.StatusOK, nil
 }

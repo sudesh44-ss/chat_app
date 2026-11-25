@@ -191,11 +191,89 @@ class AuthRepositoryImpl(
 
     override suspend fun isLoggedIn(): Boolean = withContext(Dispatchers.IO) {
         try {
-            val hasToken = !secureStorage.getAuthToken().isNullOrBlank()
-            val hasLocalSession = userDao.hasActiveSession()
-            hasToken && hasLocalSession
+            val token = secureStorage.getAuthToken()
+            if (token.isNullOrBlank()) return@withContext false
+            val activeNxId = secureStorage.getActiveNxId()
+            val localProfile = if (!activeNxId.isNullOrBlank()) {
+                userDao.getProfileByNxId(activeNxId)
+            } else {
+                userDao.getLocalProfile()
+            }
+            val hasToken = !token.isNullOrBlank()
+            val isVerified = localProfile != null && localProfile.isVerified && localProfile.nxId != "NX-DEV-USER"
+            hasToken && isVerified
         } catch (e: Exception) {
             Log.e("AuthRepositoryImpl", "Failed to check session state", e)
+            false
+        }
+    }
+
+    override suspend fun validateSession(): Boolean = withContext(Dispatchers.IO) {
+        try {
+            val token = secureStorage.getAuthToken()
+            if (token.isNullOrBlank()) {
+                Log.d("AuthRepositoryImpl", "Session validation failed: token is missing")
+                return@withContext false
+            }
+
+            if (!userDao.hasActiveSession()) {
+                Log.d("AuthRepositoryImpl", "Session validation failed: no active local session")
+                return@withContext false
+            }
+
+            val activeNxId = secureStorage.getActiveNxId()
+            val localProfile = if (!activeNxId.isNullOrBlank()) {
+                userDao.getProfileByNxId(activeNxId)
+            } else {
+                userDao.getLocalProfile()
+            }
+            if (localProfile == null || !localProfile.isVerified || localProfile.nxId == "NX-DEV-USER") {
+                Log.d("AuthRepositoryImpl", "Session validation failed: profile is null, unverified, or demo placeholder")
+                return@withContext false
+            }
+
+            val currentStatus = try {
+                AccountStatus.valueOf(secureStorage.getAccountStatus())
+            } catch (e: Exception) {
+                AccountStatus.ACTIVE
+            }
+            if (currentStatus == AccountStatus.DEACTIVATED || currentStatus == AccountStatus.DELETED) {
+                Log.d("AuthRepositoryImpl", "Session validation failed: account status is $currentStatus")
+                return@withContext false
+            }
+
+            // Verify remote session with backend
+            val profileResult = apiService.fetchProfile(token)
+            if (profileResult.isSuccess) {
+                val remoteDto = profileResult.getOrNull()
+                if (remoteDto != null) {
+                    if (!remoteDto.phoneVerified) {
+                        Log.w("AuthRepositoryImpl", "Remote session indicates phone is unverified")
+                        return@withContext false
+                    }
+                    secureStorage.saveActiveNxId(remoteDto.nxId)
+                    if (!remoteDto.avatarUrl.isNullOrBlank()) {
+                        secureStorage.saveAvatarUrl(remoteDto.avatarUrl)
+                    }
+                    userDao.deleteDemoProfile()
+                    userDao.updateFullName(remoteDto.nxId, remoteDto.profileName ?: localProfile.fullName)
+                }
+                true
+            } else {
+                val err = profileResult.exceptionOrNull()
+                val errMsg = err?.message ?: ""
+                // Check if session was explicitly revoked, expired, or rejected (HTTP 401 or 403)
+                if (errMsg.contains("401") || errMsg.contains("403") || errMsg.contains("Unauthorized") || errMsg.contains("Forbidden")) {
+                    Log.w("AuthRepositoryImpl", "Session is expired or revoked by server ($errMsg). Clearing credentials.")
+                    clearSession()
+                    return@withContext false
+                }
+                // Network error / offline mode: trust existing valid local profile
+                Log.i("AuthRepositoryImpl", "Remote profile unreachable (offline mode), trusting verified local session: $errMsg")
+                true
+            }
+        } catch (e: Exception) {
+            Log.e("AuthRepositoryImpl", "Error during session validation", e)
             false
         }
     }
@@ -205,8 +283,21 @@ class AuthRepositoryImpl(
     }
 
     override fun getActiveProfile(): Flow<UserProfile?> {
-        return userDao.getActiveUserFlow()
-            .map { it?.toDomain(secureStorage.getAvatarUrl()) }
+        val activeNxId = secureStorage.getActiveNxId()
+        val flow = if (!activeNxId.isNullOrBlank() && activeNxId != "NX-DEV-USER") {
+            userDao.getProfileByNxIdFlow(activeNxId)
+        } else {
+            userDao.getActiveUserFlow()
+        }
+        return flow
+            .map { entity ->
+                val currentNxId = secureStorage.getActiveNxId()
+                if (entity?.nxId == "NX-DEV-USER" && !currentNxId.isNullOrBlank() && currentNxId != "NX-DEV-USER") {
+                    null
+                } else {
+                    entity?.toDomain(secureStorage.getAvatarUrl())
+                }
+            }
             .catch { e ->
                 Log.e("AuthRepositoryImpl", "Error reading active user profile flow", e)
                 emit(null)
@@ -267,7 +358,7 @@ class AuthRepositoryImpl(
 
                 val userEntity = UserEntity(
                     nxId = finalResponse.nxId,
-                    fullName = finalResponse.prefillName ?: "NEXA User",
+                    fullName = finalResponse.fullName ?: finalResponse.prefillName ?: "NEXA User",
                     phoneNumber = finalResponse.phoneNumber ?: "",
                     email = finalResponse.email,
                     avatarUrl = finalResponse.prefillAvatar,
@@ -278,6 +369,29 @@ class AuthRepositoryImpl(
                     isVerified = true,
                     createdAt = System.currentTimeMillis()
                 )
+                userDao.deleteDemoProfile()
+                userDao.saveUserProfile(userEntity)
+            } else if ((finalResponse.status == "EXISTING_USER" || finalResponse.status == "REQUIRE_SIM_VERIFICATION") && !finalResponse.nxId.isNullOrBlank()) {
+                // Immediately pre-hydrate existing user profile in encrypted SQLCipher/Room database for Account Recovery
+                secureStorage.saveActiveNxId(finalResponse.nxId)
+                if (!finalResponse.prefillAvatar.isNullOrBlank()) {
+                    secureStorage.saveAvatarUrl(finalResponse.prefillAvatar)
+                }
+
+                val userEntity = UserEntity(
+                    nxId = finalResponse.nxId,
+                    fullName = finalResponse.fullName ?: finalResponse.prefillName ?: "NEXA User",
+                    phoneNumber = finalResponse.phoneNumber ?: "",
+                    email = finalResponse.email,
+                    avatarUrl = finalResponse.prefillAvatar,
+                    age = null,
+                    gender = null,
+                    bio = null,
+                    publicKeyHex = keys.publicKeyHex,
+                    isVerified = false,
+                    createdAt = System.currentTimeMillis()
+                )
+                userDao.deleteDemoProfile()
                 userDao.saveUserProfile(userEntity)
             }
 
@@ -347,7 +461,8 @@ class AuthRepositoryImpl(
         bio: String?,
         googleUid: String,
         googleAuthToken: String?,
-        isReverify: Boolean
+        isReverify: Boolean,
+        email: String?
     ): Result<InitiateReverseVerifyResponseDto> = withContext(Dispatchers.IO) {
         try {
             val keys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
@@ -357,6 +472,7 @@ class AuthRepositoryImpl(
             val req = InitiateReverseVerifyRequestDto(
                 googleUid = googleUid,
                 googleAuthToken = googleAuthToken,
+                email = email,
                 phoneNumber = phone,
                 name = name,
                 avatarUrl = avatarUrl,
@@ -412,10 +528,131 @@ class AuthRepositoryImpl(
                 isVerified = true,
                 createdAt = System.currentTimeMillis()
             )
+            userDao.deleteDemoProfile()
             userDao.saveUserProfile(userEntity)
 
             Result.success(userEntity.toDomain(avatarUrl))
         } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun getTruecallerNonce(): Result<String> = withContext(Dispatchers.IO) {
+        apiService.getTruecallerNonce()
+    }
+
+    override suspend fun verifyWithFirebase(
+        idToken: String,
+        googleAuthToken: String?,
+        email: String?,
+        name: String?,
+        avatarUrl: String?,
+        gender: String?,
+        age: Int?,
+        bio: String?,
+        isReverify: Boolean
+    ): Result<UserProfile> = withContext(Dispatchers.IO) {
+        try {
+            val keys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
+            val deviceId = secureStorage.getOrCreateDeviceId()
+            val deviceName = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+
+            val req = com.nexa.app.data.remote.dto.FirebaseVerifyRequestDto(
+                firebaseIdToken = idToken,
+                googleAuthToken = googleAuthToken,
+                email = email,
+                name = name,
+                avatarUrl = avatarUrl,
+                gender = gender,
+                age = age,
+                bio = bio,
+                publicKeyHex = keys.publicKeyHex,
+                dhPublicKeyHex = null,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                isReverify = isReverify
+            )
+
+            val resp = apiService.verifyFirebase(req).getOrThrow()
+            val sessionToken = resp.sessionAuthToken ?: resp.sessionToken
+                ?: return@withContext Result.failure(IllegalStateException("No session token returned"))
+
+            saveVerifiedSession(
+                nxId = resp.nxId,
+                sessionToken = sessionToken,
+                name = resp.name ?: name ?: "NEXA User",
+                phone = resp.phone ?: "",
+                avatarUrl = resp.avatarUrl ?: avatarUrl,
+                age = age,
+                gender = gender,
+                bio = bio,
+                email = resp.email ?: email
+            )
+        } catch (e: Exception) {
+            Log.e("AuthRepositoryImpl", "Firebase verification failed: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun verifyWithTruecaller(
+        payload: String?,
+        signature: String?,
+        requestNonce: String?,
+        accessToken: String?,
+        authorizationCode: String?,
+        codeVerifier: String?,
+        googleAuthToken: String?,
+        email: String?,
+        name: String?,
+        avatarUrl: String?,
+        gender: String?,
+        age: Int?,
+        bio: String?,
+        isReverify: Boolean
+    ): Result<UserProfile> = withContext(Dispatchers.IO) {
+        try {
+            val keys = keystoreManager.getOrCreateIdentityKeyPair(secureStorage)
+            val deviceId = secureStorage.getOrCreateDeviceId()
+            val deviceName = "${Build.MANUFACTURER} ${Build.MODEL}".trim()
+
+            val req = com.nexa.app.data.remote.dto.TruecallerVerifyRequestDto(
+                payload = payload,
+                signature = signature,
+                requestNonce = requestNonce,
+                accessToken = accessToken,
+                authorizationCode = authorizationCode,
+                codeVerifier = codeVerifier,
+                googleAuthToken = googleAuthToken,
+                email = email,
+                name = name,
+                avatarUrl = avatarUrl,
+                gender = gender,
+                age = age,
+                bio = bio,
+                publicKeyHex = keys.publicKeyHex,
+                dhPublicKeyHex = null,
+                deviceId = deviceId,
+                deviceName = deviceName,
+                isReverify = isReverify
+            )
+
+            val resp = apiService.verifyTruecaller(req).getOrThrow()
+            val sessionToken = resp.sessionAuthToken ?: resp.sessionToken
+                ?: return@withContext Result.failure(IllegalStateException("No session token returned"))
+
+            saveVerifiedSession(
+                nxId = resp.nxId,
+                sessionToken = sessionToken,
+                name = resp.name ?: name ?: "NEXA User",
+                phone = resp.phone ?: "",
+                avatarUrl = resp.avatarUrl ?: avatarUrl,
+                age = age,
+                gender = gender,
+                bio = bio,
+                email = resp.email ?: email
+            )
+        } catch (e: Exception) {
+            Log.e("AuthRepositoryImpl", "Truecaller verification failed: ${e.message}", e)
             Result.failure(e)
         }
     }
@@ -445,6 +682,7 @@ class AuthRepositoryImpl(
                 isVerified = remoteDto.phoneVerified,
                 createdAt = if (remoteDto.createdAt > 0) remoteDto.createdAt else System.currentTimeMillis()
             )
+            userDao.deleteDemoProfile()
             userDao.saveUserProfile(userEntity)
             Result.success(userEntity.toDomain(remoteDto.avatarUrl))
         } catch (e: Exception) {
@@ -560,6 +798,7 @@ class AuthRepositoryImpl(
                 isVerified = true,
                 createdAt = response.registeredTimestamp
             )
+            userDao.deleteDemoProfile()
             userDao.saveUserProfile(userEntity)
 
             secureStorage.saveAuthToken(response.sessionAuthToken)

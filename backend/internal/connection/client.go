@@ -254,6 +254,16 @@ func (c *ClientSession) VerifyAuthResponse(packet *wire.NexaWirePacket) bool {
 	return true
 }
 
+func (c *ClientSession) Close() {
+	if c.Conn == nil {
+		return
+	}
+	defer func() {
+		_ = recover()
+	}()
+	_ = c.Conn.Close()
+}
+
 func (c *ClientSession) CloseWithUnauthorized(reason string) {
 	if c.Conn == nil {
 		return

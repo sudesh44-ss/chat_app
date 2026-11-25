@@ -96,10 +96,10 @@ fun NexaTransportSelector(
                 onClick = { onOptionSelected(NexaTransportOption.INTERNET) }
             )
 
-            // 2. SMS (Disabled for Play Store & ECM compliance)
+            // 2. Encrypted SMS fallback (zero SMS permissions, external composer)
             TransportOptionItem(
-                title = "SMS",
-                description = if (isSmsSupported) "Port 8901 binary SMS airwaves. No data plan required." else "Unavailable: Port 8901 binary SMS is disabled for Play Protect compliance.",
+                title = "Encrypted SMS",
+                description = if (isSmsSupported) "When Internet and mesh are unavailable. Text only, sent by your SMS app." else "Unavailable: this device does not report SMS capability.",
                 iconRes = R.drawable.ic_nexa_messages_square,
                 tint = if (isSmsSupported) NexaWarningOrange else Color.Gray,
                 isSelected = isSmsSupported && currentOption == NexaTransportOption.SMS,

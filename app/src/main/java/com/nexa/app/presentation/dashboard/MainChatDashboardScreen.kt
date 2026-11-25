@@ -57,6 +57,8 @@ import com.nexa.app.domain.repository.ContactRepository
 import com.nexa.app.domain.repository.StatusRepository
 import com.nexa.app.presentation.common.glass.NexaGlassSurface
 import com.nexa.app.presentation.common.viewer.ProfileImageViewerDialog
+import com.nexa.app.presentation.settings.privacy.BlockContactConfirmationDialog
+import com.nexa.app.presentation.settings.privacy.UnblockContactConfirmationDialog
 import com.nexa.app.presentation.dashboard.components.BottomNavDestination
 import com.nexa.app.presentation.dashboard.components.HomeDashboardTab
 import com.nexa.app.presentation.dashboard.components.NexaChatContextMenu
@@ -185,6 +187,7 @@ fun MainChatDashboardScreen(
     var chatToDelete by remember { mutableStateOf<ChatConversation?>(null) }
     var chatToClear by remember { mutableStateOf<ChatConversation?>(null) }
     var contactToBlock by remember { mutableStateOf<ChatConversation?>(null) }
+    var contactToUnblock by remember { mutableStateOf<ChatConversation?>(null) }
     var unavailableStatusContact by remember { mutableStateOf<String?>(null) }
     var groupToLeave by remember { mutableStateOf<ChatConversation?>(null) }
     var showBulkDeleteDialog by remember { mutableStateOf(false) }
@@ -608,16 +611,7 @@ fun MainChatDashboardScreen(
                 },
                 onToggleBlock = {
                     if (isContextContactBlocked) {
-                        coroutineScope.launch {
-                            val result = contactRepository?.unblockUser(chat.participantNxId)
-                                ?: Result.failure(IllegalStateException("Blocking is unavailable"))
-                            if (result.isSuccess) {
-                                isContextContactBlocked = false
-                                snackbarHostState.showSnackbar("Contact unblocked")
-                            } else {
-                                snackbarHostState.showSnackbar(result.exceptionOrNull()?.message ?: "Unable to unblock contact")
-                            }
-                        }
+                        contactToUnblock = chat
                     } else {
                         contactToBlock = chat
                     }
@@ -752,39 +746,52 @@ fun MainChatDashboardScreen(
 
     // Confirmation Dialog: Block Contact
     contactToBlock?.let { chat ->
-        AlertDialog(
-            onDismissRequest = { contactToBlock = null },
-            title = { Text("Block ${chat.participantName}?") },
-            text = {
-                Text(
-                    text = "Blocked contacts will not be able to send you messages or discover your presence on the mesh. You can unblock them anytime from Settings."
-                )
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        contactToBlock = null
-                        coroutineScope.launch {
-                            val result = contactRepository?.blockUser(chat.participantNxId)
-                                ?: Result.failure(IllegalStateException("Blocking is unavailable"))
-                            if (result.isSuccess) {
-                                isContextContactBlocked = true
-                                snackbarHostState.showSnackbar("Contact blocked")
-                            } else {
-                                snackbarHostState.showSnackbar(result.exceptionOrNull()?.message ?: "Unable to block contact")
-                            }
+        BlockContactConfirmationDialog(
+            contactName = chat.participantName,
+            onConfirmBlock = { alsoReport, deleteChat ->
+                val targetChat = chat
+                contactToBlock = null
+                coroutineScope.launch {
+                    val result = contactRepository?.blockUser(targetChat.participantNxId)
+                        ?: Result.failure(IllegalStateException("Blocking is unavailable"))
+                    if (result.isSuccess) {
+                        isContextContactBlocked = true
+                        if (deleteChat && targetChat.conversationId.isNotBlank()) {
+                            chatRepository.deleteChat(targetChat.conversationId)
                         }
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text("Block")
+                        if (alsoReport) {
+                            snackbarHostState.showSnackbar("Contact blocked. Report feature is not supported in this build.")
+                        } else {
+                            snackbarHostState.showSnackbar("Contact blocked")
+                        }
+                    } else {
+                        snackbarHostState.showSnackbar(result.exceptionOrNull()?.message ?: "Unable to block contact")
+                    }
                 }
             },
-            dismissButton = {
-                TextButton(onClick = { contactToBlock = null }) {
-                    Text("Cancel")
+            onDismiss = { contactToBlock = null }
+        )
+    }
+
+    // Confirmation Dialog: Unblock Contact
+    contactToUnblock?.let { chat ->
+        UnblockContactConfirmationDialog(
+            contactName = chat.participantName,
+            onConfirmUnblock = {
+                val targetChat = chat
+                contactToUnblock = null
+                coroutineScope.launch {
+                    val result = contactRepository?.unblockUser(targetChat.participantNxId)
+                        ?: Result.failure(IllegalStateException("Blocking is unavailable"))
+                    if (result.isSuccess) {
+                        isContextContactBlocked = false
+                        snackbarHostState.showSnackbar("Contact unblocked")
+                    } else {
+                        snackbarHostState.showSnackbar(result.exceptionOrNull()?.message ?: "Unable to unblock contact")
+                    }
                 }
-            }
+            },
+            onDismiss = { contactToUnblock = null }
         )
     }
 

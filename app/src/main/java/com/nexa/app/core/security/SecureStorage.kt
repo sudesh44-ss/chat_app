@@ -15,9 +15,15 @@ import java.security.SecureRandom
 class SecureStorageUnavailableException(message: String, cause: Throwable? = null) :
     IllegalStateException(message, cause)
 
-class SecureStorage(context: Context) {
+class SecureStorage internal constructor(
+    context: Context?,
+    private val testPrefs: SharedPreferences? = null
+) {
+    constructor(context: Context) : this(context, null)
 
     private val prefs: SharedPreferences? by lazy {
+        if (testPrefs != null) return@lazy testPrefs
+        if (context == null) return@lazy null
         try {
             val masterKey = MasterKey.Builder(context)
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
@@ -93,6 +99,53 @@ class SecureStorage(context: Context) {
 
     fun getRecoveryPassphrase(): String? {
         return requirePrefs().getString(KEY_RECOVERY_PASSPHRASE, null)
+    }
+
+    // ==========================================
+    // Custom Backup Password & Credentials
+    // ==========================================
+
+    fun hasCustomBackupPassword(): Boolean =
+        requirePrefs().getBoolean(KEY_HAS_CUSTOM_BACKUP_PASSWORD, false) &&
+                !requirePrefs().getString(KEY_CUSTOM_BACKUP_PASSWORD, null).isNullOrBlank()
+
+    fun saveCustomBackupPassword(password: String) {
+        val salt = BackupPasswordHasher.newSalt()
+        val hash = BackupPasswordHasher.hash(password, salt)
+        requirePrefs().edit()
+            .putBoolean(KEY_HAS_CUSTOM_BACKUP_PASSWORD, true)
+            .putString(KEY_CUSTOM_BACKUP_PASSWORD, password)
+            .putString(KEY_BACKUP_PASSWORD_SALT, salt.toHex())
+            .putString(KEY_BACKUP_PASSWORD_HASH, hash.toHex())
+            .apply()
+    }
+
+    fun verifyBackupPassword(password: String): Boolean {
+        if (!hasCustomBackupPassword()) return false
+        val saltHex = requirePrefs().getString(KEY_BACKUP_PASSWORD_SALT, null) ?: return false
+        val hashHex = requirePrefs().getString(KEY_BACKUP_PASSWORD_HASH, null) ?: return false
+        return try {
+            BackupPasswordHasher.verify(password, saltHex.hexToByteArray(), hashHex.hexToByteArray())
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    fun getCustomBackupPassword(): String? {
+        return requirePrefs().getString(KEY_CUSTOM_BACKUP_PASSWORD, null)
+    }
+
+    fun clearCustomBackupPassword() {
+        requirePrefs().edit()
+            .remove(KEY_HAS_CUSTOM_BACKUP_PASSWORD)
+            .remove(KEY_CUSTOM_BACKUP_PASSWORD)
+            .remove(KEY_BACKUP_PASSWORD_SALT)
+            .remove(KEY_BACKUP_PASSWORD_HASH)
+            .apply()
+    }
+
+    fun getActiveBackupCredential(): String? {
+        return getCustomBackupPassword() ?: getRecoveryPassphrase()
     }
 
     fun getOrCreateDeviceId(): String {
@@ -178,9 +231,10 @@ class SecureStorage(context: Context) {
         vaultFilePath: String,
         expectedFileSize: Long,
         lastConfirmedOffset: Long,
-        existingFileId: String? = null
+        existingFileId: String? = null,
+        backupId: String? = null
     ) {
-        requirePrefs().edit()
+        val editor = requirePrefs().edit()
             .putString(KEY_UPLOAD_SESSION_URI, sessionUri)
             .putLong(KEY_UPLOAD_VERSION_EPOCH, versionEpoch)
             .putString(KEY_UPLOAD_VAULT_PATH, vaultFilePath)
@@ -188,7 +242,13 @@ class SecureStorage(context: Context) {
             .putLong(KEY_UPLOAD_CONFIRMED_OFFSET, lastConfirmedOffset)
             .putLong(KEY_UPLOAD_UPDATED_AT, System.currentTimeMillis())
             .putString(KEY_UPLOAD_EXISTING_FILE_ID, existingFileId)
-            .apply()
+
+        if (!backupId.isNullOrBlank()) {
+            editor.putString(KEY_UPLOAD_BACKUP_ID, backupId)
+        } else {
+            editor.remove(KEY_UPLOAD_BACKUP_ID)
+        }
+        editor.apply()
     }
 
     fun getActiveUploadSession(): com.nexa.app.data.drive.UploadSessionState? {
@@ -199,6 +259,7 @@ class SecureStorage(context: Context) {
         val offset = requirePrefs().getLong(KEY_UPLOAD_CONFIRMED_OFFSET, 0L)
         val updated = requirePrefs().getLong(KEY_UPLOAD_UPDATED_AT, 0L)
         val fileId = requirePrefs().getString(KEY_UPLOAD_EXISTING_FILE_ID, null)
+        val backupId = requirePrefs().getString(KEY_UPLOAD_BACKUP_ID, null)
 
         val session = com.nexa.app.data.drive.UploadSessionState(
             sessionUri = uri,
@@ -207,7 +268,8 @@ class SecureStorage(context: Context) {
             expectedFileSize = size,
             lastConfirmedOffset = offset,
             updatedAt = updated,
-            existingFileId = fileId
+            existingFileId = fileId,
+            backupId = backupId
         )
         return if (session.isValid()) session else null
     }
@@ -228,6 +290,7 @@ class SecureStorage(context: Context) {
             .remove(KEY_UPLOAD_CONFIRMED_OFFSET)
             .remove(KEY_UPLOAD_UPDATED_AT)
             .remove(KEY_UPLOAD_EXISTING_FILE_ID)
+            .remove(KEY_UPLOAD_BACKUP_ID)
             .apply()
     }
 
@@ -237,6 +300,9 @@ class SecureStorage(context: Context) {
 
     fun isAppLockEnabled(): Boolean = requirePrefs().getBoolean(KEY_APP_LOCK_ENABLED, false)
 
+    fun hasAppLockPin(): Boolean =
+        !requirePrefs().getString(KEY_APP_LOCK_HASH, null).isNullOrBlank()
+
     fun setAppLockPin(pin: String) {
         val salt = AppLockPinHasher.newSalt()
         val hash = AppLockPinHasher.hash(pin, salt)
@@ -245,10 +311,11 @@ class SecureStorage(context: Context) {
             .putString(KEY_APP_LOCK_SALT, salt.toHex())
             .putString(KEY_APP_LOCK_HASH, hash.toHex())
             .apply()
+        resetAppLockFailedAttempts()
     }
 
     fun verifyAppLockPin(pin: String): Boolean {
-        if (!isAppLockEnabled()) return false
+        if (!isAppLockEnabled() && !hasAppLockPin()) return false
         val saltHex = requirePrefs().getString(KEY_APP_LOCK_SALT, null) ?: return false
         val hashHex = requirePrefs().getString(KEY_APP_LOCK_HASH, null) ?: return false
         return try {
@@ -258,11 +325,81 @@ class SecureStorage(context: Context) {
         }
     }
 
+    fun changeAppLockPin(currentPin: String, newPin: String): Boolean {
+        if (!verifyAppLockPin(currentPin)) return false
+        val salt = AppLockPinHasher.newSalt()
+        val hash = AppLockPinHasher.hash(newPin, salt)
+        requirePrefs().edit()
+            .putString(KEY_APP_LOCK_SALT, salt.toHex())
+            .putString(KEY_APP_LOCK_HASH, hash.toHex())
+            .apply()
+        resetAppLockFailedAttempts()
+        return true
+    }
+
     fun isBiometricUnlockEnabled(): Boolean =
         isAppLockEnabled() && requirePrefs().getBoolean(KEY_APP_LOCK_BIOMETRIC, false)
 
     fun setBiometricUnlockEnabled(enabled: Boolean) {
         requirePrefs().edit().putBoolean(KEY_APP_LOCK_BIOMETRIC, enabled).apply()
+    }
+
+    fun getAutoLockTimeout(): AutoLockTimeout {
+        val seconds = requirePrefs().getLong(KEY_APP_LOCK_AUTO_LOCK_SECONDS, 0L)
+        return AutoLockTimeout.fromSeconds(seconds)
+    }
+
+    fun setAutoLockTimeout(timeout: AutoLockTimeout) {
+        requirePrefs().edit().putLong(KEY_APP_LOCK_AUTO_LOCK_SECONDS, timeout.seconds).apply()
+    }
+
+    fun isLockOnLeaveEnabled(): Boolean =
+        requirePrefs().getBoolean(KEY_APP_LOCK_ON_LEAVE, true)
+
+    fun setLockOnLeaveEnabled(enabled: Boolean) {
+        requirePrefs().edit().putBoolean(KEY_APP_LOCK_ON_LEAVE, enabled).apply()
+    }
+
+    fun isHideAppPreviewEnabled(): Boolean =
+        requirePrefs().getBoolean(KEY_APP_LOCK_HIDE_PREVIEW, false)
+
+    fun setHideAppPreviewEnabled(enabled: Boolean) {
+        requirePrefs().edit().putBoolean(KEY_APP_LOCK_HIDE_PREVIEW, enabled).apply()
+    }
+
+    fun isBlockScreenshotsEnabled(): Boolean =
+        requirePrefs().getBoolean(KEY_APP_LOCK_BLOCK_SCREENSHOTS, false)
+
+    fun setBlockScreenshotsEnabled(enabled: Boolean) {
+        requirePrefs().edit().putBoolean(KEY_APP_LOCK_BLOCK_SCREENSHOTS, enabled).apply()
+    }
+
+    fun getAppLockFailedAttempts(): Int =
+        requirePrefs().getInt(KEY_APP_LOCK_FAILED_ATTEMPTS, 0)
+
+    fun incrementAppLockFailedAttempts(): Int {
+        val current = getAppLockFailedAttempts() + 1
+        val editor = requirePrefs().edit().putInt(KEY_APP_LOCK_FAILED_ATTEMPTS, current)
+        if (current >= AppLockSecurityPolicy.MAX_FAILED_ATTEMPTS) {
+            val lockoutUntil = System.currentTimeMillis() + AppLockSecurityPolicy.LOCKOUT_DURATION_MS
+            editor.putLong(KEY_APP_LOCK_LOCKOUT_UNTIL, lockoutUntil)
+        }
+        editor.apply()
+        return current
+    }
+
+    fun resetAppLockFailedAttempts() {
+        requirePrefs().edit()
+            .remove(KEY_APP_LOCK_FAILED_ATTEMPTS)
+            .remove(KEY_APP_LOCK_LOCKOUT_UNTIL)
+            .apply()
+    }
+
+    fun getAppLockLockoutRemainingSeconds(): Long {
+        val lockoutUntil = requirePrefs().getLong(KEY_APP_LOCK_LOCKOUT_UNTIL, 0L)
+        if (lockoutUntil <= 0L) return 0L
+        val remainingMs = lockoutUntil - System.currentTimeMillis()
+        return if (remainingMs > 0) (remainingMs + 999) / 1000 else 0L
     }
 
     fun clearAppLock() {
@@ -271,6 +408,12 @@ class SecureStorage(context: Context) {
             .remove(KEY_APP_LOCK_SALT)
             .remove(KEY_APP_LOCK_HASH)
             .remove(KEY_APP_LOCK_BIOMETRIC)
+            .remove(KEY_APP_LOCK_AUTO_LOCK_SECONDS)
+            .remove(KEY_APP_LOCK_ON_LEAVE)
+            .remove(KEY_APP_LOCK_HIDE_PREVIEW)
+            .remove(KEY_APP_LOCK_BLOCK_SCREENSHOTS)
+            .remove(KEY_APP_LOCK_FAILED_ATTEMPTS)
+            .remove(KEY_APP_LOCK_LOCKOUT_UNTIL)
             .apply()
     }
 
@@ -316,10 +459,21 @@ class SecureStorage(context: Context) {
         private const val KEY_UPLOAD_CONFIRMED_OFFSET = "key_upload_confirmed_offset"
         private const val KEY_UPLOAD_UPDATED_AT = "key_upload_updated_at"
         private const val KEY_UPLOAD_EXISTING_FILE_ID = "key_upload_existing_file_id"
+        private const val KEY_UPLOAD_BACKUP_ID = "key_upload_backup_id"
         private const val KEY_APP_LOCK_ENABLED = "key_app_lock_enabled"
         private const val KEY_APP_LOCK_SALT = "key_app_lock_salt"
         private const val KEY_APP_LOCK_HASH = "key_app_lock_hash"
         private const val KEY_APP_LOCK_BIOMETRIC = "key_app_lock_biometric"
+        private const val KEY_APP_LOCK_AUTO_LOCK_SECONDS = "key_app_lock_auto_lock_seconds"
+        private const val KEY_APP_LOCK_ON_LEAVE = "key_app_lock_on_leave"
+        private const val KEY_APP_LOCK_HIDE_PREVIEW = "key_app_lock_hide_preview"
+        private const val KEY_APP_LOCK_BLOCK_SCREENSHOTS = "key_app_lock_block_screenshots"
+        private const val KEY_APP_LOCK_FAILED_ATTEMPTS = "key_app_lock_failed_attempts"
+        private const val KEY_APP_LOCK_LOCKOUT_UNTIL = "key_app_lock_lockout_until"
+        private const val KEY_HAS_CUSTOM_BACKUP_PASSWORD = "key_has_custom_backup_password"
+        private const val KEY_CUSTOM_BACKUP_PASSWORD = "key_custom_backup_password"
+        private const val KEY_BACKUP_PASSWORD_SALT = "key_backup_password_salt"
+        private const val KEY_BACKUP_PASSWORD_HASH = "key_backup_password_hash"
 
         /**
          * Keys that belong to a single authenticated session and are safe to drop
@@ -337,7 +491,8 @@ class SecureStorage(context: Context) {
             KEY_UPLOAD_EXPECTED_SIZE,
             KEY_UPLOAD_CONFIRMED_OFFSET,
             KEY_UPLOAD_UPDATED_AT,
-            KEY_UPLOAD_EXISTING_FILE_ID
+            KEY_UPLOAD_EXISTING_FILE_ID,
+            KEY_UPLOAD_BACKUP_ID
         )
 
         /**
@@ -347,6 +502,11 @@ class SecureStorage(context: Context) {
          */
         internal val LOCAL_IDENTITY_KEYS: Set<String> = setOf(
             KEY_DB_PASSPHRASE,
+            KEY_RECOVERY_PASSPHRASE,
+            KEY_HAS_CUSTOM_BACKUP_PASSWORD,
+            KEY_CUSTOM_BACKUP_PASSWORD,
+            KEY_BACKUP_PASSWORD_SALT,
+            KEY_BACKUP_PASSWORD_HASH,
             KEY_DEVICE_ID,
             KEY_IDENTITY_PUBLIC_KEY,
             KEY_IDENTITY_ENCRYPTED_PRIVKEY,

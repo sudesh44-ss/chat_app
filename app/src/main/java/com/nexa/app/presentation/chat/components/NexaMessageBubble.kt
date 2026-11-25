@@ -62,13 +62,14 @@ fun NexaMessageBubble(
     onFailedClick: ((Message) -> Unit)? = null,
     onLongClick: (() -> Unit)? = null,
     onReactionClick: ((String) -> Unit)? = null,
-    textScale: Float = 1f,
+    textScale: Float = com.nexa.app.core.theme.LocalChatTextScale.current,
     highContrast: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val isDark = isSystemInDarkTheme()
     val isOutgoing = message.isOutgoing
     val alignment = if (isOutgoing) Alignment.End else Alignment.Start
+    val activeFontFamily = com.nexa.app.core.theme.LocalNexaFontFamily.current
 
     val scale = textScale.coerceIn(0.8f, 1.5f)
 
@@ -235,6 +236,7 @@ fun NexaMessageBubble(
                         Text(
                             text = message.plainTextContent,
                             color = textColor,
+                            fontFamily = activeFontFamily,
                             fontSize = (15f * scale).sp,
                             lineHeight = (20f * scale).sp
                         )

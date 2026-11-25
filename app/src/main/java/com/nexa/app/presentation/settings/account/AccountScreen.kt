@@ -106,20 +106,22 @@ fun AccountScreen(
     var editNameText by remember { mutableStateOf("") }
     var isUpdatingName by remember { mutableStateOf(false) }
     var qrBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var activeNxIdState by remember { mutableStateOf<String?>(null) }
 
     // Synchronize live profile from remote PostgreSQL backend on mount
     LaunchedEffect(Unit) {
+        activeNxIdState = authRepository.getActiveNxId()
         authRepository.fetchRemoteProfile()
     }
 
-    val profile = profileState
-    val displayName = profile?.fullName ?: "NEXA User"
-    val phoneNumber = profile?.phoneNumber?.takeIf { it.isNotBlank() } ?: "Not linked"
-    val email = profile?.email?.takeIf { it.isNotBlank() } ?: "Not linked"
-    val nxId = profile?.nxId ?: "NX-PENDING"
-    val avatarUrl = profile?.avatarUrl
-    val ageText = profile?.age?.let { "$it years" } ?: "Not specified"
-    val genderText = profile?.gender?.takeIf { it.isNotBlank() } ?: "Not specified"
+    val resolvedProfile = if (profileState?.nxId == "NX-DEV-USER" && activeNxIdState != null && activeNxIdState != "NX-DEV-USER") null else profileState
+    val displayName = resolvedProfile?.fullName ?: "NEXA User"
+    val phoneNumber = resolvedProfile?.phoneNumber?.takeIf { it.isNotBlank() } ?: "Not linked"
+    val email = resolvedProfile?.email?.takeIf { it.isNotBlank() } ?: "Not linked"
+    val nxId = resolvedProfile?.nxId ?: activeNxIdState ?: "NX-PENDING"
+    val avatarUrl = resolvedProfile?.avatarUrl
+    val ageText = resolvedProfile?.age?.let { "$it years" } ?: "Not specified"
+    val genderText = resolvedProfile?.gender?.takeIf { it.isNotBlank() } ?: "Not specified"
 
     // Generate permanent NX-ID QR Code bitmap
     LaunchedEffect(nxId) {

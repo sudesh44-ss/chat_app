@@ -18,6 +18,7 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -25,15 +26,19 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -105,6 +110,10 @@ import com.nexa.app.presentation.chat.components.PinnedMessageUiModel
 import com.nexa.app.presentation.chat.components.ScheduleMessageDialog
 import com.nexa.app.presentation.chat.components.ScheduledMessagesSheet
 import com.nexa.app.presentation.chat.components.SmsFailureBottomSheet
+import com.nexa.app.presentation.chat.components.SmsFallbackSheet
+import com.nexa.app.data.remote.sms.SmsComposerLauncher
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import com.nexa.app.presentation.chat.components.SwipeToReplyContainer
 import com.nexa.app.presentation.chat.components.VideoQualityDialog
 import com.nexa.app.presentation.chat.components.VideoTranscodeProgressOverlay
@@ -123,6 +132,8 @@ import com.nexa.app.presentation.transfer.TransferViewModel
 import com.nexa.app.presentation.transfer.components.FilePreSharePreviewDialog
 import com.nexa.app.presentation.transfer.components.IncomingTransferDialog
 import com.nexa.app.presentation.transfer.components.TransferProgressCard
+import com.nexa.app.presentation.settings.privacy.BlockContactConfirmationDialog
+import com.nexa.app.presentation.settings.privacy.UnblockContactConfirmationDialog
 import java.io.File
 import kotlinx.coroutines.launch
 
@@ -153,7 +164,18 @@ fun ChatScreen(
     val snackbarHostState = remember { SnackbarHostState() }
     val listState = rememberLazyListState()
     val coroutineScope = rememberCoroutineScope()
+    val clipboardManager = LocalClipboardManager.current
     val isDark = isSystemInDarkTheme()
+
+    // Encrypted SMS fallback: hand the NX1 packet to the user's own SMS app (Mode A, zero SMS permissions).
+    LaunchedEffect(Unit) {
+        viewModel.smsComposerRequests.collect { request ->
+            val launched = SmsComposerLauncher.launch(context, request)
+            if (!launched) {
+                snackbarHostState.showSnackbar("No SMS application is available on this device.")
+            }
+        }
+    }
     val currentLocalDate by rememberCurrentLocalDate()
 
     var phoneInputText by remember { mutableStateOf(uiState.destinationPhone) }
@@ -166,6 +188,7 @@ fun ChatScreen(
     var isTransportSelectorOpen by remember { mutableStateOf(false) }
     var showDeleteChatDialog by remember { mutableStateOf(false) }
     var showClearChatDialog by remember { mutableStateOf(false) }
+    var showBackupPolicyDialog by remember { mutableStateOf(false) }
     var isGhostModeActive by remember { mutableStateOf(false) }
 
     var selectedMessageForMenu by remember { mutableStateOf<Message?>(null) }
@@ -578,6 +601,27 @@ fun ChatScreen(
         )
     }
 
+    // Encrypted SMS fallback sheet (consent, handoff, manual NX1 import)
+    if (uiState.smsFallback.isOpen) {
+        SmsFallbackSheet(
+            state = uiState.smsFallback,
+            draftText = uiState.inputText,
+            onDismiss = { viewModel.onEvent(ChatUiEvent.CloseSmsFallback) },
+            onPrepare = { viewModel.onEvent(ChatUiEvent.PrepareSmsFallback) },
+            onOpenSmsApp = { viewModel.onEvent(ChatUiEvent.ConfirmSmsFallbackHandoff) },
+            onMarkSent = { viewModel.onEvent(ChatUiEvent.MarkSmsFallbackSent) },
+            onCopyPacket = {
+                uiState.smsFallback.plan?.bodyText?.let { clipboardManager.setText(AnnotatedString(it)) }
+            },
+            onImportSenderChanged = { viewModel.onEvent(ChatUiEvent.SetSmsImportSender(it)) },
+            onImportBodyChanged = { viewModel.onEvent(ChatUiEvent.SetSmsImportBody(it)) },
+            onImport = { viewModel.onEvent(ChatUiEvent.ImportSmsPacket) },
+            onCopyAck = {
+                uiState.smsFallback.ackToken?.let { clipboardManager.setText(AnnotatedString(it)) }
+            }
+        )
+    }
+
     // 3-Tier Identity Profile Dialog
     if (uiState.showProfileDialog) {
         PeerProfileDialog(
@@ -768,6 +812,55 @@ fun ChatScreen(
         )
     }
 
+    if (showBackupPolicyDialog) {
+        val conv = currentConversation
+        com.nexa.app.presentation.backup.components.ConversationBackupPolicyDialog(
+            conversationTitle = uiState.participantName.ifBlank { participantName },
+            currentPolicy = conv?.backupPolicy ?: com.nexa.app.domain.model.ConversationBackupPolicy.DEFAULT,
+            currentCustomCategories = conv?.customBackupCategories,
+            onDismiss = { showBackupPolicyDialog = false },
+            onSavePolicy = { policy, customCats ->
+                coroutineScope.launch {
+                    nexaApp.driveBackupRepository.setConversationBackupPolicy(conversationId, policy, customCats)
+                    val label = policy.name.lowercase().replaceFirstChar { it.uppercase() }
+                    snackbarHostState.showSnackbar("Backup policy set to $label")
+                }
+            }
+        )
+    }
+
+    if (uiState.showBlockContactDialog) {
+        BlockContactConfirmationDialog(
+            contactName = uiState.participantName.ifBlank { participantName },
+            onConfirmBlock = { alsoReport, deleteChat ->
+                viewModel.onEvent(ChatUiEvent.BlockContact(alsoReport, deleteChat))
+                if (alsoReport) {
+                    coroutineScope.launch {
+                        snackbarHostState.showSnackbar("Contact blocked. Report feature is not supported in this build.")
+                    }
+                } else {
+                    coroutineScope.launch {
+                        snackbarHostState.showSnackbar("Contact blocked")
+                    }
+                }
+            },
+            onDismiss = { viewModel.onEvent(ChatUiEvent.SetBlockDialogVisible(false)) }
+        )
+    }
+
+    if (uiState.showUnblockContactDialog) {
+        UnblockContactConfirmationDialog(
+            contactName = uiState.participantName.ifBlank { participantName },
+            onConfirmUnblock = {
+                viewModel.onEvent(ChatUiEvent.UnblockContact)
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar("Contact unblocked")
+                }
+            },
+            onDismiss = { viewModel.onEvent(ChatUiEvent.SetUnblockDialogVisible(false)) }
+        )
+    }
+
     val backgroundColor = if (isDark) Color.Black else Color.White
 
     Scaffold(
@@ -839,6 +932,36 @@ fun ChatScreen(
                             isTransportSelectorOpen = false
                         }
                     )
+                }
+
+                // Blocked Contact Banner
+                if (uiState.isContactBlocked) {
+                    Surface(
+                        color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.4f)),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_nexa_block),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.error,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "You blocked this contact. You won't receive messages from this contact while they are blocked.",
+                                style = MaterialTheme.typography.labelSmall.copy(fontSize = 12.sp, lineHeight = 16.sp),
+                                color = if (isDark) Color(0xFFFFB4AB) else Color(0xFFBA1A1A)
+                            )
+                        }
+                    }
                 }
 
                 // Contextual Security & Transport Banner
@@ -933,96 +1056,140 @@ fun ChatScreen(
                     }
                 }
 
-                // 2. Vertically Scrollable Message Stream
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                ) {
-                    itemsIndexed(
-                        items = uiState.messages,
-                        key = { index, msg ->
-                            msg.packetId.ifBlank { "${msg.conversationId}:${msg.localSequence}:$index" }
-                        }
-                    ) { index, msg ->
-                        // Message Grouping calculation (within 2 minutes of adjacent message from same sender)
-                        val prevMsg = uiState.messages.getOrNull(index - 1)
-                        val nextMsg = uiState.messages.getOrNull(index + 1)
-
-                        // Date Separator between different calendar days
-                        val isDifferentDay = prevMsg == null || !isSameCalendarDay(prevMsg.timestamp, msg.timestamp)
-                        if (isDifferentDay) {
-                            ChatDateSeparator(timestamp = msg.timestamp, currentDate = currentLocalDate)
-                        }
-
-                        val isFirstInGroup = prevMsg == null ||
-                                isDifferentDay ||
-                                prevMsg.isOutgoing != msg.isOutgoing ||
-                                Math.abs(msg.timestamp - prevMsg.timestamp) > 120_000
-
-                        val isLastInGroup = nextMsg == null ||
-                                !isSameCalendarDay(nextMsg.timestamp, msg.timestamp) ||
-                                nextMsg.isOutgoing != msg.isOutgoing ||
-                                Math.abs(nextMsg.timestamp - msg.timestamp) > 120_000
-
-                        val reactions = messageReactions[msg.packetId].orEmpty()
-
-                        val originalQuoted = remember(msg.replyToMessageId, uiState.messages) {
-                            if (msg.replyToMessageId != null) {
-                                uiState.messages.find { it.packetId == msg.replyToMessageId }
-                            } else null
-                        }
-
-                        SwipeToReplyContainer(
-                            isOutgoing = msg.isOutgoing,
-                            onReply = {
-                                replyingMessage = msg
-                                viewModel.onEvent(ChatUiEvent.SetReplyingMessage(msg))
-                            }
+                // 2. Vertically Scrollable Message Stream or Cleared Chat Empty State
+                if (uiState.isContactBlocked && uiState.messages.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 24.dp, vertical = 32.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
                         ) {
-                            NexaMessageBubble(
-                                message = msg,
-                                isFirstInGroup = isFirstInGroup,
-                                isLastInGroup = isLastInGroup,
-                                reactions = reactions,
-                                isHighlighted = uiState.highlightedMessageId == msg.packetId ||
-                                        selectedMessageForMenu?.packetId == msg.packetId,
-                                originalQuotedMessage = originalQuoted,
-                                textScale = chatsSettings.fontSize.scale,
-                                highContrast = accessibilitySettings.highContrastMessages,
-                                onQuotedMessageClick = { targetPacketId ->
-                                    val targetIndex = uiState.messages.indexOfFirst { it.packetId == targetPacketId }
-                                    if (targetIndex >= 0) {
-                                        coroutineScope.launch {
-                                            listState.animateScrollToItem(targetIndex)
-                                        }
-                                        viewModel.onEvent(ChatUiEvent.HighlightMessage(targetPacketId))
-                                    } else {
-                                        coroutineScope.launch {
-                                            snackbarHostState.showSnackbar("Original message is no longer available")
-                                        }
-                                    }
-                                },
-                                onFailedClick = { failedMsg ->
-                                    viewModel.onEvent(ChatUiEvent.OnFailedMessageClicked(failedMsg))
-                                },
-                                onLongClick = {
-                                    selectedMessageForMenu = msg
-                                    isAttachmentMenuOpen = false
-                                    isEmojiPanelOpen = false
-                                    isTransportSelectorOpen = false
-                                },
-                                onReactionClick = { reaction ->
-                                    val currentList = messageReactions.getOrPut(msg.packetId) { mutableListOf() }
-                                    if (currentList.contains(reaction)) {
-                                        currentList.remove(reaction)
-                                    } else {
-                                        currentList.add(reaction)
-                                    }
-                                }
+                            Box(
+                                modifier = Modifier
+                                    .size(72.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isDark) Color(0x33262626) else Color(0x33E5E7EB)),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_nexa_block),
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(32.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Text(
+                                text = "No Chats Available",
+                                style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.onSurface,
+                                textAlign = TextAlign.Center
                             )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "You cleared this conversation. Your previous chat history is no longer available on this device.",
+                                style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                    ) {
+                        itemsIndexed(
+                            items = uiState.messages,
+                            key = { index, msg ->
+                                msg.packetId.ifBlank { "${msg.conversationId}:${msg.localSequence}:$index" }
+                            }
+                        ) { index, msg ->
+                            // Message Grouping calculation (within 2 minutes of adjacent message from same sender)
+                            val prevMsg = uiState.messages.getOrNull(index - 1)
+                            val nextMsg = uiState.messages.getOrNull(index + 1)
+
+                            // Date Separator between different calendar days
+                            val isDifferentDay = prevMsg == null || !isSameCalendarDay(prevMsg.timestamp, msg.timestamp)
+                            if (isDifferentDay) {
+                                ChatDateSeparator(timestamp = msg.timestamp, currentDate = currentLocalDate)
+                            }
+
+                            val isFirstInGroup = prevMsg == null ||
+                                    isDifferentDay ||
+                                    prevMsg.isOutgoing != msg.isOutgoing ||
+                                    Math.abs(msg.timestamp - prevMsg.timestamp) > 120_000
+
+                            val isLastInGroup = nextMsg == null ||
+                                    !isSameCalendarDay(nextMsg.timestamp, msg.timestamp) ||
+                                    nextMsg.isOutgoing != msg.isOutgoing ||
+                                    Math.abs(nextMsg.timestamp - msg.timestamp) > 120_000
+
+                            val reactions = messageReactions[msg.packetId].orEmpty()
+
+                            val originalQuoted = remember(msg.replyToMessageId, uiState.messages) {
+                                if (msg.replyToMessageId != null) {
+                                    uiState.messages.find { it.packetId == msg.replyToMessageId }
+                                } else null
+                            }
+
+                            SwipeToReplyContainer(
+                                isOutgoing = msg.isOutgoing,
+                                onReply = {
+                                    replyingMessage = msg
+                                    viewModel.onEvent(ChatUiEvent.SetReplyingMessage(msg))
+                                }
+                            ) {
+                                NexaMessageBubble(
+                                    message = msg,
+                                    isFirstInGroup = isFirstInGroup,
+                                    isLastInGroup = isLastInGroup,
+                                    reactions = reactions,
+                                    isHighlighted = uiState.highlightedMessageId == msg.packetId ||
+                                            selectedMessageForMenu?.packetId == msg.packetId,
+                                    originalQuotedMessage = originalQuoted,
+                                    textScale = chatsSettings.fontSize.scale,
+                                    highContrast = accessibilitySettings.highContrastMessages,
+                                    onQuotedMessageClick = { targetPacketId ->
+                                        val targetIndex = uiState.messages.indexOfFirst { it.packetId == targetPacketId }
+                                        if (targetIndex >= 0) {
+                                            coroutineScope.launch {
+                                                listState.animateScrollToItem(targetIndex)
+                                            }
+                                            viewModel.onEvent(ChatUiEvent.HighlightMessage(targetPacketId))
+                                        } else {
+                                            coroutineScope.launch {
+                                                snackbarHostState.showSnackbar("Original message is no longer available")
+                                            }
+                                        }
+                                    },
+                                    onFailedClick = { failedMsg ->
+                                        viewModel.onEvent(ChatUiEvent.OnFailedMessageClicked(failedMsg))
+                                    },
+                                    onLongClick = {
+                                        selectedMessageForMenu = msg
+                                        isAttachmentMenuOpen = false
+                                        isEmojiPanelOpen = false
+                                        isTransportSelectorOpen = false
+                                    },
+                                    onReactionClick = { reaction ->
+                                        val currentList = messageReactions.getOrPut(msg.packetId) { mutableListOf() }
+                                        if (currentList.contains(reaction)) {
+                                            currentList.remove(reaction)
+                                        } else {
+                                            currentList.add(reaction)
+                                        }
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -1070,58 +1237,111 @@ fun ChatScreen(
                     else uiState.participantName.ifBlank { activeReplyingMessage.senderNxId }
                 }
 
-                NexaMessageComposer(
-                    text = uiState.inputText,
-                    onTextChanged = { viewModel.onEvent(ChatUiEvent.OnInputTextChanged(it)) },
-                    onSendClicked = {
-                        viewModel.onEvent(ChatUiEvent.SendMessage)
-                        replyingMessage = null
-                    },
-                    onEmojiToggle = {
-                        isEmojiPanelOpen = !isEmojiPanelOpen
-                        if (isEmojiPanelOpen) {
-                            keyboardController?.hide()
-                            isAttachmentMenuOpen = false
-                            isTransportSelectorOpen = false
-                            selectedMessageForMenu = null
+                if (uiState.isContactBlocked) {
+                    Surface(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        color = if (isDark) Color(0x33262626) else Color(0xFFF3F4F6),
+                        shape = RoundedCornerShape(20.dp),
+                        border = BorderStroke(1.dp, if (isDark) Color(0x22FFFFFF) else Color(0x15000000))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(
+                                    painter = painterResource(id = R.drawable.ic_nexa_block),
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(modifier = Modifier.width(10.dp))
+                                Text(
+                                    text = "You blocked this contact.",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Button(
+                                onClick = { viewModel.onEvent(ChatUiEvent.SetUnblockDialogVisible(true)) },
+                                shape = RoundedCornerShape(12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.primary,
+                                    contentColor = Color.Black
+                                ),
+                                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = "Unblock",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
                         }
-                    },
-                    isEmojiPanelOpen = isEmojiPanelOpen,
-                    onAttachmentToggle = {
-                        isAttachmentMenuOpen = !isAttachmentMenuOpen
-                        if (isAttachmentMenuOpen) {
-                            keyboardController?.hide()
-                            isEmojiPanelOpen = false
-                            isTransportSelectorOpen = false
-                            selectedMessageForMenu = null
-                        }
-                    },
-                    isAttachmentMenuOpen = isAttachmentMenuOpen,
-                    onCameraClicked = {
-                        launchCameraCapture()
-                    },
-                    selectedTransport = uiState.selectedTransport,
-                    replyingMessage = activeReplyingMessage,
-                    replySenderName = replySenderDisplayName,
-                    onCancelReply = {
-                        replyingMessage = null
-                        viewModel.onEvent(ChatUiEvent.CancelReply)
-                    },
-                    isRecordingVoice = isVoiceRecording,
-                    onStartVoiceRecording = { isVoiceRecording = true },
-                    onCancelVoiceRecording = { isVoiceRecording = false },
-                    onSendVoiceRecording = {
-                        isVoiceRecording = false
-                        coroutineScope.launch {
-                            snackbarHostState.showSnackbar("Voice note encrypted and sent.")
-                        }
-                    },
-                    onScheduleClicked = {
-                        viewModel.onEvent(ChatUiEvent.SetScheduleDialogVisible(true))
-                    },
-                    textScale = chatsSettings.fontSize.scale,
-                    enterToSend = chatsSettings.enterToSend
-                )
+                    }
+                } else {
+                    NexaMessageComposer(
+                        text = uiState.inputText,
+                        onTextChanged = { viewModel.onEvent(ChatUiEvent.OnInputTextChanged(it)) },
+                        onSendClicked = {
+                            viewModel.onEvent(ChatUiEvent.SendMessage)
+                            replyingMessage = null
+                        },
+                        onEmojiToggle = {
+                            isEmojiPanelOpen = !isEmojiPanelOpen
+                            if (isEmojiPanelOpen) {
+                                keyboardController?.hide()
+                                isAttachmentMenuOpen = false
+                                isTransportSelectorOpen = false
+                                selectedMessageForMenu = null
+                            }
+                        },
+                        isEmojiPanelOpen = isEmojiPanelOpen,
+                        onAttachmentToggle = {
+                            isAttachmentMenuOpen = !isAttachmentMenuOpen
+                            if (isAttachmentMenuOpen) {
+                                keyboardController?.hide()
+                                isEmojiPanelOpen = false
+                                isTransportSelectorOpen = false
+                                selectedMessageForMenu = null
+                            }
+                        },
+                        isAttachmentMenuOpen = isAttachmentMenuOpen,
+                        onCameraClicked = {
+                            launchCameraCapture()
+                        },
+                        selectedTransport = uiState.selectedTransport,
+                        replyingMessage = activeReplyingMessage,
+                        replySenderName = replySenderDisplayName,
+                        onCancelReply = {
+                            replyingMessage = null
+                            viewModel.onEvent(ChatUiEvent.CancelReply)
+                        },
+                        isRecordingVoice = isVoiceRecording,
+                        onStartVoiceRecording = { isVoiceRecording = true },
+                        onCancelVoiceRecording = { isVoiceRecording = false },
+                        onSendVoiceRecording = {
+                            isVoiceRecording = false
+                            coroutineScope.launch {
+                                snackbarHostState.showSnackbar("Voice note encrypted and sent.")
+                            }
+                        },
+                        onScheduleClicked = {
+                            viewModel.onEvent(ChatUiEvent.SetScheduleDialogVisible(true))
+                        },
+                        textScale = chatsSettings.fontSize.scale,
+                        enterToSend = chatsSettings.enterToSend
+                    )
+                }
 
                 // Expandable Emoji Panel
                 AnimatedVisibility(
@@ -1193,6 +1413,7 @@ fun ChatScreen(
                 ) {
                     NexaChatOverflowMenu(
                         isGhostModeActive = isGhostModeActive,
+                        isContactBlocked = uiState.isContactBlocked,
                         onActionSelected = { action ->
                             isOverflowMenuOpen = false
                             when (action) {
@@ -1205,6 +1426,9 @@ fun ChatScreen(
                                 }
                                 ChatOverflowAction.SEARCH_CHAT -> {
                                     viewModel.onEvent(ChatUiEvent.SetSearchActive(true))
+                                }
+                                ChatOverflowAction.BACKUP_POLICY -> {
+                                    showBackupPolicyDialog = true
                                 }
                                 ChatOverflowAction.DELETE_CHAT -> {
                                     showDeleteChatDialog = true
@@ -1244,6 +1468,12 @@ fun ChatScreen(
                                         onBack()
                                     }
                                 }
+                                ChatOverflowAction.BLOCK_CONTACT -> {
+                                    viewModel.onEvent(ChatUiEvent.SetBlockDialogVisible(true))
+                                }
+                                ChatOverflowAction.UNBLOCK_CONTACT -> {
+                                    viewModel.onEvent(ChatUiEvent.SetUnblockDialogVisible(true))
+                                }
                                 else -> Unit
                             }
                         },
@@ -1275,15 +1505,14 @@ fun ChatScreen(
 
                     NexaTransportSelector(
                         currentOption = currentTransportOption,
+                        isSmsSupported = true,
                         onOptionSelected = { option ->
                             isTransportSelectorOpen = false
                             when (option) {
                                 NexaTransportOption.INTERNET -> viewModel.onEvent(ChatUiEvent.SetTransport(TransportType.INTERNET))
                                 NexaTransportOption.SMS -> {
-                                    viewModel.onEvent(ChatUiEvent.SetTransport(TransportType.DATA_SMS))
-                                    if (uiState.destinationPhone.isBlank()) {
-                                        viewModel.onEvent(ChatUiEvent.SetPhoneDialogVisible(true))
-                                    }
+                                    // Encrypted SMS fallback: eligibility, encryption and consent live in the sheet.
+                                    viewModel.onEvent(ChatUiEvent.OpenSmsFallback)
                                 }
                                 NexaTransportOption.MESH_BLUETOOTH -> viewModel.onEvent(ChatUiEvent.SetTransport(TransportType.DTN_MESH))
                                 NexaTransportOption.AUTO -> {

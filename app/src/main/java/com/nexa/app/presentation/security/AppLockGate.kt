@@ -4,8 +4,10 @@ import android.app.Activity
 import android.hardware.biometrics.BiometricPrompt
 import android.os.Build
 import android.os.CancellationSignal
+import android.os.SystemClock
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,18 +18,17 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -45,36 +46,97 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.nexa.app.R
+import com.nexa.app.core.security.AppLockSecurityPolicy
+import com.nexa.app.core.security.AutoLockTimeout
 import com.nexa.app.core.security.SecureStorage
 import com.nexa.app.presentation.common.glass.NexaGlassSurface
+import kotlinx.coroutines.delay
 
 /**
- * Full-screen local app-lock gate. Re-locks when the activity is stopped so the
- * lock also applies to the Android recents preview on the next foreground.
+ * Tracks background state and monotonic timestamp across lifecycle events.
+ */
+object AppLockSessionTracker {
+    var lastBackgroundTimestamp: Long = 0L
+    var isBackgrounded: Boolean = false
+}
+
+/**
+ * Full-screen local app-lock gate. Enforces Auto-Lock delay, background lifecycle locks,
+ * and window preview/screenshot security flags.
  */
 @Composable
 fun AppLockGate(
     secureStorage: SecureStorage,
     content: @Composable () -> Unit
 ) {
+    val context = LocalContext.current
+    val activity = context as? Activity
     var enabled by remember { mutableStateOf(secureStorage.isAppLockEnabled()) }
     var unlocked by remember { mutableStateOf(!secureStorage.isAppLockEnabled()) }
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, enabled) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                // Re-read the persisted flag so enabling/disabling App Lock in Settings
-                // takes effect without a process restart.
                 Lifecycle.Event.ON_START -> {
                     enabled = secureStorage.isAppLockEnabled()
-                    if (!enabled) unlocked = true
+                    if (!enabled) {
+                        unlocked = true
+                    } else if (unlocked && AppLockSessionTracker.isBackgrounded) {
+                        val now = SystemClock.elapsedRealtime()
+                        val shouldLock = AppLockSecurityPolicy.shouldLockOnReturn(
+                            lastBackgroundTimestamp = AppLockSessionTracker.lastBackgroundTimestamp,
+                            currentTimestamp = now,
+                            lockOnLeave = secureStorage.isLockOnLeaveEnabled(),
+                            timeoutSeconds = secureStorage.getAutoLockTimeout().seconds
+                        )
+                        if (shouldLock) {
+                            unlocked = false
+                        }
+                    }
+                    AppLockSessionTracker.isBackgrounded = false
+                    AppLockSecurityPolicy.applyWindowSecurity(
+                        window = activity?.window,
+                        isAppLockEnabled = enabled,
+                        blockScreenshots = secureStorage.isBlockScreenshotsEnabled(),
+                        hideAppPreview = secureStorage.isHideAppPreviewEnabled(),
+                        isForeground = true
+                    )
+                }
+                Lifecycle.Event.ON_RESUME -> {
+                    AppLockSecurityPolicy.applyWindowSecurity(
+                        window = activity?.window,
+                        isAppLockEnabled = enabled,
+                        blockScreenshots = secureStorage.isBlockScreenshotsEnabled(),
+                        hideAppPreview = secureStorage.isHideAppPreviewEnabled(),
+                        isForeground = true
+                    )
+                }
+                Lifecycle.Event.ON_PAUSE -> {
+                    AppLockSecurityPolicy.applyWindowSecurity(
+                        window = activity?.window,
+                        isAppLockEnabled = enabled,
+                        blockScreenshots = secureStorage.isBlockScreenshotsEnabled(),
+                        hideAppPreview = secureStorage.isHideAppPreviewEnabled(),
+                        isForeground = false
+                    )
                 }
                 Lifecycle.Event.ON_STOP -> {
-                    if (secureStorage.isAppLockEnabled()) {
-                        enabled = true
+                    AppLockSessionTracker.isBackgrounded = true
+                    AppLockSessionTracker.lastBackgroundTimestamp = SystemClock.elapsedRealtime()
+                    if (secureStorage.isAppLockEnabled() &&
+                        secureStorage.isLockOnLeaveEnabled() &&
+                        secureStorage.getAutoLockTimeout() == AutoLockTimeout.IMMEDIATELY
+                    ) {
                         unlocked = false
                     }
+                    AppLockSecurityPolicy.applyWindowSecurity(
+                        window = activity?.window,
+                        isAppLockEnabled = enabled,
+                        blockScreenshots = secureStorage.isBlockScreenshotsEnabled(),
+                        hideAppPreview = secureStorage.isHideAppPreviewEnabled(),
+                        isForeground = false
+                    )
                 }
                 else -> Unit
             }
@@ -88,7 +150,10 @@ fun AppLockGate(
     } else {
         AppLockUnlockScreen(
             secureStorage = secureStorage,
-            onUnlocked = { unlocked = true }
+            onUnlocked = {
+                secureStorage.resetAppLockFailedAttempts()
+                unlocked = true
+            }
         )
     }
 }
@@ -100,17 +165,43 @@ private fun AppLockUnlockScreen(
 ) {
     var pin by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
-    var failedAttempts by remember { mutableIntStateOf(0) }
+    var lockoutSeconds by remember { mutableLongStateOf(secureStorage.getAppLockLockoutRemainingSeconds()) }
     val context = LocalContext.current
+    val activity = context as? Activity
+
+    // Ensure window security flag is set if configured
+    LaunchedEffect(Unit) {
+        AppLockSecurityPolicy.applyWindowSecurity(
+            window = activity?.window,
+            isAppLockEnabled = true,
+            blockScreenshots = secureStorage.isBlockScreenshotsEnabled(),
+            hideAppPreview = secureStorage.isHideAppPreviewEnabled(),
+            isForeground = true
+        )
+    }
+
+    // Lockout countdown timer
+    LaunchedEffect(lockoutSeconds) {
+        if (lockoutSeconds > 0) {
+            delay(1000L)
+            lockoutSeconds = secureStorage.getAppLockLockoutRemainingSeconds()
+            if (lockoutSeconds == 0L) {
+                error = null
+            }
+        }
+    }
+
+    val isLockedOut = lockoutSeconds > 0
 
     fun tryBiometric() {
-        val activity = context as? Activity ?: return
+        if (isLockedOut) return
+        val act = activity ?: return
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
         if (!secureStorage.isBiometricUnlockEnabled()) return
-        if (activity.isFinishing || activity.isDestroyed) return
+        if (act.isFinishing || act.isDestroyed) return
 
         val executor = ContextCompat.getMainExecutor(context)
-        val prompt = BiometricPrompt.Builder(activity)
+        val prompt = BiometricPrompt.Builder(act)
             .setTitle("Unlock NEXA")
             .setSubtitle("Confirm your identity to open the app")
             .setNegativeButton("Use PIN", executor) { _, _ -> }
@@ -121,6 +212,7 @@ private fun AppLockUnlockScreen(
             executor,
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult?) {
+                    secureStorage.resetAppLockFailedAttempts()
                     onUnlocked()
                 }
 
@@ -135,9 +227,32 @@ private fun AppLockUnlockScreen(
         )
     }
 
-    LaunchedEffect(Unit) { tryBiometric() }
+    LaunchedEffect(isLockedOut) {
+        if (!isLockedOut) {
+            tryBiometric()
+        }
+    }
 
-    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    fun submitPin(enteredPin: String) {
+        if (isLockedOut) return
+        if (secureStorage.verifyAppLockPin(enteredPin)) {
+            secureStorage.resetAppLockFailedAttempts()
+            onUnlocked()
+        } else {
+            pin = ""
+            val attempts = secureStorage.incrementAppLockFailedAttempts()
+            val rem = secureStorage.getAppLockLockoutRemainingSeconds()
+            if (rem > 0) {
+                lockoutSeconds = rem
+                error = "Too many attempts. Locked for ${rem}s."
+            } else {
+                val remaining = (AppLockSecurityPolicy.MAX_FAILED_ATTEMPTS - (attempts % AppLockSecurityPolicy.MAX_FAILED_ATTEMPTS))
+                error = "Incorrect PIN. $remaining attempt(s) remaining."
+            }
+        }
+    }
+
+    val isDark = isSystemInDarkTheme()
     val background = if (isDark) Color.Black else Color.White
     val primary = if (isDark) Color.White else Color(0xFF111111)
     val secondary = if (isDark) Color(0xFFA0A7B5) else Color(0xFF555B66)
@@ -178,7 +293,8 @@ private fun AppLockUnlockScreen(
                 color = primary
             )
             Text(
-                text = "Enter your app-lock PIN to continue",
+                text = if (isLockedOut) "Authentication temporarily blocked"
+                else "Enter your app-lock PIN to continue",
                 fontSize = 13.sp,
                 color = secondary,
                 textAlign = TextAlign.Center
@@ -211,6 +327,13 @@ private fun AppLockUnlockScreen(
                     color = MaterialTheme.colorScheme.error,
                     textAlign = TextAlign.Center
                 )
+            } else if (isLockedOut) {
+                Text(
+                    text = "Too many attempts. Locked for ${lockoutSeconds}s.",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    textAlign = TextAlign.Center
+                )
             }
 
             // Numeric keypad
@@ -227,13 +350,14 @@ private fun AppLockUnlockScreen(
                                     "bio" -> KeypadButton(
                                         label = "",
                                         iconRes = R.drawable.ic_nexa_shield,
-                                        enabled = secureStorage.isBiometricUnlockEnabled() &&
+                                        enabled = !isLockedOut && secureStorage.isBiometricUnlockEnabled() &&
                                             Build.VERSION.SDK_INT >= Build.VERSION_CODES.P,
                                         onClick = { tryBiometric() }
                                     )
                                     "del" -> KeypadButton(
                                         label = "",
                                         iconRes = R.drawable.ic_nexa_close,
+                                        enabled = !isLockedOut,
                                         onClick = {
                                             if (pin.isNotEmpty()) pin = pin.dropLast(1)
                                             error = null
@@ -241,20 +365,17 @@ private fun AppLockUnlockScreen(
                                     )
                                     else -> KeypadButton(
                                         label = key,
+                                        enabled = !isLockedOut,
                                         onClick = {
                                             if (pin.length < 8) {
-                                                pin += key
+                                                val nextPin = pin + key
+                                                pin = nextPin
                                                 error = null
-                                                if (pin.length >= 4 && secureStorage.verifyAppLockPin(pin)) {
+                                                if (nextPin.length >= 4 && secureStorage.verifyAppLockPin(nextPin)) {
+                                                    secureStorage.resetAppLockFailedAttempts()
                                                     onUnlocked()
-                                                } else if (pin.length == 8) {
-                                                    failedAttempts++
-                                                    pin = ""
-                                                    error = if (failedAttempts >= 5) {
-                                                        "Too many attempts. Try biometric unlock or restart the app."
-                                                    } else {
-                                                        "Incorrect PIN. ${5 - failedAttempts} attempt(s) remaining."
-                                                    }
+                                                } else if (nextPin.length == 8) {
+                                                    submitPin(nextPin)
                                                 }
                                             }
                                         }
@@ -267,16 +388,8 @@ private fun AppLockUnlockScreen(
             }
 
             Spacer(modifier = Modifier.height(8.dp))
-            if (pin.length >= 4) {
-                androidx.compose.material3.TextButton(onClick = {
-                    if (secureStorage.verifyAppLockPin(pin)) {
-                        onUnlocked()
-                    } else {
-                        failedAttempts++
-                        pin = ""
-                        error = "Incorrect PIN"
-                    }
-                }) {
+            if (pin.length >= 4 && !isLockedOut) {
+                TextButton(onClick = { submitPin(pin) }) {
                     Text("Unlock", color = MaterialTheme.colorScheme.primary)
                 }
             }
@@ -291,7 +404,7 @@ private fun KeypadButton(
     enabled: Boolean = true,
     onClick: () -> Unit
 ) {
-    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val isDark = isSystemInDarkTheme()
     val surface = if (isDark) Color(0xCC1C1C1C) else Color(0xEEF3F4F6)
     val content = if (isDark) Color.White else Color(0xFF111111)
 
@@ -317,7 +430,7 @@ private fun KeypadButton(
                     text = label,
                     fontSize = 22.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = content
+                    color = content.copy(alpha = if (enabled) 1f else 0.3f)
                 )
             }
         }

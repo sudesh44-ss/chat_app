@@ -27,7 +27,18 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             val appearanceMode by app.appearancePrefs.appearanceMode.collectAsState()
-            NexaTheme(appearanceMode = appearanceMode) {
+            val reduceAnimations by app.appearancePrefs.reduceAnimations.collectAsState()
+            val fontStyle by app.appearancePrefs.fontStyle.collectAsState()
+            val appTextSize by app.appearancePrefs.appTextSize.collectAsState()
+            val chatTextSize by app.appearancePrefs.chatTextSize.collectAsState()
+
+            NexaTheme(
+                appearanceMode = appearanceMode,
+                reduceAnimations = reduceAnimations,
+                fontStyle = fontStyle,
+                appTextSize = appTextSize,
+                chatTextSize = chatTextSize
+            ) {
                 Surface(modifier = Modifier.fillMaxSize()) {
                     AppLockGate(secureStorage = app.secureStorage) {
                         val navController = rememberNavController()

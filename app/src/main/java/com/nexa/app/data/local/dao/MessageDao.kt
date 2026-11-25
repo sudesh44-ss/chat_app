@@ -37,6 +37,15 @@ interface MessageDao {
     @Query("UPDATE messages SET status = :status WHERE packetId = :packetId")
     suspend fun updateMessageStatus(packetId: String, status: String): Int
 
+    @Query("UPDATE messages SET plainTextContent = :newContent, editedAt = :editedAt WHERE packetId = :packetId")
+    suspend fun updateMessageContent(packetId: String, newContent: String, editedAt: Long): Int
+
+    @Query("UPDATE messages SET plainTextContent = :tombstoneText, isDeleted = 1 WHERE packetId = :packetId")
+    suspend fun tombstoneMessage(packetId: String, tombstoneText: String = "This message was deleted"): Int
+
+    @Query("SELECT packetId FROM messages WHERE conversationId = :conversationId AND isOutgoing = 0 AND status != 'READ'")
+    suspend fun getUnreadIncomingPacketIds(conversationId: String): List<String>
+
     @Query("UPDATE messages SET isDeleted = 1 WHERE packetId = :packetId")
     suspend fun softDeleteMessage(packetId: String): Int
 

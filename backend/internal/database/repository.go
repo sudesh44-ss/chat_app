@@ -176,6 +176,21 @@ func (r *PostgresRepository) GetAccountByGoogleID(googleID string) (*identity.Us
 	return acc, true
 }
 
+func (r *PostgresRepository) GetAccountByGoogleIDOrEmail(googleID, email string) (*identity.UserAccount, bool) {
+	if googleID == "" && email == "" {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	query := "SELECT " + accountSelectFields + " FROM accounts WHERE (google_id = $1 AND google_id != '') OR (email = $2 AND email != '') LIMIT 1"
+	acc, err := scanAccount(r.pool.QueryRow(ctx, query, googleID, email))
+	if err != nil {
+		return nil, false
+	}
+	return acc, true
+}
+
 func (r *PostgresRepository) GetAccountBySupabaseUID(supabaseUID string) (*identity.UserAccount, bool) {
 	if supabaseUID == "" {
 		return nil, false

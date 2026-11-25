@@ -21,6 +21,14 @@ import com.nexa.app.domain.manager.ScheduledMessageManager
 import com.nexa.app.domain.model.Message
 import com.nexa.app.domain.model.MessageType
 import com.nexa.app.domain.model.ScheduledMessage
+import com.nexa.app.core.sms.SmsComposerRequest
+import com.nexa.app.core.sms.SmsEligibility
+import com.nexa.app.core.sms.SmsFallbackState
+import com.nexa.app.core.sms.SmsImportOutcome
+import com.nexa.app.core.sms.SmsOutboundPlan
+import com.nexa.app.core.sms.SmsPrepareOutcome
+import com.nexa.app.domain.repository.SmsFallbackRepository
+import com.nexa.app.presentation.chat.components.SmsFallbackUiState
 import com.nexa.app.domain.model.TransportType
 import com.nexa.app.domain.repository.ChatRepository
 import com.nexa.app.domain.repository.ContactRepository
@@ -108,7 +116,14 @@ data class ChatUiState(
     val searchResults: List<Message> = emptyList(),
     val isSearching: Boolean = false,
     val searchMatchIndex: Int = 0,
-    val showDatePickerDialog: Boolean = false
+    val showDatePickerDialog: Boolean = false,
+    // Encrypted SMS fallback (Module 3)
+    val smsFallback: SmsFallbackUiState = SmsFallbackUiState(),
+    val smsFallbackState: SmsFallbackState? = null,
+    // Blocked contact state
+    val isContactBlocked: Boolean = false,
+    val showBlockContactDialog: Boolean = false,
+    val showUnblockContactDialog: Boolean = false
 )
 
 sealed interface ChatUiEvent {
@@ -182,6 +197,23 @@ sealed interface ChatUiEvent {
     data class ToggleReaction(val messageId: String, val emoji: String) : ChatUiEvent
     data class DeleteMessage(val message: Message) : ChatUiEvent
     data class ToggleStarMessage(val message: Message) : ChatUiEvent
+
+    // Encrypted SMS fallback (Module 3)
+    data object OpenSmsFallback : ChatUiEvent
+    data object CloseSmsFallback : ChatUiEvent
+    data object PrepareSmsFallback : ChatUiEvent
+    data object ConfirmSmsFallbackHandoff : ChatUiEvent
+    data object MarkSmsFallbackSent : ChatUiEvent
+    data class SetSmsImportSender(val sender: String) : ChatUiEvent
+    data class SetSmsImportBody(val body: String) : ChatUiEvent
+    data object ImportSmsPacket : ChatUiEvent
+    data object ClearSmsAck : ChatUiEvent
+
+    // Block / unblock contact events
+    data class BlockContact(val alsoReport: Boolean, val deleteChat: Boolean) : ChatUiEvent
+    data object UnblockContact : ChatUiEvent
+    data class SetBlockDialogVisible(val visible: Boolean) : ChatUiEvent
+    data class SetUnblockDialogVisible(val visible: Boolean) : ChatUiEvent
 }
 
 class ChatViewModel(
@@ -190,7 +222,8 @@ class ChatViewModel(
     private val mediaPrefs: MediaPrefs? = null,
     private val chatPrivacyPrefs: ChatPrivacyPrefs? = null,
     private val contactRepository: ContactRepository? = null,
-    private val scheduledMessageManager: ScheduledMessageManager? = null
+    private val scheduledMessageManager: ScheduledMessageManager? = null,
+    private val smsFallbackRepository: SmsFallbackRepository? = null
 ) : ViewModel() {
 
     companion object {
@@ -206,6 +239,9 @@ class ChatViewModel(
     private val _navigateToMessageFlow = MutableSharedFlow<String>(extraBufferCapacity = 8)
     val navigateToMessageFlow: SharedFlow<String> = _navigateToMessageFlow.asSharedFlow()
 
+    private val _smsComposerRequests = MutableSharedFlow<SmsComposerRequest>(extraBufferCapacity = 4)
+    val smsComposerRequests: SharedFlow<SmsComposerRequest> = _smsComposerRequests.asSharedFlow()
+
     private var messagesJob: Job? = null
     private var connectionJob: Job? = null
     private var transportHandoffJob: Job? = null
@@ -217,6 +253,7 @@ class ChatViewModel(
     private var scheduledMessagesJob: Job? = null
     private var searchJob: Job? = null
     private var draftSaveJob: Job? = null
+    private var blockStatusJob: Job? = null
     private var isCurrentlyTypingSent = false
     private var lastTypingSentMs: Long = 0L
 
@@ -455,6 +492,31 @@ class ChatViewModel(
             is ChatUiEvent.ToggleReaction -> toggleReaction(event.messageId, event.emoji)
             is ChatUiEvent.DeleteMessage -> deleteMessage(event.message)
             is ChatUiEvent.ToggleStarMessage -> toggleStarMessage(event.message)
+
+            // Encrypted SMS fallback (Module 3)
+            is ChatUiEvent.OpenSmsFallback -> openSmsFallback()
+            is ChatUiEvent.CloseSmsFallback -> _uiState.update {
+                it.copy(smsFallback = it.smsFallback.copy(isOpen = false))
+            }
+            is ChatUiEvent.PrepareSmsFallback -> prepareSmsFallback()
+            is ChatUiEvent.ConfirmSmsFallbackHandoff -> confirmSmsFallbackHandoff()
+            is ChatUiEvent.MarkSmsFallbackSent -> markSmsFallbackSent()
+            is ChatUiEvent.SetSmsImportSender -> _uiState.update {
+                it.copy(smsFallback = it.smsFallback.copy(importSender = event.sender))
+            }
+            is ChatUiEvent.SetSmsImportBody -> _uiState.update {
+                it.copy(smsFallback = it.smsFallback.copy(importBody = event.body))
+            }
+            is ChatUiEvent.ImportSmsPacket -> importSmsPacket()
+            is ChatUiEvent.ClearSmsAck -> _uiState.update {
+                it.copy(smsFallback = it.smsFallback.copy(ackToken = null))
+            }
+
+            // Block / unblock contact events
+            is ChatUiEvent.BlockContact -> blockCurrentContact(event.alsoReport, event.deleteChat)
+            is ChatUiEvent.UnblockContact -> unblockCurrentContact()
+            is ChatUiEvent.SetBlockDialogVisible -> _uiState.update { it.copy(showBlockContactDialog = event.visible) }
+            is ChatUiEvent.SetUnblockDialogVisible -> _uiState.update { it.copy(showUnblockContactDialog = event.visible) }
         }
     }
 
@@ -588,7 +650,9 @@ class ChatViewModel(
 
         observePinnedMessages(event.conversationId)
         observeTyping(event.conversationId)
+        observePresence(event.participantNxId)
         observeScheduledMessages(event.conversationId)
+        observeBlockStatus(event.participantNxId)
         markConversationAsRead()
     }
 
@@ -671,6 +735,81 @@ class ChatViewModel(
         }
     }
 
+    private var presenceJob: kotlinx.coroutines.Job? = null
+
+    private fun observePresence(participantNxId: String) {
+        presenceJob?.cancel()
+        if (participantNxId.isBlank()) return
+        presenceJob = viewModelScope.launch {
+            chatRepository.getPresenceEvents().collect { (nxId, isOnline) ->
+                if (nxId == participantNxId) {
+                    val showOnline = chatPrivacyPrefs?.showOnlineStatus ?: true
+                    val presenceMode = chatPrivacyPrefs?.onlinePresenceMode ?: OnlinePrivacyMode.EVERYONE
+                    val canView = showOnline && presenceMode != OnlinePrivacyMode.NOBODY
+                    _uiState.update { it.copy(isPeerOnline = if (canView) isOnline else false) }
+                }
+            }
+        }
+    }
+
+    private fun observeBlockStatus(participantNxId: String) {
+        blockStatusJob?.cancel()
+        if (participantNxId.isBlank()) return
+        blockStatusJob = viewModelScope.launch {
+            val initialBlocked = contactRepository?.isUserBlocked(participantNxId)
+                ?: chatRepository.isUserBlocked(participantNxId)
+            _uiState.update { it.copy(isContactBlocked = initialBlocked) }
+
+            contactRepository?.getBlockedContactsFlow()?.collect { blockedList ->
+                val isBlocked = blockedList.any { it.nxId.equals(participantNxId, ignoreCase = true) }
+                _uiState.update { it.copy(isContactBlocked = isBlocked) }
+            }
+        }
+    }
+
+    private fun blockCurrentContact(alsoReport: Boolean, deleteChat: Boolean) {
+        val peerId = _uiState.value.participantNxId
+        val convId = _uiState.value.conversationId
+        if (peerId.isBlank()) return
+
+        viewModelScope.launch {
+            try {
+                contactRepository?.blockUser(peerId)
+                if (deleteChat && convId.isNotBlank()) {
+                    chatRepository.deleteChat(convId)
+                    _uiState.update { it.copy(messages = emptyList(), inputText = "") }
+                }
+                _uiState.update {
+                    it.copy(
+                        isContactBlocked = true,
+                        showBlockContactDialog = false
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to block contact $peerId", e)
+            }
+        }
+    }
+
+    private fun unblockCurrentContact() {
+        val peerId = _uiState.value.participantNxId
+        if (peerId.isBlank()) return
+
+        viewModelScope.launch {
+            try {
+                contactRepository?.unblockUser(peerId)
+                _uiState.update {
+                    it.copy(
+                        isContactBlocked = false,
+                        showUnblockContactDialog = false
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to unblock contact $peerId", e)
+            }
+        }
+    }
+
     private fun observeConnection() {
         connectionJob?.cancel()
         connectionJob = viewModelScope.launch {
@@ -688,10 +827,11 @@ class ChatViewModel(
                         } else {
                             current.selectedTransport
                         }
+                        val canView = showOnlineStatus && presenceMode != OnlinePrivacyMode.NOBODY
                         current.copy(
                             connectionState = state,
                             selectedTransport = updatedTransport,
-                            isPeerOnline = showOnlineStatus && presenceMode != OnlinePrivacyMode.NOBODY
+                            isPeerOnline = if (canView) current.isPeerOnline else false
                         )
                     }
                 } else {
@@ -767,6 +907,217 @@ class ChatViewModel(
         }
     }
 
+    // --- Encrypted SMS fallback (Module 3) ---
+
+    private fun openSmsFallback() {
+        val state = _uiState.value
+        _uiState.update {
+            it.copy(smsFallback = it.smsFallback.copy(isOpen = true, errorMessage = null, statusMessage = null))
+        }
+        val repo = smsFallbackRepository
+        if (repo == null) {
+            _uiState.update {
+                it.copy(smsFallback = it.smsFallback.copy(errorMessage = "Encrypted SMS fallback is unavailable in this build."))
+            }
+            return
+        }
+        val peerNxId = state.participantNxId
+        if (peerNxId.isBlank()) return
+        viewModelScope.launch {
+            try {
+                val eligibility = repo.eligibilityFor(
+                    peerNxId = peerNxId,
+                    conversationId = state.conversationId,
+                    destinationPhone = state.destinationPhone.ifBlank { null }
+                )
+                var status: String? = null
+                if (!eligibility.eligible &&
+                    eligibility.reason == com.nexa.app.core.sms.SmsBlockReason.SESSION_MISSING &&
+                    state.connectionState is ConnectionState.Connected
+                ) {
+                    // Provisioning is a public-key exchange inside the authenticated E2EE channel.
+                    val sent = chatRepository.sendSmsKeyProvisioning(peerNxId)
+                    status = if (sent.isSuccess) {
+                        "Sent a secure SMS key request. Keep NEXA open on both devices once, then try again."
+                    } else {
+                        "Encrypted SMS provisioning could not be sent right now."
+                    }
+                }
+                _uiState.update {
+                    it.copy(
+                        smsFallback = it.smsFallback.copy(eligibility = eligibility, statusMessage = status),
+                        smsFallbackState = eligibility.state
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to evaluate encrypted SMS eligibility", e)
+                _uiState.update {
+                    it.copy(smsFallback = it.smsFallback.copy(errorMessage = "Could not evaluate encrypted SMS availability."))
+                }
+            }
+        }
+    }
+
+    private fun prepareSmsFallback() {
+        val repo = smsFallbackRepository ?: return
+        val state = _uiState.value
+        val text = SafeMessageParser.sanitizeInputText(state.inputText.trim())
+        if (text.isBlank()) {
+            _uiState.update {
+                it.copy(smsFallback = it.smsFallback.copy(errorMessage = "Type a text message first. SMS fallback is text only."))
+            }
+            return
+        }
+        _uiState.update {
+            it.copy(smsFallback = it.smsFallback.copy(isPreparing = true, errorMessage = null, statusMessage = null))
+        }
+        viewModelScope.launch {
+            try {
+                when (val outcome = repo.prepareOutbound(
+                    peerNxId = state.participantNxId,
+                    text = text,
+                    destinationPhone = state.destinationPhone.ifBlank { null },
+                    requestedConversationId = state.conversationId
+                )) {
+                    is SmsPrepareOutcome.Ready -> {
+                        val plan: SmsOutboundPlan = outcome.plan
+                        _uiState.update {
+                            it.copy(
+                                inputText = "",
+                                smsFallback = it.smsFallback.copy(
+                                    isPreparing = false,
+                                    plan = plan,
+                                    segmentCount = plan.segmentCount,
+                                    statusMessage = "Packet encrypted locally. Your SMS app will send it."
+                                ),
+                                smsFallbackState = SmsFallbackState.SMS_READY
+                            )
+                        }
+                    }
+                    is SmsPrepareOutcome.Blocked -> _uiState.update {
+                        it.copy(
+                            smsFallback = it.smsFallback.copy(
+                                isPreparing = false,
+                                eligibility = outcome.eligibility,
+                                errorMessage = outcome.eligibility.userMessage
+                            ),
+                            smsFallbackState = outcome.eligibility.state
+                        )
+                    }
+                    is SmsPrepareOutcome.Failed -> _uiState.update {
+                        it.copy(
+                            smsFallback = it.smsFallback.copy(isPreparing = false, errorMessage = outcome.userMessage),
+                            smsFallbackState = SmsFallbackState.SMS_FAILED
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to prepare encrypted SMS fallback", e)
+                _uiState.update {
+                    it.copy(
+                        smsFallback = it.smsFallback.copy(isPreparing = false, errorMessage = "Could not prepare the encrypted SMS packet."),
+                        smsFallbackState = SmsFallbackState.SMS_FAILED
+                    )
+                }
+            }
+        }
+    }
+
+    private fun confirmSmsFallbackHandoff() {
+        val plan = _uiState.value.smsFallback.plan ?: return
+        val repo = smsFallbackRepository ?: return
+        _smsComposerRequests.tryEmit(
+            SmsComposerRequest(
+                destinationNumber = plan.destinationNumber,
+                bodyText = plan.bodyText,
+                segmentCount = plan.segmentCount
+            )
+        )
+        viewModelScope.launch {
+            repo.markHandedOffToSmsApp(plan.packetId)
+        }
+        _uiState.update {
+            it.copy(
+                smsFallback = it.smsFallback.copy(
+                    statusMessage = "Handed to your SMS app. NEXA cannot confirm whether the carrier sent it."
+                ),
+                smsFallbackState = SmsFallbackState.SMS_SENDING
+            )
+        }
+    }
+
+    private fun markSmsFallbackSent() {
+        val plan = _uiState.value.smsFallback.plan ?: return
+        val repo = smsFallbackRepository ?: return
+        viewModelScope.launch {
+            repo.markSentUnconfirmed(plan.packetId)
+        }
+        _uiState.update {
+            it.copy(
+                smsFallback = it.smsFallback.copy(statusMessage = "SMS sent — delivery confirmation unavailable."),
+                smsFallbackState = SmsFallbackState.SMS_SENT_UNCONFIRMED
+            )
+        }
+    }
+
+    private fun importSmsPacket() {
+        val repo = smsFallbackRepository ?: return
+        val state = _uiState.value
+        val sender = state.smsFallback.importSender.trim()
+        val body = state.smsFallback.importBody.trim()
+        if (sender.isBlank() || body.isBlank()) {
+            _uiState.update {
+                it.copy(smsFallback = it.smsFallback.copy(errorMessage = "Enter the sender number and the NX1 packet."))
+            }
+            return
+        }
+        _uiState.update {
+            it.copy(smsFallback = it.smsFallback.copy(isImporting = true, errorMessage = null, statusMessage = null))
+        }
+        viewModelScope.launch {
+            try {
+                val outcomes = repo.importBody(sender, body)
+                val notes = ArrayList<String>(outcomes.size)
+                var ackToken: String? = state.smsFallback.ackToken
+                var nextState = _uiState.value.smsFallbackState
+                outcomes.forEach { outcome ->
+                    when (outcome) {
+                        is SmsImportOutcome.NotNx1 -> notes.add("No NX1 packet found in that SMS.")
+                        is SmsImportOutcome.Incomplete -> notes.add(
+                            "Waiting for ${(outcome.totalParts - outcome.receivedParts).coerceAtLeast(1)} more SMS part(s)."
+                        )
+                        is SmsImportOutcome.Rejected -> notes.add(outcome.userMessage)
+                        is SmsImportOutcome.Delivered -> {
+                            notes.add(if (outcome.duplicate) "Already imported." else "Decrypted and saved to this conversation.")
+                            outcome.ackToken?.let { ackToken = it }
+                        }
+                        is SmsImportOutcome.AckAccepted -> {
+                            notes.add(if (outcome.duplicate) "Delivery ACK already recorded." else "Delivery confirmed by authenticated ACK.")
+                            nextState = SmsFallbackState.SMS_DELIVERED_APP_ACK
+                        }
+                        is SmsImportOutcome.AckRejected -> notes.add("ACK rejected: ${outcome.reason}")
+                    }
+                }
+                _uiState.update {
+                    it.copy(
+                        smsFallback = it.smsFallback.copy(
+                            isImporting = false,
+                            importBody = "",
+                            ackToken = ackToken,
+                            statusMessage = notes.joinToString("\n")
+                        ),
+                        smsFallbackState = nextState
+                    )
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to import encrypted SMS packet", e)
+                _uiState.update {
+                    it.copy(smsFallback = it.smsFallback.copy(isImporting = false, errorMessage = "Could not import that SMS."))
+                }
+            }
+        }
+    }
+
     private fun retryFailedMessage(targetTransport: TransportType) {
         val failed = _uiState.value.failedMessageCandidate ?: return
         _uiState.update { it.copy(showSmsFailureSheet = false, failedMessageCandidate = null) }
@@ -820,6 +1171,10 @@ class ChatViewModel(
 
     private fun dispatchMessage() {
         val state = _uiState.value
+        if (state.isContactBlocked) {
+            _uiState.update { it.copy(errorMessage = "Cannot send message to a blocked contact.") }
+            return
+        }
         val text = SafeMessageParser.sanitizeInputText(state.inputText.trim())
         if (text.isBlank() || state.participantNxId.isBlank()) return
 

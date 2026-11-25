@@ -35,8 +35,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.nexa.app.presentation.common.viewer.ProfileImageViewerScreen
-import com.nexa.app.presentation.profile.components.BlockContactDialog
 import com.nexa.app.presentation.profile.components.ClearChatDialog
+import com.nexa.app.presentation.settings.privacy.BlockContactConfirmationDialog
+import com.nexa.app.presentation.settings.privacy.UnblockContactConfirmationDialog
 import com.nexa.app.presentation.profile.components.ContactActionButtons
 import com.nexa.app.presentation.profile.components.ContactActiveStatus
 import com.nexa.app.presentation.profile.components.ContactInfoCard
@@ -46,6 +47,7 @@ import com.nexa.app.presentation.profile.components.ContactProfileHeader
 import com.nexa.app.presentation.profile.components.CustomNotificationsDialog
 import com.nexa.app.presentation.profile.components.EditUserDetailsDialog
 import com.nexa.app.presentation.profile.components.MuteNotificationsDialog
+import com.nexa.app.presentation.backup.components.ConversationBackupPolicyDialog
 import com.nexa.app.domain.model.UserStatusGroup
 import com.nexa.app.R
 import com.nexa.app.presentation.status.components.NexaSequentialStoryViewer
@@ -265,7 +267,15 @@ fun ContactProfileScreen(
                     onCustomNotificationsClick = { viewModel.setCustomNotificationsDialogVisible(true) },
                     onWallpaperClick = { onOpenWallpaper(uiState.conversationId) },
                     onClearChatClick = { viewModel.setClearChatDialogVisible(true) },
-                    onBlockContactClick = { viewModel.setBlockDialogVisible(true) }
+                    onBlockContactClick = {
+                        if (uiState.isBlocked) {
+                            viewModel.setUnblockDialogVisible(true)
+                        } else {
+                            viewModel.setBlockDialogVisible(true)
+                        }
+                    },
+                    backupPolicy = uiState.backupPolicy,
+                    onBackupPolicyClick = { viewModel.setBackupPolicyDialogVisible(true) }
                 )
 
                 Spacer(modifier = Modifier.height(36.dp))
@@ -315,13 +325,36 @@ fun ContactProfileScreen(
                 )
             }
 
-            // Block / Unblock Contact Dialog
+            // Backup Policy Dialog
+            if (uiState.showBackupPolicyDialog) {
+                ConversationBackupPolicyDialog(
+                    conversationTitle = uiState.displayName,
+                    currentPolicy = uiState.backupPolicy,
+                    currentCustomCategories = uiState.customBackupCategories,
+                    onDismiss = { viewModel.setBackupPolicyDialogVisible(false) },
+                    onSavePolicy = { policy, customCategories ->
+                        viewModel.setBackupPolicy(policy, customCategories)
+                    }
+                )
+            }
+
+            // Block Contact Dialog
             if (uiState.showBlockDialog) {
-                BlockContactDialog(
+                BlockContactConfirmationDialog(
                     contactName = uiState.displayName,
-                    isCurrentlyBlocked = uiState.isBlocked,
-                    onConfirmToggleBlock = { viewModel.toggleBlockContact() },
+                    onConfirmBlock = { alsoReport, deleteChat ->
+                        viewModel.blockContact(alsoReport, deleteChat)
+                    },
                     onDismiss = { viewModel.setBlockDialogVisible(false) }
+                )
+            }
+
+            // Unblock Contact Dialog
+            if (uiState.showUnblockDialog) {
+                UnblockContactConfirmationDialog(
+                    contactName = uiState.displayName,
+                    onConfirmUnblock = { viewModel.unblockContact() },
+                    onDismiss = { viewModel.setUnblockDialogVisible(false) }
                 )
             }
 

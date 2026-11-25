@@ -71,7 +71,10 @@ data class ChatConversation(
     val mutedUntil: Long = 0L,
     val createdAt: Long = 0L,
     val updatedAt: Long = 0L,
-    val hasManualUnread: Boolean = false
+    val hasManualUnread: Boolean = false,
+    val isPriorityBackup: Boolean = false,
+    val backupPolicy: ConversationBackupPolicy = if (isPriorityBackup) ConversationBackupPolicy.PRIORITY else ConversationBackupPolicy.DEFAULT,
+    val customBackupCategories: ConversationCustomCategories? = null
 ) {
     val isGroup: Boolean
         get() = chatType.equals("GROUP", ignoreCase = true) ||

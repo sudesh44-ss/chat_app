@@ -20,6 +20,9 @@ enum PacketType {
   PACKET_REGISTER_ROUTING_TOKENS = 13;
   PACKET_PEER_SYNC = 14;
   PACKET_CUSTODY_ACK = 15; // Relay Store-and-Forward Custody ACK
+  PACKET_PRESENCE = 16;
+  PACKET_MESSAGE_EDIT = 17;
+  PACKET_MESSAGE_DELETE = 18;
 }
 
 enum AckStatus {
@@ -55,7 +58,11 @@ message NexaWirePacket {
     RoutingTokenRegistrationPayload routing_tokens = 13;
     PeerSyncPayload peer_sync = 14;
     CustodyAckPayload custody_ack = 15;
+    PresencePayload presence = 16;
+    MessageEditPayload message_edit = 17;
+    MessageDeletePayload message_delete = 18;
   }
+  string group_id = 19;
 }
 
 message DoubleRatchetHeader {
@@ -149,3 +156,32 @@ message PeerSyncPayload {
   int64 sync_timestamp = 8;
   string error_message = 9;
 }
+
+enum PresenceStatus {
+  PRESENCE_OFFLINE = 0;
+  PRESENCE_ONLINE = 1;
+  PRESENCE_HIDDEN = 2;
+}
+
+message PresencePayload {
+  string nx_id = 1;
+  PresenceStatus status = 2;
+  int64 timestamp = 3;
+}
+
+message MessageEditPayload {
+  string target_packet_id = 1;
+  bytes new_ciphertext = 2;
+  bytes auth_tag = 3;
+  bytes nonce = 4;
+  bytes aead_nonce = 5;
+  int64 edited_at = 6;
+  DoubleRatchetHeader header = 7;
+}
+
+message MessageDeletePayload {
+  string target_packet_id = 1;
+  string delete_type = 2; // "FOR_EVERYONE"
+  int64 deleted_at = 3;
+}
+

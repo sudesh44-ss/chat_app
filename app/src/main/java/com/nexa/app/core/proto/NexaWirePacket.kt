@@ -19,7 +19,10 @@ enum class PacketType(val value: Int) {
     PACKET_SIGNALING(12),
     PACKET_REGISTER_ROUTING_TOKENS(13),
     PACKET_PEER_SYNC(14),
-    PACKET_CUSTODY_ACK(15);
+    PACKET_CUSTODY_ACK(15),
+    PACKET_PRESENCE(16),
+    PACKET_MESSAGE_EDIT(17),
+    PACKET_MESSAGE_DELETE(18);
 
     companion object {
         fun fromValue(v: Int): PacketType = entries.find { it.value == v } ?: PACKET_UNKNOWN
@@ -290,6 +293,63 @@ data class PeerSyncPayload(
     val errorMessage: String = ""
 )
 
+enum class PresenceStatus(val value: Int) {
+    PRESENCE_OFFLINE(0),
+    PRESENCE_ONLINE(1),
+    PRESENCE_HIDDEN(2);
+
+    companion object {
+        fun fromValue(v: Int): PresenceStatus = entries.find { it.value == v } ?: PRESENCE_OFFLINE
+    }
+}
+
+data class PresencePayload(
+    val nxId: String = "",
+    val status: PresenceStatus = PresenceStatus.PRESENCE_OFFLINE,
+    val timestamp: Long = 0L
+)
+
+data class MessageEditPayload(
+    val targetPacketId: String = "",
+    val newCiphertext: ByteArray = ByteArray(0),
+    val authTag: ByteArray = ByteArray(0),
+    val nonce: ByteArray = ByteArray(0),
+    val aeadNonce: ByteArray = ByteArray(0),
+    val editedAt: Long = 0L,
+    val header: DoubleRatchetHeader? = null
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (javaClass != other?.javaClass) return false
+        other as MessageEditPayload
+        if (targetPacketId != other.targetPacketId) return false
+        if (!newCiphertext.contentEquals(other.newCiphertext)) return false
+        if (!authTag.contentEquals(other.authTag)) return false
+        if (!nonce.contentEquals(other.nonce)) return false
+        if (!aeadNonce.contentEquals(other.aeadNonce)) return false
+        if (editedAt != other.editedAt) return false
+        if (header != other.header) return false
+        return true
+    }
+
+    override fun hashCode(): Int {
+        var result = targetPacketId.hashCode()
+        result = 31 * result + newCiphertext.contentHashCode()
+        result = 31 * result + authTag.contentHashCode()
+        result = 31 * result + nonce.contentHashCode()
+        result = 31 * result + aeadNonce.contentHashCode()
+        result = 31 * result + editedAt.hashCode()
+        result = 31 * result + (header?.hashCode() ?: 0)
+        return result
+    }
+}
+
+data class MessageDeletePayload(
+    val targetPacketId: String = "",
+    val deleteType: String = "FOR_EVERYONE",
+    val deletedAt: Long = 0L
+)
+
 data class NexaWirePacket(
     val packetId: String = "",
     val type: PacketType = PacketType.PACKET_UNKNOWN,
@@ -305,7 +365,11 @@ data class NexaWirePacket(
     val signaling: SignalingPayload? = null,
     val routingTokens: RoutingTokenRegistrationPayload? = null,
     val peerSync: PeerSyncPayload? = null,
-    val custodyAck: CustodyAckPayload? = null
+    val custodyAck: CustodyAckPayload? = null,
+    val presence: PresencePayload? = null,
+    val messageEdit: MessageEditPayload? = null,
+    val messageDelete: MessageDeletePayload? = null,
+    val groupId: String = ""
 ) {
     /**
      * Serializes this packet into standard binary Protobuf wire format.
@@ -619,6 +683,110 @@ data class NexaWirePacket(
             writeLengthDelimited(out, caOut.toByteArray())
         }
 
+        // Field 16: presence (PresencePayload, wire type 2)
+        presence?.let { pr ->
+            val prOut = ByteArrayOutputStream()
+            if (pr.nxId.isNotEmpty()) {
+                writeTag(prOut, 1, 2)
+                writeLengthDelimited(prOut, pr.nxId.toByteArray(Charsets.UTF_8))
+            }
+            if (pr.status != PresenceStatus.PRESENCE_OFFLINE) {
+                writeTag(prOut, 2, 0)
+                writeVarint(prOut, pr.status.value.toLong())
+            }
+            if (pr.timestamp != 0L) {
+                writeTag(prOut, 3, 0)
+                writeVarint(prOut, pr.timestamp)
+            }
+            writeTag(out, 16, 2)
+            writeLengthDelimited(out, prOut.toByteArray())
+        }
+
+        // Field 17: message_edit (MessageEditPayload, wire type 2)
+        messageEdit?.let { me ->
+            val meOut = ByteArrayOutputStream()
+            if (me.targetPacketId.isNotEmpty()) {
+                writeTag(meOut, 1, 2)
+                writeLengthDelimited(meOut, me.targetPacketId.toByteArray(Charsets.UTF_8))
+            }
+            if (me.newCiphertext.isNotEmpty()) {
+                writeTag(meOut, 2, 2)
+                writeLengthDelimited(meOut, me.newCiphertext)
+            }
+            if (me.authTag.isNotEmpty()) {
+                writeTag(meOut, 3, 2)
+                writeLengthDelimited(meOut, me.authTag)
+            }
+            if (me.nonce.isNotEmpty()) {
+                writeTag(meOut, 4, 2)
+                writeLengthDelimited(meOut, me.nonce)
+            }
+            if (me.aeadNonce.isNotEmpty()) {
+                writeTag(meOut, 5, 2)
+                writeLengthDelimited(meOut, me.aeadNonce)
+            }
+            if (me.editedAt != 0L) {
+                writeTag(meOut, 6, 0)
+                writeVarint(meOut, me.editedAt)
+            }
+            me.header?.let { h ->
+                val hOut = ByteArrayOutputStream()
+                if (h.ratchetPublicKey.isNotEmpty()) {
+                    writeTag(hOut, 1, 2)
+                    writeLengthDelimited(hOut, h.ratchetPublicKey)
+                }
+                if (h.previousChainLength != 0) {
+                    writeTag(hOut, 2, 0)
+                    writeVarint(hOut, h.previousChainLength.toLong())
+                }
+                if (h.messageIndex != 0) {
+                    writeTag(hOut, 3, 0)
+                    writeVarint(hOut, h.messageIndex.toLong())
+                }
+                if (h.sessionId.isNotEmpty()) {
+                    writeTag(hOut, 4, 2)
+                    writeLengthDelimited(hOut, h.sessionId.toByteArray(Charsets.UTF_8))
+                }
+                if (h.oneTimePrekeyId != 0L) {
+                    writeTag(hOut, 5, 0)
+                    writeVarint(hOut, h.oneTimePrekeyId)
+                }
+                if (h.ephemeralPublicKey.isNotEmpty()) {
+                    writeTag(hOut, 6, 2)
+                    writeLengthDelimited(hOut, h.ephemeralPublicKey)
+                }
+                writeTag(meOut, 7, 2)
+                writeLengthDelimited(meOut, hOut.toByteArray())
+            }
+            writeTag(out, 17, 2)
+            writeLengthDelimited(out, meOut.toByteArray())
+        }
+
+        // Field 18: message_delete (MessageDeletePayload, wire type 2)
+        messageDelete?.let { md ->
+            val mdOut = ByteArrayOutputStream()
+            if (md.targetPacketId.isNotEmpty()) {
+                writeTag(mdOut, 1, 2)
+                writeLengthDelimited(mdOut, md.targetPacketId.toByteArray(Charsets.UTF_8))
+            }
+            if (md.deleteType.isNotEmpty()) {
+                writeTag(mdOut, 2, 2)
+                writeLengthDelimited(mdOut, md.deleteType.toByteArray(Charsets.UTF_8))
+            }
+            if (md.deletedAt != 0L) {
+                writeTag(mdOut, 3, 0)
+                writeVarint(mdOut, md.deletedAt)
+            }
+            writeTag(out, 18, 2)
+            writeLengthDelimited(out, mdOut.toByteArray())
+        }
+
+        // Field 19: group_id (string, wire type 2)
+        if (groupId.isNotEmpty()) {
+            writeTag(out, 19, 2)
+            writeLengthDelimited(out, groupId.toByteArray(Charsets.UTF_8))
+        }
+
         return out.toByteArray()
     }
 
@@ -649,6 +817,10 @@ data class NexaWirePacket(
             var routingTokens: RoutingTokenRegistrationPayload? = null
             var peerSync: PeerSyncPayload? = null
             var custodyAck: CustodyAckPayload? = null
+            var presence: PresencePayload? = null
+            var messageEdit: MessageEditPayload? = null
+            var messageDelete: MessageDeletePayload? = null
+            var groupId = ""
 
             while (input.available() > 0) {
                 val tag = readVarint(input)
@@ -671,6 +843,10 @@ data class NexaWirePacket(
                     13 -> routingTokens = decodeRoutingTokenRegistrationPayload(readLengthDelimited(input))
                     14 -> peerSync = decodePeerSyncPayload(readLengthDelimited(input))
                     15 -> custodyAck = decodeCustodyAckPayload(readLengthDelimited(input))
+                    16 -> presence = decodePresencePayload(readLengthDelimited(input))
+                    17 -> messageEdit = decodeMessageEditPayload(readLengthDelimited(input))
+                    18 -> messageDelete = decodeMessageDeletePayload(readLengthDelimited(input))
+                    19 -> groupId = String(readLengthDelimited(input), Charsets.UTF_8)
                     else -> skipField(input, wireType)
                 }
             }
@@ -690,7 +866,11 @@ data class NexaWirePacket(
                 signaling = signaling,
                 routingTokens = routingTokens,
                 peerSync = peerSync,
-                custodyAck = custodyAck
+                custodyAck = custodyAck,
+                presence = presence,
+                messageEdit = messageEdit,
+                messageDelete = messageDelete,
+                groupId = groupId
             )
         }
 
@@ -973,6 +1153,89 @@ data class NexaWirePacket(
                 }
             }
             return SignalingPayload(transferId, action, data)
+        }
+
+        private fun decodePresencePayload(bytes: ByteArray): PresencePayload {
+            val input = ByteArrayInputStream(bytes)
+            var nxId = ""
+            var status = PresenceStatus.PRESENCE_OFFLINE
+            var timestamp = 0L
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> nxId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    2 -> status = PresenceStatus.fromValue(readVarint(input).toInt())
+                    3 -> timestamp = readVarint(input)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return PresencePayload(nxId, status, timestamp)
+        }
+
+        private fun decodeMessageEditPayload(bytes: ByteArray): MessageEditPayload {
+            val input = ByteArrayInputStream(bytes)
+            var targetPacketId = ""
+            var newCiphertext = ByteArray(0)
+            var authTag = ByteArray(0)
+            var nonce = ByteArray(0)
+            var aeadNonce = ByteArray(0)
+            var editedAt = 0L
+            var header: DoubleRatchetHeader? = null
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> targetPacketId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    2 -> newCiphertext = readLengthDelimited(input)
+                    3 -> authTag = readLengthDelimited(input)
+                    4 -> nonce = readLengthDelimited(input)
+                    5 -> aeadNonce = readLengthDelimited(input)
+                    6 -> editedAt = readVarint(input)
+                    7 -> header = decodeDoubleRatchetHeader(readLengthDelimited(input))
+                    else -> skipField(input, wireType)
+                }
+            }
+            return MessageEditPayload(
+                targetPacketId = targetPacketId,
+                newCiphertext = newCiphertext,
+                authTag = authTag,
+                nonce = nonce,
+                aeadNonce = aeadNonce,
+                editedAt = editedAt,
+                header = header
+            )
+        }
+
+        private fun decodeMessageDeletePayload(bytes: ByteArray): MessageDeletePayload {
+            val input = ByteArrayInputStream(bytes)
+            var targetPacketId = ""
+            var deleteType = "FOR_EVERYONE"
+            var deletedAt = 0L
+
+            while (input.available() > 0) {
+                val tag = readVarint(input)
+                val fieldNum = (tag ushr 3).toInt()
+                val wireType = (tag and 0x07L).toInt()
+
+                when (fieldNum) {
+                    1 -> targetPacketId = String(readLengthDelimited(input), Charsets.UTF_8)
+                    2 -> deleteType = String(readLengthDelimited(input), Charsets.UTF_8)
+                    3 -> deletedAt = readVarint(input)
+                    else -> skipField(input, wireType)
+                }
+            }
+            return MessageDeletePayload(
+                targetPacketId = targetPacketId,
+                deleteType = deleteType,
+                deletedAt = deletedAt
+            )
         }
 
         private fun writeTag(out: OutputStream, fieldNum: Int, wireType: Int) {

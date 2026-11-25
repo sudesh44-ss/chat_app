@@ -39,6 +39,9 @@ interface AuthApiService {
     suspend fun lookupContacts(sessionToken: String, phoneNumbers: List<String>): Result<List<com.nexa.app.data.remote.dto.ContactMatchDto>>
     suspend fun fetchProfile(sessionToken: String): Result<com.nexa.app.data.remote.dto.RemoteUserProfileDto>
     suspend fun updateProfile(sessionToken: String, name: String? = null, bio: String? = null, gender: String? = null, age: Int? = null, avatarUrl: String? = null): Result<Boolean>
+    suspend fun verifyFirebase(request: com.nexa.app.data.remote.dto.FirebaseVerifyRequestDto): Result<com.nexa.app.data.remote.dto.PhoneVerifyResponseDto>
+    suspend fun verifyTruecaller(request: com.nexa.app.data.remote.dto.TruecallerVerifyRequestDto): Result<com.nexa.app.data.remote.dto.PhoneVerifyResponseDto>
+    suspend fun getTruecallerNonce(): Result<String>
 }
 
 /**
@@ -562,20 +565,43 @@ class AuthApiServiceImpl(
                 status = status,
                 googleUid = respJson.optString("google_uid").takeIf { it.isNotEmpty() },
                 email = respJson.optString("email").takeIf { it.isNotEmpty() },
-                prefillName = respJson.optString("prefill_name").takeIf { it.isNotEmpty() },
-                prefillAvatar = respJson.optString("prefill_avatar").takeIf { it.isNotEmpty() },
+                fullName = respJson.optString("full_name").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("fullName").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("name").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("prefill_name").takeIf { it.isNotEmpty() }
+                    ?: userJson?.optString("full_name")
+                    ?: userJson?.optString("name"),
+                prefillName = respJson.optString("full_name").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("fullName").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("name").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("prefill_name").takeIf { it.isNotEmpty() }
+                    ?: userJson?.optString("full_name")
+                    ?: userJson?.optString("name"),
+                prefillAvatar = respJson.optString("avatar_url").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("prefill_avatar").takeIf { it.isNotEmpty() }
+                    ?: userJson?.optString("avatar_url"),
                 sessionAuthToken = respJson.optString("session_auth_token").takeIf { it.isNotEmpty() }
                     ?: respJson.optString("session_token").takeIf { it.isNotEmpty() },
-                nxId = respJson.optString("nx_id").takeIf { it.isNotEmpty() }
+                nxId = respJson.optString("nxId").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("nx_id").takeIf { it.isNotEmpty() }
                     ?: userJson?.optString("nx_id"),
-                registeredPhoneMasked = respJson.optString("registered_phone_masked").takeIf { it.isNotEmpty() },
+                registeredPhoneMasked = respJson.optString("maskedPhone").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("masked_phone").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("registered_phone_masked").takeIf { it.isNotEmpty() },
+                maskedPhone = respJson.optString("maskedPhone").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("masked_phone").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("registered_phone_masked").takeIf { it.isNotEmpty() },
                 phoneNumber = respJson.optString("phone_number").takeIf { it.isNotEmpty() }
                     ?: userJson?.optString("phone"),
                 inboundReceiverNumber = respJson.optString("inbound_receiver_number").takeIf { it.isNotEmpty() },
                 challengeId = respJson.optString("challenge_id").takeIf { it.isNotEmpty() },
                 challenge = respJson.optString("challenge").takeIf { it.isNotEmpty() },
                 expiresInSeconds = respJson.optInt("expires_in_seconds").takeIf { it > 0 },
-                deviceId = respJson.optString("device_id").takeIf { it.isNotEmpty() }
+                deviceId = respJson.optString("device_id").takeIf { it.isNotEmpty() },
+                isSameDevice = respJson.optBoolean("is_same_device", false),
+                hasActiveDevice = respJson.optBoolean("has_active_device", false),
+                activeDeviceName = respJson.optString("active_device_name").takeIf { it.isNotEmpty() },
+                activeDeviceId = respJson.optString("active_device_id").takeIf { it.isNotEmpty() }
             )
             Result.success(responseDto)
         } catch (e: Exception) {
@@ -745,18 +771,26 @@ class AuthApiServiceImpl(
             }
 
             val respJson = JSONObject(body)
-            val inbound = respJson.optString("inbound_receiver_number").takeIf { it.isNotEmpty() }
+            val inbound = respJson.optString("gatewayNumber").takeIf { it.isNotEmpty() }
+                ?: respJson.optString("gateway_number").takeIf { it.isNotEmpty() }
+                ?: respJson.optString("inbound_receiver_number").takeIf { it.isNotEmpty() }
                 ?: respJson.optString("inbound_number").takeIf { it.isNotEmpty() }
-                ?: "+919800000000"
-            val sessionId = respJson.optString("session_id").takeIf { it.isNotEmpty() }
+                ?: ""
+            val sessionId = respJson.optString("sessionId").takeIf { it.isNotEmpty() }
+                ?: respJson.optString("session_id").takeIf { it.isNotEmpty() }
+            val nonce = respJson.optString("nonce", "")
 
             val result = com.nexa.app.data.remote.dto.InitiateReverseVerifyResponseDto(
                 status = respJson.optString("status", "PENDING"),
-                nonce = respJson.optString("nonce", ""),
+                nonce = nonce,
                 inboundReceiverNumber = inbound,
                 inboundNumber = inbound,
-                smsPayload = respJson.optString("sms_payload", "NX-VERIFY " + respJson.optString("nonce")),
-                expiresInSeconds = respJson.optInt("expires_in_seconds", 90),
+                gatewayNumber = inbound,
+                smsPayload = respJson.optString("smsPayload").takeIf { it.isNotEmpty() }
+                    ?: respJson.optString("sms_payload").takeIf { it.isNotEmpty() }
+                    ?: if (sessionId != null) "NEXA-VERIFY:$nonce:$sessionId" else "NEXA-VERIFY:$nonce",
+                expiresInSeconds = respJson.optInt("expiresInSeconds").takeIf { it > 0 }
+                    ?: respJson.optInt("expires_in_seconds", 120),
                 sessionId = sessionId,
                 verificationMethod = respJson.optString("verification_method").takeIf { it.isNotEmpty() },
                 nxId = respJson.optString("nx_id").takeIf { it.isNotEmpty() },
@@ -804,6 +838,8 @@ class AuthApiServiceImpl(
                     ?: respJson.optString("session_token").takeIf { it.isNotEmpty() },
                 name = respJson.optString("name").takeIf { it.isNotEmpty() }
                     ?: userJson?.optString("profile_name"),
+                email = respJson.optString("email").takeIf { it.isNotEmpty() }
+                    ?: userJson?.optString("email"),
                 phone = respJson.optString("phone").takeIf { it.isNotEmpty() }
                     ?: userJson?.optString("phone_number"),
                 avatarUrl = respJson.optString("avatar_url").takeIf { it.isNotEmpty() }
@@ -936,6 +972,190 @@ class AuthApiServiceImpl(
             Result.success(true)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update profile on backend: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun getTruecallerNonce(): Result<String> = withContext(Dispatchers.IO) {
+        if (isTestMode) {
+            return@withContext Result.success("NX-TC-mock-nonce")
+        }
+        try {
+            val url = "$baseUrl/api/v1/auth/truecaller/nonce"
+            val req = Request.Builder()
+                .url(url)
+                .get()
+                .build()
+
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+
+            if (!resp.isSuccessful) {
+                return@withContext Result.failure(IOException("Failed to get Truecaller nonce (HTTP ${resp.code}): $body"))
+            }
+
+            val json = JSONObject(body)
+            val nonce = json.getString("nonce")
+            Result.success(nonce)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to get Truecaller nonce: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun verifyFirebase(
+        request: com.nexa.app.data.remote.dto.FirebaseVerifyRequestDto
+    ): Result<com.nexa.app.data.remote.dto.PhoneVerifyResponseDto> = withContext(Dispatchers.IO) {
+        if (isTestMode) {
+            return@withContext Result.success(
+                com.nexa.app.data.remote.dto.PhoneVerifyResponseDto(
+                    status = "VERIFIED",
+                    nxId = "NX-TEST-FB",
+                    sessionAuthToken = "test_fb_token",
+                    sessionToken = "test_fb_token",
+                    verificationMethod = "firebase_phone_otp",
+                    name = request.name ?: "Firebase User",
+                    phone = "+15550001",
+                    email = request.email,
+                    avatarUrl = request.avatarUrl,
+                    isExistingUser = false
+                )
+            )
+        }
+
+        try {
+            val url = "$baseUrl/api/v1/auth/firebase/verify"
+            val json = JSONObject().apply {
+                put("firebase_id_token", request.firebaseIdToken)
+                request.googleAuthToken?.let { put("google_auth_token", it) }
+                request.email?.let { put("email", it) }
+                request.name?.let { put("name", it) }
+                request.avatarUrl?.let { put("avatar_url", it) }
+                request.gender?.let { put("gender", it) }
+                request.age?.let { put("age", it) }
+                request.bio?.let { put("bio", it) }
+                put("public_key_hex", request.publicKeyHex)
+                request.dhPublicKeyHex?.let { put("dh_public_key_hex", it) }
+                request.deviceId?.let { put("device_id", it) }
+                request.deviceName?.let { put("device_name", it) }
+                put("is_reverify", request.isReverify)
+            }
+
+            val req = Request.Builder()
+                .url(url)
+                .post(json.toString().toRequestBody(JSON_MEDIA))
+                .build()
+
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+
+            if (!resp.isSuccessful) {
+                val errMsg = try {
+                    JSONObject(body).optString("error", "Firebase verification failed")
+                } catch (e: Exception) {
+                    "HTTP ${resp.code}: $body"
+                }
+                return@withContext Result.failure(IOException("Firebase verification failed (HTTP ${resp.code}): $errMsg"))
+            }
+
+            val respJson = JSONObject(body)
+            val dto = com.nexa.app.data.remote.dto.PhoneVerifyResponseDto(
+                status = respJson.getString("status"),
+                nxId = respJson.getString("nx_id"),
+                sessionAuthToken = respJson.optString("session_auth_token").takeIf { it.isNotEmpty() },
+                sessionToken = respJson.optString("session_token").takeIf { it.isNotEmpty() },
+                verificationMethod = respJson.optString("verification_method").takeIf { it.isNotEmpty() },
+                verifiedAt = respJson.optLong("verified_at", 0L),
+                name = respJson.optString("name").takeIf { it.isNotEmpty() },
+                phone = respJson.optString("phone").takeIf { it.isNotEmpty() },
+                email = respJson.optString("email").takeIf { it.isNotEmpty() },
+                avatarUrl = respJson.optString("avatar_url").takeIf { it.isNotEmpty() },
+                isExistingUser = respJson.optBoolean("is_existing_user", false)
+            )
+            Result.success(dto)
+        } catch (e: Exception) {
+            Log.e(TAG, "Firebase verification failed: ${e.message}", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun verifyTruecaller(
+        request: com.nexa.app.data.remote.dto.TruecallerVerifyRequestDto
+    ): Result<com.nexa.app.data.remote.dto.PhoneVerifyResponseDto> = withContext(Dispatchers.IO) {
+        if (isTestMode) {
+            return@withContext Result.success(
+                com.nexa.app.data.remote.dto.PhoneVerifyResponseDto(
+                    status = "VERIFIED",
+                    nxId = "NX-TEST-TC",
+                    sessionAuthToken = "test_tc_token",
+                    sessionToken = "test_tc_token",
+                    verificationMethod = "truecaller",
+                    name = request.name ?: "Truecaller User",
+                    phone = "+15550002",
+                    email = request.email,
+                    avatarUrl = request.avatarUrl,
+                    isExistingUser = false
+                )
+            )
+        }
+
+        try {
+            val url = "$baseUrl/api/v1/auth/truecaller/verify"
+            val json = JSONObject().apply {
+                request.payload?.let { put("payload", it) }
+                request.signature?.let { put("signature", it) }
+                request.requestNonce?.let { put("request_nonce", it) }
+                request.accessToken?.let { put("access_token", it) }
+                request.authorizationCode?.let { put("authorization_code", it) }
+                request.codeVerifier?.let { put("code_verifier", it) }
+                request.googleAuthToken?.let { put("google_auth_token", it) }
+                request.email?.let { put("email", it) }
+                request.name?.let { put("name", it) }
+                request.avatarUrl?.let { put("avatar_url", it) }
+                request.gender?.let { put("gender", it) }
+                request.age?.let { put("age", it) }
+                request.bio?.let { put("bio", it) }
+                put("public_key_hex", request.publicKeyHex)
+                request.dhPublicKeyHex?.let { put("dh_public_key_hex", it) }
+                request.deviceId?.let { put("device_id", it) }
+                request.deviceName?.let { put("device_name", it) }
+                put("is_reverify", request.isReverify)
+            }
+
+            val req = Request.Builder()
+                .url(url)
+                .post(json.toString().toRequestBody(JSON_MEDIA))
+                .build()
+
+            val resp = client.newCall(req).execute()
+            val body = resp.body?.string() ?: ""
+
+            if (!resp.isSuccessful) {
+                val errMsg = try {
+                    JSONObject(body).optString("error", "Truecaller verification failed")
+                } catch (e: Exception) {
+                    "HTTP ${resp.code}: $body"
+                }
+                return@withContext Result.failure(IOException("Truecaller verification failed (HTTP ${resp.code}): $errMsg"))
+            }
+
+            val respJson = JSONObject(body)
+            val dto = com.nexa.app.data.remote.dto.PhoneVerifyResponseDto(
+                status = respJson.getString("status"),
+                nxId = respJson.getString("nx_id"),
+                sessionAuthToken = respJson.optString("session_auth_token").takeIf { it.isNotEmpty() },
+                sessionToken = respJson.optString("session_token").takeIf { it.isNotEmpty() },
+                verificationMethod = respJson.optString("verification_method").takeIf { it.isNotEmpty() },
+                verifiedAt = respJson.optLong("verified_at", 0L),
+                name = respJson.optString("name").takeIf { it.isNotEmpty() },
+                phone = respJson.optString("phone").takeIf { it.isNotEmpty() },
+                email = respJson.optString("email").takeIf { it.isNotEmpty() },
+                avatarUrl = respJson.optString("avatar_url").takeIf { it.isNotEmpty() },
+                isExistingUser = respJson.optBoolean("is_existing_user", false)
+            )
+            Result.success(dto)
+        } catch (e: Exception) {
+            Log.e(TAG, "Truecaller verification failed: ${e.message}", e)
             Result.failure(e)
         }
     }

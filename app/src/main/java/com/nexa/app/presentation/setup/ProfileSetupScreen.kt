@@ -25,6 +25,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Badge
+import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Person
@@ -86,10 +87,12 @@ fun ProfileSetupScreen(
         avatarUrl: String?,
         age: Int?,
         gender: String?,
-        bio: String?
+        bio: String?,
+        email: String?
     ) -> Unit,
     onProceedToOtp: ((name: String, phone: String, age: Int?, gender: String?, about: String?) -> Unit)? = null,
-    onProceedToBadge: ((nxId: String, name: String, phone: String, avatarUrl: String?) -> Unit)? = null
+    onProceedToBadge: ((nxId: String, name: String, phone: String, avatarUrl: String?) -> Unit)? = null,
+    onProceedToVerificationSelection: ((name: String, phone: String, avatarUrl: String?, age: Int?, gender: String?, bio: String?, email: String?) -> Unit)? = null
 ) {
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -147,7 +150,8 @@ fun ProfileSetupScreen(
                 uiState.avatarUrl,
                 uiState.age.toIntOrNull(),
                 uiState.gender.trim().takeIf { it.isNotBlank() },
-                uiState.bio.trim().takeIf { it.isNotBlank() }
+                uiState.bio.trim().takeIf { it.isNotBlank() },
+                uiState.email
             )
         }
     }
@@ -433,6 +437,42 @@ fun ProfileSetupScreen(
                             )
                         )
                     }
+                }
+            }
+
+            // Secondary option: Truecaller or SMS OTP
+            androidx.compose.material3.TextButton(
+                onClick = {
+                    onProceedToVerificationSelection?.invoke(
+                        uiState.name,
+                        uiState.phone,
+                        uiState.avatarUrl,
+                        uiState.age.toIntOrNull(),
+                        uiState.gender.takeIf { it.isNotBlank() },
+                        uiState.bio.takeIf { it.isNotBlank() },
+                        email
+                    ) ?: onProceedToOtp?.invoke(
+                        uiState.name,
+                        uiState.phone,
+                        uiState.age.toIntOrNull(),
+                        uiState.gender.takeIf { it.isNotBlank() },
+                        uiState.bio.takeIf { it.isNotBlank() }
+                    )
+                },
+                enabled = uiState.isFormValid && !uiState.isLoading,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Bolt,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Or verify with Truecaller / SMS OTP")
                 }
             }
 

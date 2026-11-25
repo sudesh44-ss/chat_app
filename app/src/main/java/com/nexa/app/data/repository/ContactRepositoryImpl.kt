@@ -1,6 +1,7 @@
 package com.nexa.app.data.repository
 
 import android.content.Context
+import android.util.Log
 import com.google.crypto.tink.subtle.X25519
 import com.nexa.app.core.crypto.DoubleRatchetEngine
 import com.nexa.app.core.crypto.Ed25519Signer
@@ -36,6 +37,10 @@ class ContactRepositoryImpl(
     private val connectionApiService: com.nexa.app.data.remote.api.ConnectionApiService = com.nexa.app.data.remote.api.ConnectionApiServiceImpl(),
     private val chatDao: com.nexa.app.data.local.dao.ChatDao? = null
 ) : ContactRepository {
+
+    companion object {
+        private const val TAG = "ContactRepoImpl"
+    }
 
     private val secureRandom = SecureRandom()
 
@@ -521,7 +526,7 @@ class ContactRepositoryImpl(
     }
 
     private fun getSessionToken(): String {
-        return secureStorage.getSessionToken() ?: ""
+        return secureStorage?.getSessionToken() ?: ""
     }
 
     override suspend fun discoverUser(nxId: String): Result<com.nexa.app.data.remote.dto.DiscoveredUserDto> = withContext(Dispatchers.IO) {
@@ -657,39 +662,95 @@ class ContactRepositoryImpl(
     }
 
     override suspend fun blockUser(targetNxId: String): Result<Unit> = withContext(Dispatchers.IO) {
-        val token = getSessionToken()
-        if (token.isEmpty()) {
-            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
-        }
-        val res = connectionApiService.blockUser(token, targetNxId)
-        if (res.isSuccess) {
+        val existing = contactDao.getContact(targetNxId)
+        if (existing != null) {
             contactDao.updateStatus(targetNxId, ContactStatus.BLOCKED)
-            Result.success(Unit)
         } else {
-            Result.failure(res.exceptionOrNull() ?: Exception("Failed to block user"))
+            val chat = chatDao?.getChatByParticipant(targetNxId)
+            contactDao.upsertContact(
+                ContactEntity(
+                    nxId = targetNxId,
+                    displayName = chat?.participantName?.ifBlank { targetNxId } ?: targetNxId,
+                    publicKeyHex = "",
+                    status = ContactStatus.BLOCKED,
+                    nexaAvatarUrl = chat?.avatarUrl
+                )
+            )
         }
+
+        val token = getSessionToken()
+        if (token.isNotEmpty()) {
+            try {
+                connectionApiService.blockUser(token, targetNxId)
+            } catch (e: Exception) {
+                Log.w(TAG, "Server block sync failed for $targetNxId (persisted locally)", e)
+            }
+        }
+        Result.success(Unit)
     }
 
     override suspend fun unblockUser(targetNxId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        val existing = contactDao.getContact(targetNxId)
+        if (existing != null) {
+            contactDao.updateStatus(targetNxId, ContactStatus.MUTUAL_FRIEND)
+        }
+
         val token = getSessionToken()
-        if (token.isEmpty()) {
-            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        if (token.isNotEmpty()) {
+            try {
+                connectionApiService.unblockUser(token, targetNxId)
+            } catch (e: Exception) {
+                Log.w(TAG, "Server unblock sync failed for $targetNxId (updated locally)", e)
+            }
         }
-        val res = connectionApiService.unblockUser(token, targetNxId)
-        if (res.isSuccess) {
-            contactDao.deleteContact(targetNxId)
-            Result.success(Unit)
-        } else {
-            Result.failure(res.exceptionOrNull() ?: Exception("Failed to unblock user"))
-        }
+        Result.success(Unit)
     }
 
     override suspend fun getBlockedUsers(): Result<List<com.nexa.app.data.remote.dto.BlockedUserItemDto>> = withContext(Dispatchers.IO) {
-        val token = getSessionToken()
-        if (token.isEmpty()) {
-            return@withContext Result.failure(IllegalStateException("No authenticated session found"))
+        val localBlocked = contactDao.getBlockedContactsList().map { entity ->
+            com.nexa.app.data.remote.dto.BlockedUserItemDto(
+                nxId = entity.nxId,
+                displayName = entity.effectiveDisplayName,
+                avatarUrl = entity.effectiveAvatarUrl,
+                bio = entity.introMessage,
+                publicKeyHex = entity.publicKeyHex,
+                createdAt = entity.createdAtTimestamp
+            )
         }
-        connectionApiService.getBlockedUsers(token)
+
+        val token = getSessionToken()
+        if (token.isNotEmpty()) {
+            val res = connectionApiService.getBlockedUsers(token)
+            if (res.isSuccess) {
+                val remoteList = res.getOrNull() ?: emptyList()
+                for (remote in remoteList) {
+                    val local = contactDao.getContact(remote.nxId)
+                    if (local == null) {
+                        contactDao.upsertContact(
+                            ContactEntity(
+                                nxId = remote.nxId,
+                                displayName = remote.displayName.ifBlank { remote.nxId },
+                                publicKeyHex = remote.publicKeyHex ?: "",
+                                status = ContactStatus.BLOCKED,
+                                nexaAvatarUrl = remote.avatarUrl,
+                                createdAtTimestamp = if (remote.createdAt > 0) remote.createdAt else System.currentTimeMillis()
+                            )
+                        )
+                    } else if (local.status != ContactStatus.BLOCKED) {
+                        contactDao.updateStatus(remote.nxId, ContactStatus.BLOCKED)
+                    }
+                }
+                val map = LinkedHashMap<String, com.nexa.app.data.remote.dto.BlockedUserItemDto>()
+                for (item in localBlocked) map[item.nxId] = item
+                for (item in remoteList) map[item.nxId] = item
+                return@withContext Result.success(map.values.toList())
+            }
+        }
+        Result.success(localBlocked)
+    }
+
+    override suspend fun isUserBlocked(targetNxId: String): Boolean = withContext(Dispatchers.IO) {
+        contactDao.isUserBlocked(targetNxId)
     }
 
     private fun toHex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }

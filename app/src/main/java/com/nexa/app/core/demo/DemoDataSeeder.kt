@@ -84,22 +84,27 @@ object DemoDataSeeder {
         try {
             val now = System.currentTimeMillis()
 
-            // 0a. Seed active local user profile if not present
+            // 0a. Seed active local user profile ONLY if development auth bypass is active and no real user exists
             try {
-                if (userDao != null && userDao.getLocalProfile() == null) {
-                    userDao.saveUserProfile(
-                        com.nexa.app.data.local.entity.UserEntity(
-                            nxId = "NX-DEV-USER",
-                            fullName = "You",
-                            phoneNumber = "+1234567890",
-                            age = 25,
-                            gender = "O",
-                            bio = "NEXA Encrypted Vault",
-                            publicKeyHex = "00".repeat(32),
-                            isVerified = true
+                if (userDao != null) {
+                    val hasRealUser = userDao.countVerifiedUsers() > 0
+                    if (hasRealUser) {
+                        userDao.deleteDemoProfile()
+                    } else if (AppLaunchConfig.isBypassAuthToHomeScreenEnabled && userDao.getLocalProfile() == null) {
+                        userDao.saveUserProfile(
+                            com.nexa.app.data.local.entity.UserEntity(
+                                nxId = "NX-DEV-USER",
+                                fullName = "You",
+                                phoneNumber = "+1234567890",
+                                age = 25,
+                                gender = "O",
+                                bio = "NEXA Encrypted Vault",
+                                publicKeyHex = "00".repeat(32),
+                                isVerified = true
+                            )
                         )
-                    )
-                    Log.d(TAG, "Successfully seeded Dev Local User Profile (NX-DEV-USER)")
+                        Log.d(TAG, "Successfully seeded Dev Local User Profile (NX-DEV-USER)")
+                    }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "Local user profile seeding ignored: ${e.message}")

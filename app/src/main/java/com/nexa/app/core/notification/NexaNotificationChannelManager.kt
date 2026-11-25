@@ -22,6 +22,7 @@ object NexaNotificationChannelManager {
     const val CHANNEL_FILE_TRANSFER = "channel_file_transfer"
     const val CHANNEL_MESH_DISCOVERY = "channel_mesh_discovery"
     const val CHANNEL_CONNECTION_REQUESTS = "channel_connection_requests"
+    const val CHANNEL_BACKUP_RESTORE = "channel_backup_restore"
 
     /**
      * Registers all dedicated Notification Channels with Android NotificationManager.
@@ -39,7 +40,8 @@ object NexaNotificationChannelManager {
             createIncomingCallsChannel(),
             createFileTransferChannel(),
             createMeshDiscoveryChannel(),
-            createConnectionRequestsChannel()
+            createConnectionRequestsChannel(),
+            createBackupRestoreChannel()
         )
 
         notificationManager.createNotificationChannels(channels)
@@ -136,17 +138,62 @@ object NexaNotificationChannelManager {
         }
     }
 
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun createBackupRestoreChannel(): NotificationChannel {
+        return NotificationChannel(
+            CHANNEL_BACKUP_RESTORE,
+            "Backup & Restore",
+            NotificationManager.IMPORTANCE_LOW
+        ).apply {
+            description = "Progress and status alerts for automatic and manual cloud backups"
+            setSound(null, null)
+            enableVibration(false)
+            setShowBadge(false)
+        }
+    }
+
+    /**
+     * Checks if a specific notification channel is enabled and not blocked by the user.
+     */
+    fun isChannelEnabled(context: Context, channelId: String): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
+        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            ?: return true
+        val channel = notificationManager.getNotificationChannel(channelId) ?: return true
+        return channel.importance != NotificationManager.IMPORTANCE_NONE
+    }
+
+    /**
+     * Returns the list of essential channels that have been disabled by the user in system settings.
+     */
+    fun getDisabledChannels(context: Context): List<String> {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return emptyList()
+        val allChannels = listOf(
+            CHANNEL_MESSAGES_DIRECT,
+            CHANNEL_MESSAGES_GROUP,
+            CHANNEL_CALLS_INCOMING,
+            CHANNEL_FILE_TRANSFER,
+            CHANNEL_MESH_DISCOVERY,
+            CHANNEL_CONNECTION_REQUESTS
+        )
+        return allChannels.filter { !isChannelEnabled(context, it) }
+    }
+
     /**
      * Opens the system notification settings page for a specific channel.
      */
     fun openChannelSettings(context: Context, channelId: String) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val intent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
-                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            try {
+                val intent = Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                openAppNotificationSettings(context)
             }
-            context.startActivity(intent)
         } else {
             openAppNotificationSettings(context)
         }
@@ -156,17 +203,27 @@ object NexaNotificationChannelManager {
      * Opens the Android OS application notification settings page.
      */
     fun openAppNotificationSettings(context: Context) {
-        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-                putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                    putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+            } else {
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = android.net.Uri.fromParts("package", context.packageName, null)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
             }
-        } else {
-            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                data = android.net.Uri.fromParts("package", context.packageName, null)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
+            context.startActivity(intent)
+        } catch (e: Exception) {
+            try {
+                val fallbackIntent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = android.net.Uri.fromParts("package", context.packageName, null)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                context.startActivity(fallbackIntent)
+            } catch (ignored: Exception) {}
         }
-        context.startActivity(intent)
     }
 }

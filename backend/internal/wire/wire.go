@@ -24,6 +24,17 @@ const (
 	PacketType_PACKET_REGISTER_ROUTING_TOKENS PacketType = 13
 	PacketType_PACKET_PEER_SYNC      PacketType = 14
 	PacketType_PACKET_CUSTODY_ACK    PacketType = 15
+	PacketType_PACKET_PRESENCE       PacketType = 16
+	PacketType_PACKET_MESSAGE_EDIT   PacketType = 17
+	PacketType_PACKET_MESSAGE_DELETE PacketType = 18
+)
+
+type PresenceStatus int32
+
+const (
+	PresenceStatus_PRESENCE_OFFLINE PresenceStatus = 0
+	PresenceStatus_PRESENCE_ONLINE  PresenceStatus = 1
+	PresenceStatus_PRESENCE_HIDDEN  PresenceStatus = 2
 )
 
 type CustodyStatus int32
@@ -139,6 +150,28 @@ type PeerSyncPayload struct {
 	ErrorMessage    string         `json:"error_message,omitempty"`
 }
 
+type PresencePayload struct {
+	NxId      string         `json:"nx_id"`
+	Status    PresenceStatus `json:"status"`
+	Timestamp int64          `json:"timestamp"`
+}
+
+type MessageEditPayload struct {
+	TargetPacketId string               `json:"target_packet_id"`
+	NewCiphertext  []byte               `json:"new_ciphertext"`
+	AuthTag        []byte               `json:"auth_tag,omitempty"`
+	Nonce          []byte               `json:"nonce,omitempty"`
+	AeadNonce      []byte               `json:"aead_nonce,omitempty"`
+	EditedAt       int64                `json:"edited_at"`
+	Header         *DoubleRatchetHeader `json:"header,omitempty"`
+}
+
+type MessageDeletePayload struct {
+	TargetPacketId string `json:"target_packet_id"`
+	DeleteType     string `json:"delete_type"` // "FOR_EVERYONE"
+	DeletedAt      int64  `json:"deleted_at"`
+}
+
 type NexaWirePacket struct {
 	PacketId      string                           `json:"packet_id"`
 	Type          PacketType                       `json:"type"`
@@ -155,6 +188,10 @@ type NexaWirePacket struct {
 	RoutingTokens *RoutingTokenRegistrationPayload `json:"routing_tokens,omitempty"`
 	PeerSync      *PeerSyncPayload                 `json:"peer_sync,omitempty"`
 	CustodyAck    *CustodyAckPayload               `json:"custody_ack,omitempty"`
+	Presence      *PresencePayload                 `json:"presence,omitempty"`
+	MessageEdit   *MessageEditPayload              `json:"message_edit,omitempty"`
+	MessageDelete *MessageDeletePayload            `json:"message_delete,omitempty"`
+	GroupId       string                           `json:"group_id,omitempty"`
 }
 
 // Encode encodes a NexaWirePacket into standard Protobuf wire binary format.
@@ -472,6 +509,110 @@ func (p *NexaWirePacket) Encode() ([]byte, error) {
 		writeLengthDelimited(buf, caBuf.Bytes())
 	}
 
+	// Field 16: presence (PresencePayload, wire type 2)
+	if p.Presence != nil {
+		prBuf := new(bytes.Buffer)
+		if p.Presence.NxId != "" {
+			writeTag(prBuf, 1, 2)
+			writeLengthDelimited(prBuf, []byte(p.Presence.NxId))
+		}
+		if p.Presence.Status != PresenceStatus_PRESENCE_OFFLINE {
+			writeTag(prBuf, 2, 0)
+			writeVarint(prBuf, uint64(p.Presence.Status))
+		}
+		if p.Presence.Timestamp != 0 {
+			writeTag(prBuf, 3, 0)
+			writeVarint(prBuf, uint64(p.Presence.Timestamp))
+		}
+		writeTag(buf, 16, 2)
+		writeLengthDelimited(buf, prBuf.Bytes())
+	}
+
+	// Field 17: message_edit (MessageEditPayload, wire type 2)
+	if p.MessageEdit != nil {
+		meBuf := new(bytes.Buffer)
+		if p.MessageEdit.TargetPacketId != "" {
+			writeTag(meBuf, 1, 2)
+			writeLengthDelimited(meBuf, []byte(p.MessageEdit.TargetPacketId))
+		}
+		if len(p.MessageEdit.NewCiphertext) > 0 {
+			writeTag(meBuf, 2, 2)
+			writeLengthDelimited(meBuf, p.MessageEdit.NewCiphertext)
+		}
+		if len(p.MessageEdit.AuthTag) > 0 {
+			writeTag(meBuf, 3, 2)
+			writeLengthDelimited(meBuf, p.MessageEdit.AuthTag)
+		}
+		if len(p.MessageEdit.Nonce) > 0 {
+			writeTag(meBuf, 4, 2)
+			writeLengthDelimited(meBuf, p.MessageEdit.Nonce)
+		}
+		if len(p.MessageEdit.AeadNonce) > 0 {
+			writeTag(meBuf, 5, 2)
+			writeLengthDelimited(meBuf, p.MessageEdit.AeadNonce)
+		}
+		if p.MessageEdit.EditedAt != 0 {
+			writeTag(meBuf, 6, 0)
+			writeVarint(meBuf, uint64(p.MessageEdit.EditedAt))
+		}
+		if p.MessageEdit.Header != nil {
+			hBuf := new(bytes.Buffer)
+			if len(p.MessageEdit.Header.RatchetPublicKey) > 0 {
+				writeTag(hBuf, 1, 2)
+				writeLengthDelimited(hBuf, p.MessageEdit.Header.RatchetPublicKey)
+			}
+			if p.MessageEdit.Header.PreviousChainLength != 0 {
+				writeTag(hBuf, 2, 0)
+				writeVarint(hBuf, uint64(p.MessageEdit.Header.PreviousChainLength))
+			}
+			if p.MessageEdit.Header.MessageIndex != 0 {
+				writeTag(hBuf, 3, 0)
+				writeVarint(hBuf, uint64(p.MessageEdit.Header.MessageIndex))
+			}
+			if p.MessageEdit.Header.SessionId != "" {
+				writeTag(hBuf, 4, 2)
+				writeLengthDelimited(hBuf, []byte(p.MessageEdit.Header.SessionId))
+			}
+			if p.MessageEdit.Header.OneTimePrekeyId != 0 {
+				writeTag(hBuf, 5, 0)
+				writeVarint(hBuf, uint64(p.MessageEdit.Header.OneTimePrekeyId))
+			}
+			if len(p.MessageEdit.Header.EphemeralPublicKey) > 0 {
+				writeTag(hBuf, 6, 2)
+				writeLengthDelimited(hBuf, p.MessageEdit.Header.EphemeralPublicKey)
+			}
+			writeTag(meBuf, 7, 2)
+			writeLengthDelimited(meBuf, hBuf.Bytes())
+		}
+		writeTag(buf, 17, 2)
+		writeLengthDelimited(buf, meBuf.Bytes())
+	}
+
+	// Field 18: message_delete (MessageDeletePayload, wire type 2)
+	if p.MessageDelete != nil {
+		mdBuf := new(bytes.Buffer)
+		if p.MessageDelete.TargetPacketId != "" {
+			writeTag(mdBuf, 1, 2)
+			writeLengthDelimited(mdBuf, []byte(p.MessageDelete.TargetPacketId))
+		}
+		if p.MessageDelete.DeleteType != "" {
+			writeTag(mdBuf, 2, 2)
+			writeLengthDelimited(mdBuf, []byte(p.MessageDelete.DeleteType))
+		}
+		if p.MessageDelete.DeletedAt != 0 {
+			writeTag(mdBuf, 3, 0)
+			writeVarint(mdBuf, uint64(p.MessageDelete.DeletedAt))
+		}
+		writeTag(buf, 18, 2)
+		writeLengthDelimited(buf, mdBuf.Bytes())
+	}
+
+	// Field 19: group_id (string, wire type 2)
+	if p.GroupId != "" {
+		writeTag(buf, 19, 2)
+		writeLengthDelimited(buf, []byte(p.GroupId))
+	}
+
 	return buf.Bytes(), nil
 }
 
@@ -623,6 +764,42 @@ func Decode(data []byte) (*NexaWirePacket, error) {
 				return nil, err
 			}
 			packet.CustodyAck = ca
+		case 16: // presence
+			val, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			pr, err := decodePresencePayload(val)
+			if err != nil {
+				return nil, err
+			}
+			packet.Presence = pr
+		case 17: // message_edit
+			val, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			me, err := decodeMessageEditPayload(val)
+			if err != nil {
+				return nil, err
+			}
+			packet.MessageEdit = me
+		case 18: // message_delete
+			val, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			md, err := decodeMessageDeletePayload(val)
+			if err != nil {
+				return nil, err
+			}
+			packet.MessageDelete = md
+		case 19: // group_id
+			val, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			packet.GroupId = string(val)
 		default:
 			// Skip unknown fields according to wire type
 			if err := skipField(r, wireType); err != nil {
@@ -1247,6 +1424,157 @@ func decodePeerSyncPayload(data []byte) (*PeerSyncPayload, error) {
 				return nil, err
 			}
 			payload.ErrorMessage = string(b)
+		default:
+			if err := skipField(r, wireType); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return payload, nil
+}
+
+func decodePresencePayload(data []byte) (*PresencePayload, error) {
+	r := bytes.NewReader(data)
+	payload := &PresencePayload{}
+	for {
+		tag, err := binary.ReadUvarint(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		switch fieldNum {
+		case 1:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.NxId = string(b)
+		case 2:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Status = PresenceStatus(v)
+		case 3:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Timestamp = int64(v)
+		default:
+			if err := skipField(r, wireType); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return payload, nil
+}
+
+func decodeMessageEditPayload(data []byte) (*MessageEditPayload, error) {
+	r := bytes.NewReader(data)
+	payload := &MessageEditPayload{}
+	for {
+		tag, err := binary.ReadUvarint(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		switch fieldNum {
+		case 1:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.TargetPacketId = string(b)
+		case 2:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.NewCiphertext = b
+		case 3:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.AuthTag = b
+		case 4:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.Nonce = b
+		case 5:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.AeadNonce = b
+		case 6:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.EditedAt = int64(v)
+		case 7:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			hdr, err := decodeDoubleRatchetHeader(b)
+			if err != nil {
+				return nil, err
+			}
+			payload.Header = hdr
+		default:
+			if err := skipField(r, wireType); err != nil {
+				return nil, err
+			}
+		}
+	}
+	return payload, nil
+}
+
+func decodeMessageDeletePayload(data []byte) (*MessageDeletePayload, error) {
+	r := bytes.NewReader(data)
+	payload := &MessageDeletePayload{}
+	for {
+		tag, err := binary.ReadUvarint(r)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		switch fieldNum {
+		case 1:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.TargetPacketId = string(b)
+		case 2:
+			b, err := readLengthDelimited(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.DeleteType = string(b)
+		case 3:
+			v, err := binary.ReadUvarint(r)
+			if err != nil {
+				return nil, err
+			}
+			payload.DeletedAt = int64(v)
 		default:
 			if err := skipField(r, wireType); err != nil {
 				return nil, err

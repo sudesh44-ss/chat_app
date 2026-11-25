@@ -32,6 +32,7 @@ var (
 var (
 	domesticIndiaRegex  = regexp.MustCompile(`^(\+91)?[6-9]\d{9}$`)
 	nonceExtractorRegex = regexp.MustCompile(`NX-[2-9A-HJ-NP-Z0-9]{4,10}`)
+	radarPayloadRegex   = regexp.MustCompile(`(?i)NEXA-VERIFY:([a-f0-9]{12}):([a-zA-Z0-9-]+)`)
 )
 
 // CanonicalizeDomesticPhone enforces strict domestic Indian mobile validation (+91 series 6-9).
@@ -81,11 +82,16 @@ type InitiateReverseVerifyRequest struct {
 type InitiateReverseVerifyResponse struct {
 	Status                string                `json:"status"`
 	Nonce                 string                `json:"nonce"`
-	SessionID             string                `json:"session_id,omitempty"`
+	SessionID             string                `json:"sessionId"`
+	SessionIdSnake        string                `json:"session_id,omitempty"`
 	InboundReceiverNumber string                `json:"inbound_receiver_number"`
 	InboundNumber         string                `json:"inbound_number,omitempty"`
-	SmsPayload            string                `json:"sms_payload"`
-	ExpiresInSeconds      int                   `json:"expires_in_seconds"`
+	GatewayNumber         string                `json:"gatewayNumber"`
+	GatewayNumberSnake    string                `json:"gateway_number,omitempty"`
+	SmsPayload            string                `json:"smsPayload"`
+	SmsPayloadSnake       string                `json:"sms_payload,omitempty"`
+	ExpiresInSeconds      int                   `json:"expiresInSeconds"`
+	ExpiresInSecondsSnake int                   `json:"expires_in_seconds,omitempty"`
 	NxID                  string                `json:"nx_id,omitempty"`
 	SessionAuthToken      string                `json:"session_auth_token,omitempty"`
 	SessionToken          string                `json:"session_token,omitempty"`
@@ -129,6 +135,7 @@ type VerificationStatusResponse struct {
 	SessionAuthToken   string                `json:"session_auth_token,omitempty"`
 	SessionToken       string                `json:"session_token,omitempty"`
 	Name               string                `json:"name,omitempty"`
+	Email              string                `json:"email,omitempty"`
 	Phone              string                `json:"phone,omitempty"`
 	AvatarURL          string                `json:"avatar_url,omitempty"`
 	User               *identity.UserAccount `json:"user,omitempty"`
@@ -158,7 +165,10 @@ type ReverseSmsService struct {
 }
 
 func NewReverseSmsService(store identity.IdentityRepository) *ReverseSmsService {
-	inbound := strings.TrimSpace(os.Getenv("INBOUND_SMS_RECEIVER_NUMBER"))
+	inbound := strings.TrimSpace(os.Getenv("INBOUND_SMS_GATEWAY_NUMBER"))
+	if inbound == "" {
+		inbound = strings.TrimSpace(os.Getenv("INBOUND_SMS_RECEIVER_NUMBER"))
+	}
 	env := strings.ToLower(os.Getenv("APP_ENV"))
 	if env == "" {
 		env = strings.ToLower(os.Getenv("ENV"))
@@ -167,13 +177,13 @@ func NewReverseSmsService(store identity.IdentityRepository) *ReverseSmsService 
 
 	if inbound == "" {
 		if isProduction {
-			log.Println("[ReverseSMS] CRITICAL: INBOUND_SMS_RECEIVER_NUMBER is not configured in production!")
+			log.Println("[ReverseSMS] CRITICAL: INBOUND_SMS_GATEWAY_NUMBER / INBOUND_SMS_RECEIVER_NUMBER is not configured in production!")
 		} else {
 			// Default automated inbound virtual receiver / GSM gateway number for local dev/testing
 			inbound = "+919800000000"
 		}
 	} else if isProduction && (inbound == "+919800000000" || inbound == "+910000000000") {
-		log.Printf("[ReverseSMS] CRITICAL: Dummy or placeholder INBOUND_SMS_RECEIVER_NUMBER (%s) detected in production!", inbound)
+		log.Printf("[ReverseSMS] CRITICAL: Dummy or placeholder inbound gateway number (%s) detected in production!", inbound)
 	}
 
 	return &ReverseSmsService{
@@ -256,19 +266,19 @@ func (s *ReverseSmsService) checkRateLimit(key string, tracker map[string][]int6
 }
 
 func (s *ReverseSmsService) generateCryptoNonce() (string, error) {
-	const charset = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-	charsetLen := big.NewInt(int64(len(charset)))
-	buf := make([]byte, 5)
-
-	for i := 0; i < 5; i++ {
-		idx, err := rand.Int(rand.Reader, charsetLen)
-		if err != nil {
-			return "", err
-		}
-		buf[i] = charset[idx.Int64()]
+	buf := make([]byte, 6)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
 	}
+	return hex.EncodeToString(buf), nil
+}
 
-	return "NX-" + string(buf), nil
+func generateUUIDSessionID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	b[6] = (b[6] & 0x0f) | 0x40 // Version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // Variant RFC 4122
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:])
 }
 
 // InitiateVerification creates a verification session.
@@ -315,7 +325,8 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 		}
 		if claims != nil {
 			req.GoogleUID = claims.Subject
-			if req.Email == "" {
+			if claims.Email != "" {
+				// Cryptographically verified Google email takes precedence over arbitrary client-supplied email
 				req.Email = claims.Email
 			}
 			if req.Name == "" && claims.Name != "" {
@@ -370,9 +381,7 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 	}
 
 	now := time.Now().UnixMilli()
-	sessionBytes := make([]byte, 16)
-	rand.Read(sessionBytes)
-	sessionID := hex.EncodeToString(sessionBytes)
+	sessionID := generateUUIDSessionID()
 
 	// Route A: Trusted Auto-Verification Route
 	if isTrusted {
@@ -593,10 +602,15 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 			Status:                "VERIFIED",
 			Nonce:                 nonce,
 			SessionID:             sessionID,
+			SessionIdSnake:        sessionID,
 			InboundReceiverNumber: s.inboundReceiverNum,
 			InboundNumber:         s.inboundReceiverNum,
+			GatewayNumber:         s.inboundReceiverNum,
+			GatewayNumberSnake:    s.inboundReceiverNum,
 			SmsPayload:            fmt.Sprintf("NEXA-VERIFY:%s:%s", nonce, sessionID),
-			ExpiresInSeconds:      90,
+			SmsPayloadSnake:       fmt.Sprintf("NEXA-VERIFY:%s:%s", nonce, sessionID),
+			ExpiresInSeconds:      120,
+			ExpiresInSecondsSnake: 120,
 			NxID:                  finalNxID,
 			SessionAuthToken:      sessionToken,
 			SessionToken:          sessionToken,
@@ -625,7 +639,7 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 		IsReverify:     req.IsReverify,
 		Status:         "PENDING",
 		CreatedAt:      now,
-		ExpiresAt:      now + (90 * 1000), // 90 seconds strict TTL
+		ExpiresAt:      now + (120 * 1000), // 120 seconds strict TTL
 	}
 
 	s.pending[nonce] = record
@@ -634,9 +648,16 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 
 	if s.redisClient != nil {
 		if recordJSON, err := json.Marshal(record); err == nil {
-			ttl := 95 * time.Second
+			radarRecord, _ := json.Marshal(map[string]interface{}{
+				"userId":        req.GoogleUID,
+				"expectedPhone": canonicalPhone,
+				"nonce":         nonce,
+				"status":        "PENDING",
+			})
+			ttl := 120 * time.Second
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			pipe := s.redisClient.Pipeline()
+			pipe.Set(ctx, "radar:"+sessionID, radarRecord, ttl)
 			pipe.Set(ctx, "reverse_sms:nonce:"+nonce, recordJSON, ttl)
 			pipe.Set(ctx, "reverse_sms:session:"+sessionID, nonce, ttl)
 			pipe.Set(ctx, "reverse_sms:phone:"+canonicalPhone, nonce, ttl)
@@ -645,13 +666,23 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 		}
 	}
 
-	log.Printf("[ReverseSMS] Initiated reverse verification for %s (Nonce: %s, Inbound: %s, TTL: 90s)",
+	log.Printf("[ReverseSMS] Initiated reverse verification for %s (Nonce: %s, Inbound: %s, TTL: 120s)",
 		maskPhone(canonicalPhone), nonce, s.inboundReceiverNum)
 
 	return &InitiateReverseVerifyResponse{
 		Status:                "PENDING",
 		Nonce:                 nonce,
 		SessionID:             sessionID,
+		SessionIdSnake:        sessionID,
+		InboundReceiverNumber: s.inboundReceiverNum,
+		InboundNumber:         s.inboundReceiverNum,
+		GatewayNumber:         s.inboundReceiverNum,
+		GatewayNumberSnake:    s.inboundReceiverNum,
+		SmsPayload:            fmt.Sprintf("NEXA-VERIFY:%s:%s", nonce, sessionID),
+		SmsPayloadSnake:       fmt.Sprintf("NEXA-VERIFY:%s:%s", nonce, sessionID),
+		ExpiresInSeconds:      120,
+		ExpiresInSecondsSnake: 120,
+	}, nil
 		InboundReceiverNumber: s.inboundReceiverNum,
 		InboundNumber:         s.inboundReceiverNum,
 		SmsPayload:            fmt.Sprintf("NEXA-VERIFY:%s:%s", nonce, sessionID),
@@ -666,15 +697,29 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 		return nil, fmt.Errorf("inbound webhook: invalid sender phone %s: %w", senderNumber, err)
 	}
 
-	// Extract Nonce from message body:
-	// Format 1: "NEXA-VERIFY:<nonce>:<sessionId>" or "NEXA-VERIFY:<nonce>"
-	// Format 2: "NX-VERIFY <nonce>"
-	// Format 3: Raw NX-XXXXX regex
+	// Extract Nonce and SessionID from message body:
+	// Format 1: "NEXA-VERIFY:<nonce>:<sessionId>" with 12-char hex nonce & UUID sessionId
+	// Format 2: "NEXA-VERIFY:<nonce>"
+	// Format 3: "NX-VERIFY <nonce>"
+	// Format 4: Raw NX-XXXXX regex
 	cleanBody := strings.TrimSpace(body)
 	var nonce string
-	if strings.Contains(cleanBody, ":") {
+	var sessionID string
+
+	if radarPayloadRegex.MatchString(cleanBody) {
+		m := radarPayloadRegex.FindStringSubmatch(cleanBody)
+		if len(m) >= 3 {
+			nonce = strings.TrimSpace(m[1])
+			sessionID = strings.TrimSpace(m[2])
+		}
+	}
+
+	if nonce == "" && strings.Contains(cleanBody, ":") {
 		parts := strings.Split(cleanBody, ":")
-		if len(parts) >= 2 {
+		if len(parts) >= 3 {
+			nonce = strings.TrimSpace(parts[1])
+			sessionID = strings.TrimSpace(parts[2])
+		} else if len(parts) >= 2 {
 			nonce = strings.TrimSpace(parts[1])
 		}
 	}
@@ -696,6 +741,32 @@ func (s *ReverseSmsService) ProcessInboundWebhook(senderNumber, body string) (*P
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Verify Redis radar:<sessionId> if sessionID is present
+	if sessionID != "" && s.redisClient != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		data, err := s.redisClient.Get(ctx, "radar:"+sessionID).Bytes()
+		cancel()
+		if err == nil {
+			var radarRecord struct {
+				UserId        string `json:"userId"`
+				ExpectedPhone string `json:"expectedPhone"`
+				Nonce         string `json:"nonce"`
+				Status        string `json:"status"`
+			}
+			if json.Unmarshal(data, &radarRecord) == nil {
+				if radarRecord.Nonce != "" && radarRecord.Nonce != nonce {
+					return nil, fmt.Errorf("inbound webhook: nonce mismatch for session %s: expected %s, got %s", sessionID, radarRecord.Nonce, nonce)
+				}
+				if radarRecord.ExpectedPhone != "" && radarRecord.ExpectedPhone != canonicalSender {
+					return nil, fmt.Errorf("%w: expected %s, got %s", ErrPhoneMismatch, maskPhone(radarRecord.ExpectedPhone), maskPhone(canonicalSender))
+				}
+				if radarRecord.Status == "VERIFIED" {
+					return nil, fmt.Errorf("inbound webhook: session %s has already been verified (replay attack rejected)", sessionID)
+				}
+			}
+		}
+	}
 
 	record, exists := s.pending[nonce]
 	if !exists && s.redisClient != nil {
@@ -948,6 +1019,10 @@ func (s *ReverseSmsService) GetVerificationStatus(key string) (*VerificationStat
 
 	if record.Status == "VERIFIED" {
 		account, _ := s.store.GetAccountByNxID(record.AllocatedNxID)
+		userEmail := record.Email
+		if userEmail == "" && account != nil {
+			userEmail = account.Email
+		}
 		resp := &VerificationStatusResponse{
 			Status:             "VERIFIED",
 			IsVerified:         true,
@@ -957,6 +1032,7 @@ func (s *ReverseSmsService) GetVerificationStatus(key string) (*VerificationStat
 			SessionAuthToken:   record.SessionAuthToken,
 			SessionToken:       record.SessionAuthToken,
 			Name:               record.Name,
+			Email:              userEmail,
 			Phone:              record.PhoneNumber,
 			AvatarURL:          record.AvatarURL,
 			User:               account,

@@ -44,18 +44,18 @@ class HomeScreenResilienceUnitTests {
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
-        AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN = true
+        AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN = false
     }
 
     @After
     fun tearDown() {
         Dispatchers.resetMain()
-        AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN = true
+        AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN = false
     }
 
     @Test
-    fun testDevBypassFlagRemainsActive() {
-        assertTrue("Dev bypass to Home Screen must remain active", AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN)
+    fun testDevBypassFlagDefaultsToDisabled() {
+        assertFalse("Dev bypass to Home Screen must default to disabled for normal startup", AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN)
     }
 
     @Test
@@ -164,7 +164,7 @@ class HomeScreenResilienceUnitTests {
         override fun getActiveProfile(): Flow<UserProfile?> = flowOf(null)
         override suspend fun loginWithGoogle(idToken: String) = Result.failure<com.nexa.app.data.remote.dto.GoogleAuthResponse>(NotImplementedError())
         override suspend fun requestAndVerifyLoginChallenge(nxId: String, deviceId: String) = Result.failure<com.nexa.app.data.remote.dto.LoginVerifyResponseDto>(NotImplementedError())
-        override suspend fun initiateReverseVerify(phone: String, name: String, avatarUrl: String?, gender: String?, age: Int?, bio: String?, googleUid: String, googleAuthToken: String?, isReverify: Boolean) = Result.failure<com.nexa.app.data.remote.dto.InitiateReverseVerifyResponseDto>(NotImplementedError())
+        override suspend fun initiateReverseVerify(phone: String, name: String, avatarUrl: String?, gender: String?, age: Int?, bio: String?, googleUid: String, googleAuthToken: String?, isReverify: Boolean, email: String?) = Result.failure<com.nexa.app.data.remote.dto.InitiateReverseVerifyResponseDto>(NotImplementedError())
         override suspend fun pollVerificationStatus(nonce: String) = Result.failure<com.nexa.app.data.remote.dto.VerificationStatusDto>(NotImplementedError())
         override suspend fun saveVerifiedSession(nxId: String, sessionToken: String, name: String, phone: String, avatarUrl: String?, age: Int?, gender: String?, bio: String?, email: String?) = Result.failure<UserProfile>(NotImplementedError())
         override suspend fun fetchRemoteProfile(): Result<UserProfile> = Result.failure(NotImplementedError())

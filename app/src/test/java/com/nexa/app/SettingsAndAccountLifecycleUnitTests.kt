@@ -246,9 +246,10 @@ class SettingsAndAccountLifecycleUnitTests {
     @Test
     fun testAppearanceModes_allSupported() {
         val modes = AppearanceMode.values()
-        assertEquals(3, modes.size)
+        assertEquals(4, modes.size)
         assertTrue(modes.contains(AppearanceMode.SYSTEM))
         assertTrue(modes.contains(AppearanceMode.DARK))
+        assertTrue(modes.contains(AppearanceMode.AMOLED))
         assertTrue(modes.contains(AppearanceMode.LIGHT))
     }
 }

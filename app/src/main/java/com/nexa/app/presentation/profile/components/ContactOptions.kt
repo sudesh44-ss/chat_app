@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForwardIos
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -22,12 +23,14 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.nexa.app.R
+import com.nexa.app.domain.model.ConversationBackupPolicy
 import com.nexa.app.presentation.common.glass.NexaGlassSurface
 
 /**
@@ -57,6 +60,8 @@ fun ContactOptions(
     onWallpaperClick: () -> Unit,
     onClearChatClick: () -> Unit,
     onBlockContactClick: () -> Unit,
+    backupPolicy: ConversationBackupPolicy = ConversationBackupPolicy.DEFAULT,
+    onBackupPolicyClick: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val isDark = isSystemInDarkTheme()
@@ -156,6 +161,24 @@ fun ContactOptions(
                     secondaryTextColor = secondaryTextColor,
                     onClick = onWallpaperClick
                 )
+
+                HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp), color = dividerColor, thickness = 1.dp)
+
+                // Backup Policy
+                OptionItem(
+                    title = "Backup Policy",
+                    subtitle = when (backupPolicy) {
+                        ConversationBackupPolicy.DEFAULT -> "Default • Follows global settings"
+                        ConversationBackupPolicy.PRIORITY -> "Priority • Backed up first"
+                        ConversationBackupPolicy.CUSTOM -> "Custom categories configured"
+                        ConversationBackupPolicy.MANUAL_ONLY -> "Manual only • Excluded from auto-backup"
+                        ConversationBackupPolicy.EXCLUDED -> "Excluded • Never backed up"
+                    },
+                    iconVector = Icons.Default.CloudSync,
+                    primaryTextColor = primaryTextColor,
+                    secondaryTextColor = secondaryTextColor,
+                    onClick = onBackupPolicyClick
+                )
             }
         }
 
@@ -203,7 +226,8 @@ fun ContactOptions(
 private fun OptionItem(
     title: String,
     subtitle: String,
-    iconRes: Int,
+    iconRes: Int = 0,
+    iconVector: ImageVector? = null,
     primaryTextColor: Color,
     secondaryTextColor: Color,
     iconTint: Color? = null,
@@ -216,12 +240,21 @@ private fun OptionItem(
             .padding(horizontal = 16.dp, vertical = 13.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(
-            painter = painterResource(id = iconRes),
-            contentDescription = title,
-            tint = iconTint ?: secondaryTextColor,
-            modifier = Modifier.size(20.dp)
-        )
+        if (iconVector != null) {
+            Icon(
+                imageVector = iconVector,
+                contentDescription = title,
+                tint = iconTint ?: secondaryTextColor,
+                modifier = Modifier.size(20.dp)
+            )
+        } else if (iconRes != 0) {
+            Icon(
+                painter = painterResource(id = iconRes),
+                contentDescription = title,
+                tint = iconTint ?: secondaryTextColor,
+                modifier = Modifier.size(20.dp)
+            )
+        }
 
         Spacer(modifier = Modifier.width(14.dp))
 

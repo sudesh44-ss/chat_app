@@ -23,6 +23,10 @@ import com.nexa.app.data.local.dao.PeerSyncCursorDao
 import com.nexa.app.data.local.dao.QuarantineDao
 import com.nexa.app.data.local.dao.RatchetDao
 import com.nexa.app.data.local.dao.ScheduledMessageDao
+import com.nexa.app.data.local.dao.SmsInboundPartDao
+import com.nexa.app.data.local.dao.SmsKeyMaterialDao
+import com.nexa.app.data.local.dao.SmsPacketDao
+import com.nexa.app.data.local.dao.SmsSessionDao
 import com.nexa.app.data.local.dao.StatusUpdateDao
 import com.nexa.app.data.local.dao.StatusViewDao
 import com.nexa.app.data.local.dao.SwarmCacheDao
@@ -46,6 +50,10 @@ import com.nexa.app.data.local.entity.QuarantineEntity
 import com.nexa.app.data.local.entity.RatchetStateEntity
 import com.nexa.app.data.local.entity.ScheduledMessageEntity
 import com.nexa.app.data.local.entity.SkippedKeyEntity
+import com.nexa.app.data.local.entity.SmsInboundPartEntity
+import com.nexa.app.data.local.entity.SmsKeyMaterialEntity
+import com.nexa.app.data.local.entity.SmsPacketEntity
+import com.nexa.app.data.local.entity.SmsSessionEntity
 import com.nexa.app.data.local.entity.StatusUpdateEntity
 import com.nexa.app.data.local.entity.StatusViewEntity
 import com.nexa.app.data.local.entity.TransferEntity
@@ -77,9 +85,13 @@ import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
         ChatDraftEntity::class,
         MessageReactionEntity::class,
         StatusUpdateEntity::class,
-        StatusViewEntity::class
+        StatusViewEntity::class,
+        SmsSessionEntity::class,
+        SmsKeyMaterialEntity::class,
+        SmsPacketEntity::class,
+        SmsInboundPartEntity::class
     ],
-    version = 27,
+    version = 30,
     exportSchema = false
 )
 abstract class NexaDatabase : RoomDatabase() {
@@ -106,6 +118,10 @@ abstract class NexaDatabase : RoomDatabase() {
     abstract fun messageReactionDao(): MessageReactionDao
     abstract fun statusUpdateDao(): StatusUpdateDao
     abstract fun statusViewDao(): StatusViewDao
+    abstract fun smsSessionDao(): SmsSessionDao
+    abstract fun smsKeyMaterialDao(): SmsKeyMaterialDao
+    abstract fun smsPacketDao(): SmsPacketDao
+    abstract fun smsInboundPartDao(): SmsInboundPartDao
 
     /**
      * Exposes the underlying SupportSQLiteDatabase handle for zero-lock snapshots (VACUUM INTO).
@@ -712,6 +728,48 @@ abstract class NexaDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * Module 3 (Encrypted SMS fallback): additive, non-destructive.
+         * Creates only the four SMS tables; no existing table or column is touched.
+         * The DDL lives in [com.nexa.app.core.sms.SmsSchemaDdl] so a JVM test can verify it
+         * against the Room entities instead of trusting hand-written SQL.
+         */
+        val MIGRATION_27_28 = object : Migration(27, 28) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                com.nexa.app.core.sms.SmsSchemaDdl.statements.forEach { statement ->
+                    db.execSQL(statement)
+                }
+            }
+        }
+
+        /**
+         * Part 2 Backup & Restore Architecture Foundation: additive, non-destructive.
+         * Adds `isPriorityBackup` column (INTEGER NOT NULL DEFAULT 0) and its index
+         * to the `chats` table to support the Chat Priority backup mode.
+         * All existing chat records, messages, and relationships are 100% preserved.
+         */
+        val MIGRATION_28_29 = object : Migration(28, 29) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfNotExists(db, "chats", "isPriorityBackup", "INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chats_isPriorityBackup` ON `chats` (`isPriorityBackup`)")
+            }
+        }
+
+        /**
+         * Part 5 Chat Priority Backup & Individual Conversation Backup Policies: additive, non-destructive.
+         * Adds `backupPolicy` (TEXT NOT NULL DEFAULT 'DEFAULT') and `customBackupCategories` (TEXT DEFAULT NULL)
+         * to the `chats` table.
+         * Automatically backfills any existing priority chats (isPriorityBackup = 1) to backupPolicy = 'PRIORITY'.
+         */
+        val MIGRATION_29_30 = object : Migration(29, 30) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                addColumnIfNotExists(db, "chats", "backupPolicy", "TEXT NOT NULL DEFAULT 'DEFAULT'")
+                addColumnIfNotExists(db, "chats", "customBackupCategories", "TEXT DEFAULT NULL")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_chats_backupPolicy` ON `chats` (`backupPolicy`)")
+                db.execSQL("UPDATE `chats` SET `backupPolicy` = 'PRIORITY' WHERE `isPriorityBackup` = 1 AND `backupPolicy` = 'DEFAULT'")
+            }
+        }
+
         private fun addColumnIfNotExists(db: SupportSQLiteDatabase, table: String, column: String, typeAndConstraints: String) {
             var exists = false
             try {
@@ -831,7 +889,10 @@ abstract class NexaDatabase : RoomDatabase() {
                     MIGRATION_23_24,
                     MIGRATION_24_25,
                     MIGRATION_25_26,
-                    MIGRATION_26_27
+                    MIGRATION_26_27,
+                    MIGRATION_27_28,
+                    MIGRATION_28_29,
+                    MIGRATION_29_30
                 )
                 .build()
         }

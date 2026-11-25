@@ -20,7 +20,8 @@ data class UploadSessionState(
     val expectedFileSize: Long,
     val lastConfirmedOffset: Long,
     val updatedAt: Long,
-    val existingFileId: String? = null
+    val existingFileId: String? = null,
+    val backupId: String? = null
 ) {
     /**
      * Verifies that the session metadata and URI meet strict security requirements.

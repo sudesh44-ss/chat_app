@@ -324,6 +324,26 @@ func (s *Store) GetAccountByGoogleID(googleID string) (*UserAccount, bool) {
 	return a, ok
 }
 
+func (s *Store) GetAccountByGoogleIDOrEmail(googleID, email string) (*UserAccount, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if googleID != "" {
+		if nxID, ok := s.byGoogle[googleID]; ok {
+			if a, exists := s.accounts[nxID]; exists {
+				return a, true
+			}
+		}
+	}
+	if email != "" {
+		for _, a := range s.accounts {
+			if strings.EqualFold(a.Email, email) {
+				return a, true
+			}
+		}
+	}
+	return nil, false
+}
+
 func (s *Store) GetAccountBySupabaseUID(supabaseUID string) (*UserAccount, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

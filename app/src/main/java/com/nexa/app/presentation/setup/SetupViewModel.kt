@@ -123,7 +123,8 @@ class SetupViewModel(
                 bio = state.bio.trim().takeIf { it.isNotBlank() },
                 googleUid = state.googleUid ?: "",
                 googleAuthToken = state.googleToken,
-                isReverify = false
+                isReverify = false,
+                email = state.email
             )
             result.onSuccess { payload ->
                 if (payload.status == "VERIFIED" && !payload.nxId.isNullOrBlank() && !payload.sessionAuthToken.isNullOrBlank()) {

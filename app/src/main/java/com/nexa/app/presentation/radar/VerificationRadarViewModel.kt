@@ -37,7 +37,9 @@ data class SimSlotInfo(
 
 data class VerificationRadarUiState(
     val nonce: String = "",
+    val sessionId: String = "",
     val inboundNumber: String = "",
+    val gatewayNumber: String = inboundNumber,
     val smsPayload: String = "",
     val phoneNumber: String = "",
     val name: String = "",
@@ -45,8 +47,9 @@ data class VerificationRadarUiState(
     val age: Int? = null,
     val gender: String? = null,
     val bio: String? = null,
+    val email: String? = null,
     val isReverify: Boolean = false,
-    val secondsRemaining: Int = 90,
+    val secondsRemaining: Int = 120,
     val status: RadarVerificationStatus = RadarVerificationStatus.IDLE,
     val activeSims: List<SimSlotInfo> = emptyList(),
     val selectedSim: SimSlotInfo? = null,
@@ -87,25 +90,50 @@ class VerificationRadarViewModel(
         age: Int?,
         gender: String?,
         bio: String?,
-        expiresInSeconds: Int = 90,
+        email: String? = null,
+        expiresInSeconds: Int = 120,
         isReverify: Boolean = false,
+        sessionId: String = "",
+        gatewayNumber: String? = null,
         context: Context? = null
     ) {
         if (_uiState.value.nonce == nonce && _uiState.value.status != RadarVerificationStatus.IDLE) {
             return
         }
 
+        val resolvedGateway = (gatewayNumber ?: inboundNumber).trim()
+        if (resolvedGateway.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    status = RadarVerificationStatus.ERROR,
+                    errorMessage = "SIM Radar gateway unavailable — use Truecaller or SMS OTP"
+                )
+            }
+            return
+        }
+
+        val dynamicPayload = if (nonce.isNotBlank() && sessionId.isNotBlank()) {
+            "NEXA-VERIFY:$nonce:$sessionId"
+        } else if (smsPayload.isNotBlank()) {
+            smsPayload
+        } else {
+            "NEXA-VERIFY:$nonce"
+        }
+
         _uiState.update {
             it.copy(
                 nonce = nonce,
-                inboundNumber = inboundNumber,
-                smsPayload = smsPayload,
+                sessionId = sessionId,
+                inboundNumber = resolvedGateway,
+                gatewayNumber = resolvedGateway,
+                smsPayload = dynamicPayload,
                 phoneNumber = phone,
                 name = name,
                 avatarUrl = avatarUrl,
                 age = age,
                 gender = gender,
                 bio = bio,
+                email = email,
                 isReverify = isReverify,
                 secondsRemaining = expiresInSeconds,
                 status = RadarVerificationStatus.AWAITING_SMS_DISPATCH,
@@ -143,18 +171,30 @@ class VerificationRadarViewModel(
      * ZERO DANGEROUS PERMISSIONS REQUIRED.
      */
     fun openNativeSmsApp(context: Context) {
-        val inbound = _uiState.value.inboundNumber
-        val payload = _uiState.value.smsPayload
-
-        if (inbound.isBlank() || payload.isBlank()) {
-            Log.w(TAG, "Cannot launch SMS composer: inboundNumber or payload is blank")
+        val state = _uiState.value
+        val gateway = state.gatewayNumber.ifBlank { state.inboundNumber }.trim()
+        if (gateway.isBlank()) {
+            _uiState.update {
+                it.copy(
+                    status = RadarVerificationStatus.ERROR,
+                    errorMessage = "SIM Radar gateway unavailable — use Truecaller or SMS OTP"
+                )
+            }
             return
         }
 
-        Log.i(TAG, "Launching Native SMS Composer (Zero Permission Intent): To=$inbound, Body=$payload")
+        val payload = if (state.nonce.isNotBlank() && state.sessionId.isNotBlank()) {
+            "NEXA-VERIFY:${state.nonce}:${state.sessionId}"
+        } else if (state.smsPayload.isNotBlank()) {
+            state.smsPayload
+        } else {
+            "NEXA-VERIFY:${state.nonce}"
+        }
+
+        Log.i(TAG, "Launching Native SMS Composer (Zero Permission Intent): To=$gateway, Body=$payload")
 
         val smsIntent = Intent(Intent.ACTION_SENDTO).apply {
-            data = Uri.parse("smsto:$inbound")
+            data = Uri.parse("smsto:$gateway")
             putExtra("sms_body", payload)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK
         }
@@ -222,7 +262,8 @@ class VerificationRadarViewModel(
                             avatarUrl = dto.avatarUrl ?: currentState.avatarUrl,
                             age = currentState.age,
                             gender = currentState.gender,
-                            bio = currentState.bio
+                            bio = currentState.bio,
+                            email = dto.email ?: currentState.email
                         )
 
                         _uiState.update {

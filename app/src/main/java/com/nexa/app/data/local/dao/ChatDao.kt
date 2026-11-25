@@ -121,4 +121,115 @@ interface ChatDao {
 
     @Query("SELECT COUNT(*) FROM chats WHERE isArchived = 0")
     suspend fun countActiveChats(): Int
+
+    // --- Chat Priority & Backup Policy Queries ---
+
+    @Query("""
+        UPDATE chats 
+        SET isPriorityBackup = :isPriority,
+            backupPolicy = CASE WHEN :isPriority = 1 THEN 'PRIORITY' ELSE 'DEFAULT' END,
+            updatedAt = :updatedAt 
+        WHERE conversationId = :conversationId
+    """)
+    suspend fun setPriorityBackup(
+        conversationId: String,
+        isPriority: Boolean,
+        updatedAt: Long = System.currentTimeMillis()
+    ): Int
+
+    @Query("""
+        UPDATE chats 
+        SET backupPolicy = :policy,
+            customBackupCategories = :customCategoriesJson,
+            isPriorityBackup = :isPriority,
+            updatedAt = :updatedAt 
+        WHERE conversationId = :conversationId
+    """)
+    suspend fun setConversationBackupPolicy(
+        conversationId: String,
+        policy: String,
+        customCategoriesJson: String?,
+        isPriority: Boolean,
+        updatedAt: Long = System.currentTimeMillis()
+    ): Int
+
+    @Query("""
+        SELECT * FROM chats 
+        WHERE isPriorityBackup = 1 OR backupPolicy = 'PRIORITY'
+        ORDER BY lastMessageTimestamp DESC, conversationId ASC
+    """)
+    fun getPriorityChatsFlow(): Flow<List<ChatEntity>>
+
+    @Query("""
+        SELECT * FROM chats 
+        WHERE (isPriorityBackup = 1 OR backupPolicy = 'PRIORITY') 
+          AND (chatType != 'GROUP' AND conversationId NOT LIKE '%group%' AND participantNxId NOT LIKE '%GROUP%' AND participantName NOT LIKE '%group%')
+        ORDER BY lastMessageTimestamp DESC, conversationId ASC
+    """)
+    fun getPriorityPersonalChatsFlow(): Flow<List<ChatEntity>>
+
+    @Query("""
+        SELECT * FROM chats 
+        WHERE (isPriorityBackup = 1 OR backupPolicy = 'PRIORITY') 
+          AND (chatType = 'GROUP' OR conversationId LIKE '%group%' OR participantNxId LIKE '%GROUP%' OR participantName LIKE '%group%')
+        ORDER BY lastMessageTimestamp DESC, conversationId ASC
+    """)
+    fun getPriorityGroupChatsFlow(): Flow<List<ChatEntity>>
+
+    @Query("""
+        SELECT * FROM chats 
+        WHERE isArchived = 0 
+          AND (chatType != 'GROUP' AND conversationId NOT LIKE '%group%' AND participantNxId NOT LIKE '%GROUP%' AND participantName NOT LIKE '%group%')
+        ORDER BY isPinned DESC, pinPosition ASC, lastMessageTimestamp DESC, conversationId ASC
+    """)
+    fun getAllPersonalChatsFlow(): Flow<List<ChatEntity>>
+
+    @Query("""
+        SELECT * FROM chats 
+        WHERE isArchived = 0 
+          AND (chatType = 'GROUP' OR conversationId LIKE '%group%' OR participantNxId LIKE '%GROUP%' OR participantName LIKE '%group%')
+        ORDER BY isPinned DESC, pinPosition ASC, lastMessageTimestamp DESC, conversationId ASC
+    """)
+    fun getAllGroupChatsFlow(): Flow<List<ChatEntity>>
+
+    @Query("""
+        SELECT * FROM chats 
+        ORDER BY CASE WHEN isPriorityBackup = 1 OR backupPolicy = 'PRIORITY' THEN 0 ELSE 1 END, lastMessageTimestamp DESC
+    """)
+    suspend fun getAllChatsForBackup(): List<ChatEntity>
+
+    @Query("SELECT conversationId FROM chats WHERE isPriorityBackup = 1 OR backupPolicy = 'PRIORITY'")
+    suspend fun getPriorityChatIds(): List<String>
+
+    @Query("SELECT COUNT(*) FROM chats WHERE isPriorityBackup = 1 OR backupPolicy = 'PRIORITY'")
+    fun getPriorityChatCountFlow(): Flow<Int>
+
+    @Query("""
+        SELECT COUNT(*) FROM chats 
+        WHERE (isPriorityBackup = 1 OR backupPolicy = 'PRIORITY') 
+          AND (chatType != 'GROUP' AND conversationId NOT LIKE '%group%' AND participantNxId NOT LIKE '%GROUP%' AND participantName NOT LIKE '%group%')
+    """)
+    fun getPriorityPersonalChatCountFlow(): Flow<Int>
+
+    @Query("""
+        SELECT COUNT(*) FROM chats 
+        WHERE (isPriorityBackup = 1 OR backupPolicy = 'PRIORITY') 
+          AND (chatType = 'GROUP' OR conversationId LIKE '%group%' OR participantNxId LIKE '%GROUP%' OR participantName LIKE '%group%')
+    """)
+    fun getPriorityGroupChatCountFlow(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM chats WHERE backupPolicy = 'EXCLUDED'")
+    fun getExcludedChatCountFlow(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM chats WHERE backupPolicy = 'CUSTOM'")
+    fun getCustomPolicyChatCountFlow(): Flow<Int>
+
+    @Query("""
+        UPDATE chats 
+        SET isPriorityBackup = 0,
+            backupPolicy = CASE WHEN backupPolicy = 'PRIORITY' THEN 'DEFAULT' ELSE backupPolicy END,
+            updatedAt = :updatedAt 
+        WHERE isPriorityBackup = 1 OR backupPolicy = 'PRIORITY'
+    """)
+    suspend fun clearAllPriorityBackups(updatedAt: Long = System.currentTimeMillis()): Int
 }

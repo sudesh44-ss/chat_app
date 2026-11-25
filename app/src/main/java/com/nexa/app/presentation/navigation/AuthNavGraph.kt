@@ -28,6 +28,8 @@ import com.nexa.app.presentation.contacts.PendingRequestsScreen
 import com.nexa.app.presentation.dashboard.MainChatDashboardScreen
 import com.nexa.app.presentation.otp.OtpVerificationScreen
 import com.nexa.app.presentation.otp.OtpViewModel
+import com.nexa.app.presentation.verification.PhoneVerificationSelectionScreen
+import com.nexa.app.presentation.verification.PhoneVerificationViewModel
 import com.nexa.app.presentation.permissions.PermissionGatewayScreen
 import com.nexa.app.presentation.permissions.PermissionViewModel
 import com.nexa.app.presentation.qr.QrDisplayScreen
@@ -63,6 +65,7 @@ import com.nexa.app.presentation.settings.network.NearbyMeshScreen
 import com.nexa.app.presentation.settings.network.StorageDataScreen
 import com.nexa.app.presentation.settings.privacy.PersonalPrivacyScreen
 import com.nexa.app.presentation.settings.privacy.PrivacySafetyScreen
+import com.nexa.app.presentation.settings.privacy.BlockedContactsScreen
 import com.nexa.app.presentation.settings.security.AppLockScreen
 import com.nexa.app.presentation.settings.security.ConnectedDevicesScreen
 import com.nexa.app.presentation.profile.ContactProfileScreen
@@ -79,11 +82,46 @@ import com.nexa.app.presentation.splash.SplashViewModel
 import com.nexa.app.presentation.transfer.TransferViewModel
 import com.nexa.app.presentation.welcome.WelcomeScreen
 import com.nexa.app.presentation.welcome.WelcomeViewModel
+import com.nexa.app.presentation.welcome.WelcomeBackScreen
+import com.nexa.app.presentation.backup.BackupDiscoveryScreen
 import kotlinx.coroutines.launch
 
 sealed class Screen(val route: String) {
     data object Splash : Screen("splash")
     data object Welcome : Screen("welcome")
+
+    data object WelcomeBack : Screen(
+        "welcome_back?nxId={nxId}&name={name}&avatarUrl={avatarUrl}&maskedPhone={maskedPhone}&phone={phone}&activeDeviceName={activeDeviceName}&activeDeviceId={activeDeviceId}&isSameDevice={isSameDevice}&hasActiveDevice={hasActiveDevice}&inboundNumber={inboundNumber}&googleUid={googleUid}&email={email}"
+    ) {
+        fun createRoute(
+            nxId: String,
+            name: String,
+            avatarUrl: String? = null,
+            maskedPhone: String,
+            phone: String,
+            activeDeviceName: String? = null,
+            activeDeviceId: String? = null,
+            isSameDevice: Boolean = false,
+            hasActiveDevice: Boolean = false,
+            inboundNumber: String? = null,
+            googleUid: String? = null,
+            email: String? = null
+        ): String {
+            val nId = Uri.encode(nxId)
+            val nm = Uri.encode(name)
+            val av = Uri.encode(avatarUrl ?: "")
+            val mp = Uri.encode(maskedPhone)
+            val ph = Uri.encode(phone)
+            val adn = Uri.encode(activeDeviceName ?: "")
+            val adi = Uri.encode(activeDeviceId ?: "")
+            val inNum = Uri.encode(inboundNumber ?: "")
+            val gUid = Uri.encode(googleUid ?: "")
+            val em = Uri.encode(email ?: "")
+            return "welcome_back?nxId=$nId&name=$nm&avatarUrl=$av&maskedPhone=$mp&phone=$ph&activeDeviceName=$adn&activeDeviceId=$adi&isSameDevice=$isSameDevice&hasActiveDevice=$hasActiveDevice&inboundNumber=$inNum&googleUid=$gUid&email=$em"
+        }
+    }
+
+    data object BackupDiscovery : Screen("backup_discovery")
 
     data object ProfileSetup : Screen("profile_setup?googleToken={googleToken}&googleUid={googleUid}&prefillName={prefillName}&prefillAvatar={prefillAvatar}&email={email}") {
         fun createRoute(
@@ -103,20 +141,23 @@ sealed class Screen(val route: String) {
     }
 
     data object VerificationRadar : Screen(
-        "verification_radar?nonce={nonce}&inboundNumber={inboundNumber}&smsPayload={smsPayload}&expiresIn={expiresIn}&phone={phone}&name={name}&avatarUrl={avatarUrl}&age={age}&gender={gender}&bio={bio}&isReverify={isReverify}"
+        "verification_radar?nonce={nonce}&inboundNumber={inboundNumber}&smsPayload={smsPayload}&expiresIn={expiresIn}&phone={phone}&name={name}&avatarUrl={avatarUrl}&age={age}&gender={gender}&bio={bio}&isReverify={isReverify}&email={email}&sessionId={sessionId}&gatewayNumber={gatewayNumber}"
     ) {
         fun createRoute(
             nonce: String,
             inboundNumber: String,
             smsPayload: String,
-            expiresIn: Int = 90,
+            expiresIn: Int = 120,
             phone: String,
             name: String,
             avatarUrl: String? = null,
             age: Int? = null,
             gender: String? = null,
             bio: String? = null,
-            isReverify: Boolean = false
+            isReverify: Boolean = false,
+            email: String? = null,
+            sessionId: String = "",
+            gatewayNumber: String? = null
         ): String {
             val n = Uri.encode(nonce)
             val inNum = Uri.encode(inboundNumber)
@@ -127,7 +168,38 @@ sealed class Screen(val route: String) {
             val ag = age?.toString() ?: ""
             val gn = Uri.encode(gender ?: "")
             val bi = Uri.encode(bio ?: "")
-            return "verification_radar?nonce=$n&inboundNumber=$inNum&smsPayload=$p&expiresIn=$expiresIn&phone=$ph&name=$nm&avatarUrl=$av&age=$ag&gender=$gn&bio=$bi&isReverify=$isReverify"
+            val em = Uri.encode(email ?: "")
+            val sid = Uri.encode(sessionId)
+            val gw = Uri.encode(gatewayNumber ?: "")
+            return "verification_radar?nonce=$n&inboundNumber=$inNum&smsPayload=$p&expiresIn=$expiresIn&phone=$ph&name=$nm&avatarUrl=$av&age=$ag&gender=$gn&bio=$bi&isReverify=$isReverify&email=$em&sessionId=$sid&gatewayNumber=$gw"
+        }
+    }
+
+    data object PhoneVerificationSelection : Screen(
+        "phone_verification_selection?phone={phone}&name={name}&avatarUrl={avatarUrl}&age={age}&gender={gender}&bio={bio}&googleToken={googleToken}&googleUid={googleUid}&email={email}&isReverify={isReverify}"
+    ) {
+        fun createRoute(
+            phone: String,
+            name: String,
+            avatarUrl: String? = null,
+            age: Int? = null,
+            gender: String? = null,
+            bio: String? = null,
+            googleToken: String? = null,
+            googleUid: String? = null,
+            email: String? = null,
+            isReverify: Boolean = false
+        ): String {
+            val ph = Uri.encode(phone)
+            val nm = Uri.encode(name)
+            val av = Uri.encode(avatarUrl ?: "")
+            val ag = age?.toString() ?: ""
+            val gn = Uri.encode(gender ?: "")
+            val bi = Uri.encode(bio ?: "")
+            val gt = Uri.encode(googleToken ?: "")
+            val gu = Uri.encode(googleUid ?: "")
+            val em = Uri.encode(email ?: "")
+            return "phone_verification_selection?phone=$ph&name=$nm&avatarUrl=$av&age=$ag&gender=$gn&bio=$bi&googleToken=$gt&googleUid=$gu&email=$em&isReverify=$isReverify"
         }
     }
 
@@ -275,6 +347,27 @@ fun AuthNavGraph(
                         popUpTo(Screen.Welcome.route) { inclusive = true }
                     }
                 },
+                onNavigateToWelcomeBack = { resp, email ->
+                    val resolvedNxId = resp.nxId?.takeIf { it.isNotBlank() } ?: ""
+                    val resolvedName = (resp.fullName ?: resp.prefillName)?.takeIf { it.isNotBlank() } ?: ""
+                    val resolvedMaskedPhone = (resp.maskedPhone ?: resp.registeredPhoneMasked ?: resp.phoneNumber)?.takeIf { it.isNotBlank() } ?: ""
+                    navController.navigate(
+                        Screen.WelcomeBack.createRoute(
+                            nxId = resolvedNxId,
+                            name = resolvedName,
+                            avatarUrl = resp.prefillAvatar,
+                            maskedPhone = resolvedMaskedPhone,
+                            phone = resp.phoneNumber ?: "",
+                            activeDeviceName = resp.activeDeviceName,
+                            activeDeviceId = resp.activeDeviceId,
+                            isSameDevice = resp.isSameDevice,
+                            hasActiveDevice = resp.hasActiveDevice,
+                            inboundNumber = resp.inboundReceiverNumber,
+                            googleUid = resp.googleUid,
+                            email = resp.email ?: email
+                        )
+                    )
+                },
                 onNavigateToProfileSetup = { googleToken, googleUid, prefillName, prefillAvatar, email ->
                     navController.navigate(
                         Screen.ProfileSetup.createRoute(
@@ -288,15 +381,71 @@ fun AuthNavGraph(
                 },
                 onNavigateToSimVerify = { phone, googleUid, inboundNumber ->
                     navController.navigate(
-                        Screen.VerificationRadar.createRoute(
-                            nonce = "NX-INIT",
-                            inboundNumber = inboundNumber ?: "+917887711223",
-                            smsPayload = "NX-VERIFY",
+                        Screen.PhoneVerificationSelection.createRoute(
                             phone = phone,
                             name = "NEXA User",
+                            googleUid = googleUid,
                             isReverify = true
                         )
                     )
+                }
+            )
+        }
+
+        // 2b. Welcome Back Screen (Returning User Lifecycle)
+        composable(
+            route = Screen.WelcomeBack.route,
+            arguments = listOf(
+                navArgument("nxId") { type = NavType.StringType; defaultValue = "" },
+                navArgument("name") { type = NavType.StringType; defaultValue = "" },
+                navArgument("avatarUrl") { type = NavType.StringType; defaultValue = "" },
+                navArgument("maskedPhone") { type = NavType.StringType; defaultValue = "" },
+                navArgument("phone") { type = NavType.StringType; defaultValue = "" },
+                navArgument("activeDeviceName") { type = NavType.StringType; defaultValue = "" },
+                navArgument("activeDeviceId") { type = NavType.StringType; defaultValue = "" },
+                navArgument("isSameDevice") { type = NavType.BoolType; defaultValue = false },
+                navArgument("hasActiveDevice") { type = NavType.BoolType; defaultValue = false },
+                navArgument("inboundNumber") { type = NavType.StringType; defaultValue = "" },
+                navArgument("googleUid") { type = NavType.StringType; defaultValue = "" },
+                navArgument("email") { type = NavType.StringType; defaultValue = "" }
+            )
+        ) { backStackEntry ->
+            val nxId = backStackEntry.arguments?.getString("nxId") ?: ""
+            val name = backStackEntry.arguments?.getString("name") ?: ""
+            val avatarUrl = backStackEntry.arguments?.getString("avatarUrl").takeIf { !it.isNullOrBlank() }
+            val maskedPhone = backStackEntry.arguments?.getString("maskedPhone") ?: ""
+            val phone = backStackEntry.arguments?.getString("phone") ?: ""
+            val activeDeviceName = backStackEntry.arguments?.getString("activeDeviceName").takeIf { !it.isNullOrBlank() }
+            val activeDeviceId = backStackEntry.arguments?.getString("activeDeviceId").takeIf { !it.isNullOrBlank() }
+            val isSameDevice = backStackEntry.arguments?.getBoolean("isSameDevice") ?: false
+            val hasActiveDevice = backStackEntry.arguments?.getBoolean("hasActiveDevice") ?: false
+            val inboundNumber = backStackEntry.arguments?.getString("inboundNumber").takeIf { !it.isNullOrBlank() }
+            val googleUid = backStackEntry.arguments?.getString("googleUid").takeIf { !it.isNullOrBlank() }
+            val email = backStackEntry.arguments?.getString("email").takeIf { !it.isNullOrBlank() }
+
+            WelcomeBackScreen(
+                nxId = nxId,
+                displayName = name,
+                avatarUrl = avatarUrl,
+                maskedPhone = maskedPhone,
+                phoneNumber = phone,
+                hasActiveDevice = hasActiveDevice,
+                activeDeviceName = activeDeviceName,
+                isSameDevice = isSameDevice,
+                onProceedToVerification = { verifiedPhone, verifiedName, verifiedAvatar ->
+                    navController.navigate(
+                        Screen.PhoneVerificationSelection.createRoute(
+                            phone = verifiedPhone,
+                            name = verifiedName,
+                            avatarUrl = verifiedAvatar,
+                            googleUid = googleUid,
+                            email = email,
+                            isReverify = true
+                        )
+                    )
+                },
+                onCancel = {
+                    navController.popBackStack()
                 }
             )
         }
@@ -328,7 +477,7 @@ fun AuthNavGraph(
                 prefillAvatar = prefillAvatar,
                 email = email,
                 onBack = { navController.popBackStack() },
-                onProceedToReverseVerify = { nonce, inboundNumber, smsPayload, expiresInSeconds, name, phone, avatarUrl, age, gender, bio ->
+                onProceedToReverseVerify = { nonce, inboundNumber, smsPayload, expiresInSeconds, name, phone, avatarUrl, age, gender, bio, emailParam ->
                     navController.navigate(
                         Screen.VerificationRadar.createRoute(
                             nonce = nonce,
@@ -340,7 +489,9 @@ fun AuthNavGraph(
                             avatarUrl = avatarUrl,
                             age = age,
                             gender = gender,
-                            bio = bio
+                            bio = bio,
+                            email = emailParam ?: email,
+                            gatewayNumber = inboundNumber
                         )
                     )
                 },
@@ -366,6 +517,22 @@ fun AuthNavGraph(
                     ) {
                         popUpTo(Screen.Welcome.route) { inclusive = true }
                     }
+                },
+                onProceedToVerificationSelection = { name, phone, avatarUrl, age, gender, bio, emailParam ->
+                    navController.navigate(
+                        Screen.PhoneVerificationSelection.createRoute(
+                            phone = phone,
+                            name = name,
+                            avatarUrl = avatarUrl,
+                            age = age,
+                            gender = gender,
+                            bio = bio,
+                            googleToken = googleToken,
+                            googleUid = googleUid,
+                            email = emailParam ?: email,
+                            isReverify = false
+                        )
+                    )
                 }
             )
         }
@@ -384,13 +551,16 @@ fun AuthNavGraph(
                 navArgument("age") { type = NavType.StringType; defaultValue = "" },
                 navArgument("gender") { type = NavType.StringType; defaultValue = "" },
                 navArgument("bio") { type = NavType.StringType; defaultValue = "" },
-                navArgument("isReverify") { type = NavType.BoolType; defaultValue = false }
+                navArgument("isReverify") { type = NavType.BoolType; defaultValue = false },
+                navArgument("email") { type = NavType.StringType; defaultValue = "" },
+                navArgument("sessionId") { type = NavType.StringType; defaultValue = "" },
+                navArgument("gatewayNumber") { type = NavType.StringType; defaultValue = "" }
             )
         ) { backStackEntry ->
             val nonce = backStackEntry.arguments?.getString("nonce") ?: ""
             val inboundNumber = backStackEntry.arguments?.getString("inboundNumber") ?: ""
             val smsPayload = backStackEntry.arguments?.getString("smsPayload") ?: ""
-            val expiresIn = backStackEntry.arguments?.getInt("expiresIn") ?: 90
+            val expiresIn = backStackEntry.arguments?.getInt("expiresIn") ?: 120
             val phone = backStackEntry.arguments?.getString("phone") ?: ""
             val name = backStackEntry.arguments?.getString("name") ?: ""
             val avatarUrl = backStackEntry.arguments?.getString("avatarUrl").takeIf { !it.isNullOrBlank() }
@@ -398,6 +568,9 @@ fun AuthNavGraph(
             val gender = backStackEntry.arguments?.getString("gender").takeIf { !it.isNullOrBlank() }
             val bio = backStackEntry.arguments?.getString("bio").takeIf { !it.isNullOrBlank() }
             val isReverify = backStackEntry.arguments?.getBoolean("isReverify") ?: false
+            val email = backStackEntry.arguments?.getString("email").takeIf { !it.isNullOrBlank() }
+            val sessionId = backStackEntry.arguments?.getString("sessionId") ?: ""
+            val gatewayNumber = backStackEntry.arguments?.getString("gatewayNumber").takeIf { !it.isNullOrBlank() } ?: inboundNumber
 
             val radarViewModel = remember { VerificationRadarViewModel(authRepository) }
 
@@ -412,19 +585,135 @@ fun AuthNavGraph(
                 age = age,
                 gender = gender,
                 bio = bio,
+                email = email,
                 expiresInSeconds = expiresIn,
+                sessionId = sessionId,
+                gatewayNumber = gatewayNumber,
                 isReverify = isReverify,
                 onBack = { navController.popBackStack() },
                 onVerificationSuccess = { nxId, verifiedName, verifiedPhone, verifiedAvatar ->
+                    if (isReverify) {
+                        navController.navigate(Screen.BackupDiscovery.route) {
+                            popUpTo(Screen.Welcome.route) { inclusive = true }
+                        }
+                    } else {
+                        navController.navigate(
+                            Screen.ProfileBadge.createRoute(
+                                nxId = nxId,
+                                name = verifiedName,
+                                phone = verifiedPhone,
+                                avatarUrl = verifiedAvatar
+                            )
+                        ) {
+                            popUpTo(Screen.Welcome.route) { inclusive = true }
+                        }
+                    }
+                }
+            )
+        }
+
+        // 4a. Phone Verification Selection Screen (Truecaller, Firebase OTP, SIM Radar)
+        composable(
+            route = Screen.PhoneVerificationSelection.route,
+            arguments = listOf(
+                navArgument("phone") { type = NavType.StringType; defaultValue = "" },
+                navArgument("name") { type = NavType.StringType; defaultValue = "" },
+                navArgument("avatarUrl") { type = NavType.StringType; defaultValue = "" },
+                navArgument("age") { type = NavType.StringType; defaultValue = "" },
+                navArgument("gender") { type = NavType.StringType; defaultValue = "" },
+                navArgument("bio") { type = NavType.StringType; defaultValue = "" },
+                navArgument("googleToken") { type = NavType.StringType; defaultValue = "" },
+                navArgument("googleUid") { type = NavType.StringType; defaultValue = "" },
+                navArgument("email") { type = NavType.StringType; defaultValue = "" },
+                navArgument("isReverify") { type = NavType.BoolType; defaultValue = false }
+            )
+        ) { backStackEntry ->
+            val phone = backStackEntry.arguments?.getString("phone") ?: ""
+            val name = backStackEntry.arguments?.getString("name") ?: ""
+            val avatarUrl = backStackEntry.arguments?.getString("avatarUrl").takeIf { !it.isNullOrBlank() }
+            val age = backStackEntry.arguments?.getString("age")?.toIntOrNull()
+            val gender = backStackEntry.arguments?.getString("gender").takeIf { !it.isNullOrBlank() }
+            val bio = backStackEntry.arguments?.getString("bio").takeIf { !it.isNullOrBlank() }
+            val googleToken = backStackEntry.arguments?.getString("googleToken").takeIf { !it.isNullOrBlank() }
+            val googleUid = backStackEntry.arguments?.getString("googleUid").takeIf { !it.isNullOrBlank() }
+            val email = backStackEntry.arguments?.getString("email").takeIf { !it.isNullOrBlank() }
+            val isReverify = backStackEntry.arguments?.getBoolean("isReverify") ?: false
+
+            val verificationViewModel = remember { PhoneVerificationViewModel(authRepository) }
+
+            PhoneVerificationSelectionScreen(
+                viewModel = verificationViewModel,
+                phone = phone,
+                name = name,
+                avatarUrl = avatarUrl,
+                age = age,
+                gender = gender,
+                bio = bio,
+                googleToken = googleToken,
+                googleUid = googleUid,
+                email = email,
+                isReverify = isReverify,
+                onBack = { navController.popBackStack() },
+                onVerificationSuccess = { profile ->
+                    if (isReverify) {
+                        navController.navigate(Screen.BackupDiscovery.route) {
+                            popUpTo(Screen.Welcome.route) { inclusive = true }
+                        }
+                    } else {
+                        navController.navigate(
+                            Screen.ProfileBadge.createRoute(
+                                nxId = profile.nxId,
+                                name = profile.fullName,
+                                phone = profile.phoneNumber,
+                                avatarUrl = profile.avatarUrl
+                            )
+                        ) {
+                            popUpTo(Screen.Welcome.route) { inclusive = true }
+                        }
+                    }
+                },
+                onProceedToReverseRadar = { nonce, inboundNumber, payload, expiresIn, sessionId, radarPhone, radarName ->
                     navController.navigate(
-                        Screen.ProfileBadge.createRoute(
-                            nxId = nxId,
-                            name = verifiedName,
-                            phone = verifiedPhone,
-                            avatarUrl = verifiedAvatar
+                        Screen.VerificationRadar.createRoute(
+                            nonce = nonce,
+                            inboundNumber = inboundNumber,
+                            smsPayload = payload,
+                            expiresIn = expiresIn,
+                            phone = radarPhone,
+                            name = radarName,
+                            avatarUrl = avatarUrl,
+                            age = age,
+                            gender = gender,
+                            bio = bio,
+                            isReverify = isReverify,
+                            email = email,
+                            sessionId = sessionId,
+                            gatewayNumber = inboundNumber
                         )
-                    ) {
-                        popUpTo(Screen.Welcome.route) { inclusive = true }
+                    )
+                }
+            )
+        }
+
+        // 4b. Encrypted Backup Discovery Screen (Post Device Migration)
+        composable(route = Screen.BackupDiscovery.route) {
+            val app = LocalContext.current.applicationContext as NexaApplication
+            val backupViewModel = remember {
+                BackupViewModel(
+                    backupRepository = app.driveBackupRepository,
+                    backupPrefs = app.backupPrefs,
+                    authManager = app.googleDriveAuthManager,
+                    context = app
+                )
+            }
+            BackupDiscoveryScreen(
+                viewModel = backupViewModel,
+                onProceedToRestore = {
+                    navController.navigate(Screen.RestoreBackup.route)
+                },
+                onSkip = {
+                    navController.navigate(Screen.Dashboard.route) {
+                        popUpTo(Screen.BackupDiscovery.route) { inclusive = true }
                     }
                 }
             )
@@ -515,6 +804,16 @@ fun AuthNavGraph(
         // 8. Main Dashboard Screen
         composable(route = Screen.Dashboard.route) {
             val app = LocalContext.current.applicationContext as NexaApplication
+
+            // Process recreation & security guard: redirect to Welcome/Auth if session is not active
+            androidx.compose.runtime.LaunchedEffect(Unit) {
+                if (!authRepository.isLoggedIn()) {
+                    navController.navigate(Screen.Welcome.route) {
+                        popUpTo(0) { inclusive = true }
+                    }
+                }
+            }
+
             MainChatDashboardScreen(
                 authRepository = authRepository,
                 chatRepository = chatRepository,
@@ -616,7 +915,8 @@ fun AuthNavGraph(
                     mediaPrefs = app.mediaPrefs,
                     chatPrivacyPrefs = app.chatPrivacyPrefs,
                     contactRepository = app.contactRepository,
-                    scheduledMessageManager = app.scheduledMessageManager
+                    scheduledMessageManager = app.scheduledMessageManager,
+                    smsFallbackRepository = app.smsFallbackRepository
                 )
             }
             val transferViewModel = remember(conversationId) { TransferViewModel(p2pTransferRepository) }
@@ -896,15 +1196,24 @@ fun AuthNavGraph(
             val app = LocalContext.current.applicationContext as NexaApplication
             PersonalPrivacyScreen(
                 chatPrivacyPrefs = app.chatPrivacyPrefs,
+                chatRepository = app.chatRepository,
                 onNavigateBack = { navController.popBackStack() }
             )
         }
 
-        // 23b. Privacy & Safety (real blocked-contact list)
+        // 23b. Blocked Contacts (formerly Privacy & Safety)
         composable(route = Screen.PrivacySafety.route) {
             val app = LocalContext.current.applicationContext as NexaApplication
-            PrivacySafetyScreen(
+            val scope = rememberCoroutineScope()
+            BlockedContactsScreen(
                 contactRepository = app.contactRepository,
+                chatRepository = app.chatRepository,
+                onNavigateToChat = { nxId, displayName ->
+                    scope.launch {
+                        val conversation = app.chatRepository.createOrGetConversation(nxId, displayName)
+                        navController.navigate(Screen.Chat.createRoute(conversation.conversationId, nxId, displayName))
+                    }
+                },
                 onNavigateBack = { navController.popBackStack() }
             )
         }
@@ -960,6 +1269,7 @@ fun AuthNavGraph(
             StorageDataScreen(
                 context = app,
                 mediaAutoReceivePreferences = app.mediaAutoReceivePrefs,
+                storageManager = app.nexaStorageManager,
                 onNavigateBack = { navController.popBackStack() }
             )
         }
@@ -1169,7 +1479,8 @@ fun AuthNavGraph(
                 BackupViewModel(
                     backupRepository = app.driveBackupRepository,
                     backupPrefs = app.backupPrefs,
-                    authManager = app.googleDriveAuthManager
+                    authManager = app.googleDriveAuthManager,
+                    context = app
                 )
             }
             BackupSettingsScreen(
@@ -1186,7 +1497,8 @@ fun AuthNavGraph(
                 BackupViewModel(
                     backupRepository = app.driveBackupRepository,
                     backupPrefs = app.backupPrefs,
-                    authManager = app.googleDriveAuthManager
+                    authManager = app.googleDriveAuthManager,
+                    context = app
                 )
             }
             RestoreBackupScreen(

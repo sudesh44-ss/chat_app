@@ -99,15 +99,18 @@ class ChatScreenRedesignUnitTests {
     @Test
     fun testChatOverflowMenu_exactEightItemsInExactOrder() {
         val items = ChatOverflowAction.values()
-        assertEquals(8, items.size)
+        assertEquals(11, items.size)
         assertEquals(ChatOverflowAction.VIEW_PROFILE, items[0])
         assertEquals(ChatOverflowAction.SEARCH_CHAT, items[1])
-        assertEquals(ChatOverflowAction.DELETE_CHAT, items[2])
-        assertEquals(ChatOverflowAction.CLEAR_CHAT, items[3])
-        assertEquals(ChatOverflowAction.SHARED_FILES, items[4])
-        assertEquals(ChatOverflowAction.PINNED_MESSAGES, items[5])
-        assertEquals(ChatOverflowAction.MUTE_NOTIFICATIONS, items[6])
-        assertEquals(ChatOverflowAction.ARCHIVE_CHAT, items[7])
+        assertEquals(ChatOverflowAction.BACKUP_POLICY, items[2])
+        assertEquals(ChatOverflowAction.DELETE_CHAT, items[3])
+        assertEquals(ChatOverflowAction.CLEAR_CHAT, items[4])
+        assertEquals(ChatOverflowAction.SHARED_FILES, items[5])
+        assertEquals(ChatOverflowAction.PINNED_MESSAGES, items[6])
+        assertEquals(ChatOverflowAction.MUTE_NOTIFICATIONS, items[7])
+        assertEquals(ChatOverflowAction.ARCHIVE_CHAT, items[8])
+        assertEquals(ChatOverflowAction.BLOCK_CONTACT, items[9])
+        assertEquals(ChatOverflowAction.UNBLOCK_CONTACT, items[10])
     }
 
     // ==========================================
@@ -250,13 +253,18 @@ class ChatScreenRedesignUnitTests {
     @Test
     fun testEmojiCategories_allCategoriesDefined() {
         val categories = EmojiCategory.values()
-        assertEquals(7, categories.size)
+        assertEquals(12, categories.size)
         assertTrue(categories.contains(EmojiCategory.RECENT))
-        assertTrue(categories.contains(EmojiCategory.SMILEYS))
-        assertTrue(categories.contains(EmojiCategory.GESTURES))
-        assertTrue(categories.contains(EmojiCategory.HEARTS))
+        assertTrue(categories.contains(EmojiCategory.FACES))
+        assertTrue(categories.contains(EmojiCategory.LOVE))
+        assertTrue(categories.contains(EmojiCategory.HANDS))
+        assertTrue(categories.contains(EmojiCategory.NATURE))
+        assertTrue(categories.contains(EmojiCategory.SPACE))
         assertTrue(categories.contains(EmojiCategory.ANIMALS))
         assertTrue(categories.contains(EmojiCategory.FOOD))
+        assertTrue(categories.contains(EmojiCategory.ACTION))
         assertTrue(categories.contains(EmojiCategory.OBJECTS))
+        assertTrue(categories.contains(EmojiCategory.SYMBOLS))
+        assertTrue(categories.contains(EmojiCategory.FLAGS))
     }
 }

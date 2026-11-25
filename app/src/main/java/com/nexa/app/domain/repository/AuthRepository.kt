@@ -10,6 +10,15 @@ import kotlinx.coroutines.flow.Flow
 
 interface AuthRepository {
     suspend fun isLoggedIn(): Boolean
+
+    /**
+     * Comprehensive startup validation of existing authentication session, device,
+     * and required onboarding state. Verifies token, local active verified profile,
+     * account status, and confirms session validity against the backend.
+     * Expired or revoked sessions are invalidated and cleared.
+     */
+    suspend fun validateSession(): Boolean = isLoggedIn()
+
     suspend fun getActiveNxId(): String?
     fun getActiveProfile(): Flow<UserProfile?>
 
@@ -26,7 +35,8 @@ interface AuthRepository {
         bio: String?,
         googleUid: String,
         googleAuthToken: String?,
-        isReverify: Boolean = false
+        isReverify: Boolean = false,
+        email: String? = null
     ): Result<InitiateReverseVerifyResponseDto>
 
     suspend fun pollVerificationStatus(nonce: String): Result<VerificationStatusDto>
@@ -65,6 +75,37 @@ interface AuthRepository {
         gender: String?,
         bio: String?
     ): Result<UserProfile>
+
+    suspend fun verifyWithFirebase(
+        idToken: String,
+        googleAuthToken: String? = null,
+        email: String? = null,
+        name: String? = null,
+        avatarUrl: String? = null,
+        gender: String? = null,
+        age: Int? = null,
+        bio: String? = null,
+        isReverify: Boolean = false
+    ): Result<UserProfile> = Result.failure(UnsupportedOperationException("Not implemented"))
+
+    suspend fun verifyWithTruecaller(
+        payload: String? = null,
+        signature: String? = null,
+        requestNonce: String? = null,
+        accessToken: String? = null,
+        authorizationCode: String? = null,
+        codeVerifier: String? = null,
+        googleAuthToken: String? = null,
+        email: String? = null,
+        name: String? = null,
+        avatarUrl: String? = null,
+        gender: String? = null,
+        age: Int? = null,
+        bio: String? = null,
+        isReverify: Boolean = false
+    ): Result<UserProfile> = Result.failure(UnsupportedOperationException("Not implemented"))
+
+    suspend fun getTruecallerNonce(): Result<String> = Result.failure(UnsupportedOperationException("Not implemented"))
 
     // Account Lifecycle & Settings Management
     fun getAccountStatus(): Flow<AccountStatus> = kotlinx.coroutines.flow.flowOf(AccountStatus.ACTIVE)

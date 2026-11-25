@@ -41,20 +41,26 @@ data class GoogleAuthRequest(
 )
 
 data class GoogleAuthResponse(
-    val status: String, // "LOGIN_SUCCESS", "REQUIRE_DEVICE_CHALLENGE", "NEW_USER", "REQUIRE_SIM_VERIFICATION"
+    val status: String, // "LOGIN_SUCCESS", "REQUIRE_DEVICE_CHALLENGE", "NEW_USER", "REQUIRE_SIM_VERIFICATION", "EXISTING_USER"
     val googleUid: String? = null,
     val email: String? = null,
+    val fullName: String? = null,
     val prefillName: String? = null,
     val prefillAvatar: String? = null,
     val sessionAuthToken: String? = null,
     val nxId: String? = null,
     val registeredPhoneMasked: String? = null,
+    val maskedPhone: String? = null,
     val phoneNumber: String? = null,
     val inboundReceiverNumber: String? = null,
     val challengeId: String? = null,
     val challenge: String? = null,
     val expiresInSeconds: Int? = null,
-    val deviceId: String? = null
+    val deviceId: String? = null,
+    val isSameDevice: Boolean = false,
+    val hasActiveDevice: Boolean = false,
+    val activeDeviceName: String? = null,
+    val activeDeviceId: String? = null
 )
 
 data class LoginChallengeRequestDto(
@@ -83,6 +89,7 @@ data class LoginVerifyRequestDto(
 data class UserProfileSummaryDto(
     val nxId: String,
     val name: String? = null,
+    val email: String? = null,
     val phone: String? = null,
     val avatarUrl: String? = null
 )
@@ -118,6 +125,7 @@ data class InitiateReverseVerifyResponseDto(
     val nonce: String,
     val inboundReceiverNumber: String,
     val inboundNumber: String = inboundReceiverNumber,
+    val gatewayNumber: String = inboundReceiverNumber,
     val smsPayload: String,
     val expiresInSeconds: Int,
     val sessionId: String? = null,
@@ -153,6 +161,7 @@ data class VerificationStatusDto(
     val nxId: String? = null,
     val sessionAuthToken: String? = null,
     val name: String? = null,
+    val email: String? = null,
     val phone: String? = null,
     val avatarUrl: String? = null
 )
@@ -163,4 +172,55 @@ data class UserResolveDto(
     val avatarUrl: String? = null,
     val bio: String? = null,
     val isFriend: Boolean = false
+)
+
+data class FirebaseVerifyRequestDto(
+    val firebaseIdToken: String,
+    val googleAuthToken: String? = null,
+    val email: String? = null,
+    val name: String? = null,
+    val avatarUrl: String? = null,
+    val gender: String? = null,
+    val age: Int? = null,
+    val bio: String? = null,
+    val publicKeyHex: String,
+    val dhPublicKeyHex: String? = null,
+    val deviceId: String? = null,
+    val deviceName: String? = null,
+    val isReverify: Boolean = false
+)
+
+data class TruecallerVerifyRequestDto(
+    val payload: String? = null,
+    val signature: String? = null,
+    val requestNonce: String? = null,
+    val accessToken: String? = null,
+    val authorizationCode: String? = null,
+    val codeVerifier: String? = null,
+    val googleAuthToken: String? = null,
+    val email: String? = null,
+    val name: String? = null,
+    val avatarUrl: String? = null,
+    val gender: String? = null,
+    val age: Int? = null,
+    val bio: String? = null,
+    val publicKeyHex: String,
+    val dhPublicKeyHex: String? = null,
+    val deviceId: String? = null,
+    val deviceName: String? = null,
+    val isReverify: Boolean = false
+)
+
+data class PhoneVerifyResponseDto(
+    val status: String,
+    val nxId: String,
+    val sessionAuthToken: String? = null,
+    val sessionToken: String? = null,
+    val verificationMethod: String? = null,
+    val verifiedAt: Long? = null,
+    val name: String? = null,
+    val phone: String? = null,
+    val email: String? = null,
+    val avatarUrl: String? = null,
+    val isExistingUser: Boolean = false
 )

@@ -306,9 +306,39 @@ class ContactsAndDemoUnitTests {
         override suspend fun updateLastMessage(conversationId: String, text: String, timestamp: Long, lastMessageId: String?, lastSenderNxId: String?): Int = 1
         override suspend fun incrementUnread(conversationId: String): Int = 1
         override suspend fun countActiveChats(): Int = chats.values.count { !it.isArchived }
+
+        override suspend fun setPriorityBackup(conversationId: String, isPriority: Boolean, updatedAt: Long): Int {
+            val existing = chats[conversationId] ?: return 0
+            chats[conversationId] = existing.copy(isPriorityBackup = isPriority, updatedAt = updatedAt)
+            return 1
+        }
+        override fun getPriorityChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.isPriorityBackup })
+        override fun getPriorityPersonalChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.isPriorityBackup && it.chatType != "GROUP" })
+        override fun getPriorityGroupChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.isPriorityBackup && it.chatType == "GROUP" })
+        override suspend fun getPriorityChatIds(): List<String> = chats.values.filter { it.isPriorityBackup }.map { it.conversationId }
+        override fun getPriorityChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.isPriorityBackup })
+        override fun getPriorityPersonalChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.isPriorityBackup && it.chatType != "GROUP" })
+        override fun getPriorityGroupChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.isPriorityBackup && it.chatType == "GROUP" })
+        override suspend fun clearAllPriorityBackups(updatedAt: Long): Int {
+            chats.values.filter { it.isPriorityBackup }.forEach { chats[it.conversationId] = it.copy(isPriorityBackup = false, updatedAt = updatedAt) }
+            return 1
+        }
+        override suspend fun setConversationBackupPolicy(conversationId: String, policy: String, customCategoriesJson: String?, isPriority: Boolean, updatedAt: Long): Int {
+            val existing = chats[conversationId] ?: return 0
+            chats[conversationId] = existing.copy(backupPolicy = policy, customBackupCategories = customCategoriesJson, isPriorityBackup = isPriority, updatedAt = updatedAt)
+            return 1
+        }
+        override fun getAllPersonalChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.chatType != "GROUP" })
+        override fun getAllGroupChatsFlow(): Flow<List<ChatEntity>> = flowOf(chats.values.filter { it.chatType == "GROUP" })
+        override suspend fun getAllChatsForBackup(): List<ChatEntity> = chats.values.toList()
+        override fun getExcludedChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.backupPolicy == "EXCLUDED" })
+        override fun getCustomPolicyChatCountFlow(): Flow<Int> = flowOf(chats.values.count { it.backupPolicy == "CUSTOM" })
     }
 
     private class FakeMessageDao : MessageDao {
+        override suspend fun updateMessageContent(packetId: String, newContent: String, editedAt: Long): Int = 0
+        override suspend fun tombstoneMessage(packetId: String, tombstoneText: String): Int = 0
+        override suspend fun getUnreadIncomingPacketIds(conversationId: String): List<String> = emptyList()
         val messages = mutableListOf<MessageEntity>()
 
         override fun getMessagesFlow(conversationId: String): Flow<List<MessageEntity>> =
@@ -387,5 +417,8 @@ class ContactsAndDemoUnitTests {
         override suspend fun updatePeerPhoneSharing(nxId: String, isShared: Boolean, phone: String?): Int = 1
         override suspend fun updateAvatarUrl(nxId: String, avatarUrl: String?): Int = 1
         override suspend fun updateDeviceContactPhotoUri(nxId: String, photoUri: String?): Int = 1
+        override suspend fun isUserBlocked(nxId: String): Boolean = false
+        override fun isUserBlockedSync(nxId: String): Boolean = false
+        override suspend fun getBlockedContactsList(): List<ContactEntity> = emptyList()
     }
 }

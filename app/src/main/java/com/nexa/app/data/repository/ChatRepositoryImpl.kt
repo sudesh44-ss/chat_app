@@ -12,6 +12,10 @@ import com.nexa.app.core.proto.DeliveryAckPayload
 import com.nexa.app.core.proto.EncryptedMessagePayload
 import com.nexa.app.core.proto.NexaWirePacket
 import com.nexa.app.core.proto.PacketType
+import com.nexa.app.core.proto.PresencePayload
+import com.nexa.app.core.proto.PresenceStatus
+import com.nexa.app.core.proto.MessageDeletePayload
+import com.nexa.app.core.proto.MessageEditPayload
 import com.nexa.app.core.security.CryptoKeystoreManager
 import com.nexa.app.core.security.SecureStorage
 import com.nexa.app.data.local.dao.ChatDao
@@ -28,6 +32,8 @@ import com.nexa.app.data.local.entity.MessageEntity
 import com.nexa.app.data.local.entity.MessageReactionEntity
 import com.nexa.app.data.local.entity.toDomain
 import com.nexa.app.data.local.preferences.ChatPrivacyPrefs
+import com.nexa.app.data.local.preferences.OnlinePrivacyMode
+import com.nexa.app.data.local.preferences.TypingPrivacyMode
 import com.nexa.app.data.local.preferences.ConversationPreferences
 import com.nexa.app.data.remote.sms.NexaDataSmsSender
 import com.nexa.app.domain.model.ChatConversation
@@ -80,8 +86,12 @@ class ChatRepositoryImpl(
     var universalTransportIngest: NexaUniversalTransportIngest? = null
     var scheduledMessageManager: com.nexa.app.domain.manager.ScheduledMessageManager? = null
 
+    /** Module 3: supplies this device's SMS provisioning public key for E2EE provisioning packets. */
+    var smsProvisioningPublicKeyProvider: (suspend () -> String?)? = null
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _typingFlow = MutableSharedFlow<Pair<String, Boolean>>(extraBufferCapacity = 32)
+    private val _presenceFlow = MutableSharedFlow<Pair<String, Boolean>>(extraBufferCapacity = 32)
     private val pendingWirePackets = ConcurrentHashMap<String, NexaWirePacket>()
 
     init {
@@ -211,6 +221,12 @@ class ChatRepositoryImpl(
             }
 
             val conversationId = deriveConversationId(myNxId, recipientNxId)
+
+            // Blocking Enforcement: Drop outgoing messages if recipient is blocked by user
+            if (contactDao?.isUserBlocked(recipientNxId) == true) {
+                Log.w(TAG, "Cannot send message: recipient $recipientNxId is blocked by user")
+                return@withContext Result.failure(IllegalStateException("You blocked this contact. Unblock to send messages."))
+            }
 
             // 1. Ensure conversation exists in local vault
             createOrGetConversation(recipientNxId)
@@ -368,15 +384,16 @@ class ChatRepositoryImpl(
                     isDispatched = webSocketManager.sendPacket(wirePacket)
                     if (isDispatched) {
                         pendingWirePackets.remove(packetId)
-                        messageDao.updateMessageStatus(packetId, MessageStatus.SENT.name)
-                        Log.d(TAG, "Message $packetId dispatched via WebSocket with Double Ratchet E2EE")
+                        // Local-first Outbox Pattern: Message stays in PENDING state until server
+                        // returns ACK_SERVER_RECEIVED. Never prematurely mark SENT on write.
+                        Log.d(TAG, "Message $packetId enqueued in WebSocket outbox with Double Ratchet E2EE (awaiting ACK_SERVER_RECEIVED)")
                     }
                 }
             }
 
             Result.success(
                 messageEntity.toDomain().copy(
-                    status = if (isDispatched) MessageStatus.SENT else MessageStatus.PENDING
+                    status = MessageStatus.PENDING
                 )
             )
         } catch (e: Exception) {
@@ -386,6 +403,10 @@ class ChatRepositoryImpl(
     }
 
     override suspend fun handleIncomingDataSmsPacket(packet: NexaWirePacket) = withContext(Dispatchers.IO) {
+        if (contactDao?.isUserBlocked(packet.senderNxId) == true) {
+            Log.d(TAG, "SMS Policy: Dropping incoming SMS packet ${packet.packetId}: sender ${packet.senderNxId} is blocked")
+            return@withContext
+        }
         val ingest = universalTransportIngest
         if (ingest != null) {
             ingest.ingestWirePacket(packet, TransportMedium.CELLULAR_DATA_SMS)
@@ -479,13 +500,31 @@ class ChatRepositoryImpl(
                 if (decryptedBytes != null && !isMuted) {
                     val contact = contactDao?.getContact(senderNxId)
                     val resolvedName = contact?.effectiveDisplayName ?: existingChat?.participantName ?: senderNxId
-                    notificationDispatcher?.postDirectMessageNotification(
-                        conversationId = conversationId,
-                        senderNxId = senderNxId,
-                        senderDisplayName = resolvedName,
-                        decryptedText = parsedMessage.plainText,
-                        messageId = packet.packetId
-                    )
+                    val isGroup = existingChat?.chatType == "GROUP" ||
+                        conversationId.contains("group", ignoreCase = true) ||
+                        senderNxId.contains("GROUP", ignoreCase = true)
+
+                    if (isGroup) {
+                        val groupTitle = existingChat?.title?.ifBlank { null } ?: existingChat?.participantName ?: "Group Chat"
+                        val myProfile = userDao.getLocalProfile()
+                        notificationDispatcher?.postGroupMessageNotification(
+                            groupId = conversationId,
+                            groupName = groupTitle,
+                            senderName = resolvedName,
+                            decryptedText = parsedMessage.plainText,
+                            messageId = packet.packetId,
+                            myNxId = myProfile?.nxId,
+                            myDisplayName = myProfile?.fullName
+                        )
+                    } else {
+                        notificationDispatcher?.postDirectMessageNotification(
+                            conversationId = conversationId,
+                            senderNxId = senderNxId,
+                            senderDisplayName = resolvedName,
+                            decryptedText = parsedMessage.plainText,
+                            messageId = packet.packetId
+                        )
+                    }
                 }
 
                 Log.d(TAG, "Incoming Data SMS from $senderNxId stored in local vault (status=$messageStatus)")
@@ -499,6 +538,7 @@ class ChatRepositoryImpl(
 
     override suspend fun markConversationRead(conversationId: String): Unit = withContext(Dispatchers.IO) {
         val myNxId = getMyNxId()
+        val unreadPacketIds = messageDao.getUnreadIncomingPacketIds(conversationId)
         chatDao.resetUnreadCount(conversationId)
         messageDao.markMessagesAsRead(conversationId)
 
@@ -508,11 +548,14 @@ class ChatRepositoryImpl(
             return@withContext
         }
 
-        // Dispatch read ACK to participant
+        // Dispatch read ACK to participant for each unread message
         val chat = chatDao.getChatById(conversationId)
         if (chat != null) {
-            val latest = messageDao.getLatestMessage(conversationId)
-            if (latest != null && !latest.isOutgoing) {
+            val targets = if (unreadPacketIds.isNotEmpty()) unreadPacketIds else {
+                val latest = messageDao.getLatestMessage(conversationId)
+                if (latest != null && !latest.isOutgoing) listOf(latest.packetId) else emptyList()
+            }
+            for (pid in targets) {
                 val readAck = NexaWirePacket(
                     packetId = UUID.randomUUID().toString(),
                     type = PacketType.PACKET_ACK,
@@ -520,7 +563,7 @@ class ChatRepositoryImpl(
                     recipientNxId = chat.participantNxId,
                     timestamp = System.currentTimeMillis(),
                     ack = DeliveryAckPayload(
-                        originalPacketId = latest.packetId,
+                        originalPacketId = pid,
                         status = AckStatus.ACK_DEVICE_READ
                     )
                 )
@@ -593,6 +636,15 @@ class ChatRepositoryImpl(
             val myNxId = secureStorage.getActiveNxId() ?: return
             val deviceId = secureStorage.getDeviceId()
             webSocketManager.connect(myNxId, deviceId)
+
+            val showOnline = chatPrivacyPrefs?.showOnlineStatus ?: true
+            val presenceMode = chatPrivacyPrefs?.onlinePresenceMode ?: OnlinePrivacyMode.EVERYONE
+            val initialStatus = if (showOnline && presenceMode != OnlinePrivacyMode.NOBODY) {
+                PresenceStatus.PRESENCE_ONLINE
+            } else {
+                PresenceStatus.PRESENCE_HIDDEN
+            }
+            sendPresenceStatus(initialStatus)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start connection", e)
         }
@@ -607,10 +659,41 @@ class ChatRepositoryImpl(
     }
 
     override fun sendTypingIndicator(recipientNxId: String, conversationId: String, isTyping: Boolean) {
+        if (contactDao?.isUserBlockedSync(recipientNxId) == true) {
+            return
+        }
+        if (chatPrivacyPrefs?.typingIndicatorMode == TypingPrivacyMode.NOBODY) {
+            Log.d(TAG, "Typing indicator suppressed by user privacy gatekeeper (Zero Server Knowledge)")
+            return
+        }
         webSocketManager.sendTyping(recipientNxId, conversationId, isTyping)
     }
 
     override fun getTypingEvents(): Flow<Pair<String, Boolean>> = _typingFlow.asSharedFlow()
+
+    override fun getPresenceEvents(): Flow<Pair<String, Boolean>> = _presenceFlow.asSharedFlow()
+
+    override fun sendPresenceStatus(status: com.nexa.app.core.proto.PresenceStatus) {
+        val effectiveStatus = if (chatPrivacyPrefs?.showOnlineStatus == false ||
+            chatPrivacyPrefs?.onlinePresenceMode == OnlinePrivacyMode.NOBODY) {
+            PresenceStatus.PRESENCE_HIDDEN
+        } else {
+            status
+        }
+        val myNxId = getMyNxId()
+        val packet = NexaWirePacket(
+            packetId = UUID.randomUUID().toString(),
+            type = PacketType.PACKET_PRESENCE,
+            senderNxId = myNxId,
+            timestamp = System.currentTimeMillis(),
+            presence = PresencePayload(
+                nxId = myNxId,
+                status = effectiveStatus,
+                timestamp = System.currentTimeMillis()
+            )
+        )
+        webSocketManager.sendPacket(packet)
+    }
 
     override fun getPinnedMessages(conversationId: String): Flow<List<Message>> {
         val now = System.currentTimeMillis()
@@ -673,6 +756,28 @@ class ChatRepositoryImpl(
         val now = System.currentTimeMillis()
         messageDao.clearExpiredPins(conversationId, now)
         Unit
+    }
+
+    override suspend fun sendSmsKeyProvisioning(recipientNxId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val publicKeyHex = smsProvisioningPublicKeyProvider?.invoke()
+                ?: return@withContext Result.failure(IllegalStateException("SMS provisioning key unavailable"))
+            val myNxId = getMyNxId()
+            val payload = org.json.JSONObject().apply {
+                put("type", com.nexa.app.core.sms.SmsProvisioningProtocol.CONTROL_TYPE)
+                put("v", com.nexa.app.core.sms.SmsProvisioningProtocol.VERSION)
+                put("pub", publicKeyHex)
+                put("peer", recipientNxId)
+                put("issuedAt", System.currentTimeMillis())
+                put("from", myNxId)
+            }.toString()
+            sendControlPacket(recipientNxId, payload)
+            Log.d(TAG, "Dispatched SMS provisioning control packet to $recipientNxId (public key only)")
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to dispatch SMS provisioning packet: ${e.javaClass.simpleName}")
+            Result.failure(e)
+        }
     }
 
     private suspend fun sendControlPacket(recipientNxId: String, payloadJson: String) {
@@ -747,6 +852,10 @@ class ChatRepositoryImpl(
         scope.launch {
             webSocketManager.incomingPackets.collect { packet ->
                 try {
+                    if (contactDao?.isUserBlocked(packet.senderNxId) == true) {
+                        Log.d(TAG, "Wire Policy: Dropping incoming packet ${packet.packetId}: sender ${packet.senderNxId} is blocked by user")
+                        return@collect
+                    }
                     val ingest = universalTransportIngest
                     if (ingest != null) {
                         ingest.ingestWirePacket(packet, TransportMedium.INTERNET_WS)
@@ -754,9 +863,17 @@ class ChatRepositoryImpl(
                         when (packet.type) {
                             PacketType.PACKET_MESSAGE -> handleIncomingMessage(packet)
                             PacketType.PACKET_ACK -> handleIncomingAck(packet)
+                            PacketType.PACKET_MESSAGE_EDIT -> handleIncomingMessageEdit(packet)
+                            PacketType.PACKET_MESSAGE_DELETE -> handleIncomingMessageDelete(packet)
                             PacketType.PACKET_TYPING -> {
                                 packet.typing?.let { t ->
                                     _typingFlow.tryEmit(Pair(t.conversationId, t.isTyping))
+                                }
+                            }
+                            PacketType.PACKET_PRESENCE -> {
+                                packet.presence?.let { pr ->
+                                    val isOnline = pr.status == PresenceStatus.PRESENCE_ONLINE
+                                    _presenceFlow.tryEmit(Pair(packet.senderNxId, isOnline))
                                 }
                             }
                             PacketType.PACKET_PING -> { /* Heartbeat handled at network level */ }
@@ -857,13 +974,31 @@ class ChatRepositoryImpl(
         if (decryptedBytes != null && !isMuted) {
             val contact = contactDao?.getContact(senderNxId)
             val resolvedName = contact?.effectiveDisplayName ?: existingChat?.participantName ?: senderNxId
-            notificationDispatcher?.postDirectMessageNotification(
-                conversationId = conversationId,
-                senderNxId = senderNxId,
-                senderDisplayName = resolvedName,
-                decryptedText = parsedMessage.plainText,
-                messageId = packet.packetId
-            )
+            val isGroup = existingChat?.chatType == "GROUP" ||
+                conversationId.contains("group", ignoreCase = true) ||
+                senderNxId.contains("GROUP", ignoreCase = true)
+
+            if (isGroup) {
+                val groupTitle = existingChat?.title?.ifBlank { null } ?: existingChat?.participantName ?: "Group Chat"
+                val myProfile = userDao.getLocalProfile()
+                notificationDispatcher?.postGroupMessageNotification(
+                    groupId = conversationId,
+                    groupName = groupTitle,
+                    senderName = resolvedName,
+                    decryptedText = parsedMessage.plainText,
+                    messageId = packet.packetId,
+                    myNxId = myProfile?.nxId,
+                    myDisplayName = myProfile?.fullName
+                )
+            } else {
+                notificationDispatcher?.postDirectMessageNotification(
+                    conversationId = conversationId,
+                    senderNxId = senderNxId,
+                    senderDisplayName = resolvedName,
+                    decryptedText = parsedMessage.plainText,
+                    messageId = packet.packetId
+                )
+            }
         }
 
         // 5. Send ACK_DEVICE_DELIVERED back to sender (zero-disk relay) if decryption succeeded
@@ -898,6 +1033,120 @@ class ChatRepositoryImpl(
         // Update local status machine (SENT -> DELIVERED -> READ)
         messageDao.updateMessageStatus(targetPacketId, newStatus.name)
         Log.d(TAG, "Updated message $targetPacketId status to $newStatus via incoming ACK")
+    }
+
+    private suspend fun handleIncomingMessageEdit(packet: NexaWirePacket) = withContext(Dispatchers.IO) {
+        val editPayload = packet.messageEdit ?: return@withContext
+        val targetPacketId = editPayload.targetPacketId
+        if (targetPacketId.isBlank()) return@withContext
+
+        val existing = messageDao.getMessageByPacketId(targetPacketId) ?: return@withContext
+        val senderNxId = packet.senderNxId
+
+        val envelope = parseEnvelopeFromPayload(
+            EncryptedMessagePayload(
+                ciphertext = editPayload.newCiphertext,
+                nonce = editPayload.nonce,
+                authTag = editPayload.authTag,
+                aeadNonce = editPayload.aeadNonce,
+                header = editPayload.header
+            )
+        )
+        val decryptedBytes = doubleRatchetEngine.ratchetDecrypt(senderNxId, envelope)
+        val newText = if (decryptedBytes != null) {
+            String(decryptedBytes, StandardCharsets.UTF_8)
+        } else {
+            "[Edited message - Decryption failed]"
+        }
+        val editedAt = if (editPayload.editedAt != 0L) editPayload.editedAt else System.currentTimeMillis()
+        messageDao.updateMessageContent(targetPacketId, newText, editedAt)
+        chatDao.updateLastMessage(existing.conversationId, newText, existing.timestamp, existing.packetId, existing.senderNxId)
+        Log.d(TAG, "Processed incoming edit for packet $targetPacketId from $senderNxId")
+    }
+
+    private suspend fun handleIncomingMessageDelete(packet: NexaWirePacket) = withContext(Dispatchers.IO) {
+        val deletePayload = packet.messageDelete ?: return@withContext
+        val targetPacketId = deletePayload.targetPacketId
+        if (targetPacketId.isBlank()) return@withContext
+
+        val existing = messageDao.getMessageByPacketId(targetPacketId) ?: return@withContext
+        messageDao.tombstoneMessage(targetPacketId, "This message was deleted")
+        chatDao.updateLastMessage(existing.conversationId, "This message was deleted", existing.timestamp, existing.packetId, existing.senderNxId)
+        Log.d(TAG, "Processed incoming delete-for-everyone for packet $targetPacketId from ${packet.senderNxId}")
+    }
+
+    override suspend fun editMessage(packetId: String, newContent: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val existing = messageDao.getMessageByPacketId(packetId)
+                ?: return@withContext Result.failure(IllegalArgumentException("Message $packetId not found"))
+
+            if (!existing.isOutgoing) {
+                return@withContext Result.failure(IllegalStateException("Cannot edit incoming message from peer"))
+            }
+
+            val now = System.currentTimeMillis()
+            messageDao.updateMessageContent(packetId, newContent, now)
+            chatDao.updateLastMessage(existing.conversationId, newContent, existing.timestamp, packetId, existing.senderNxId)
+
+            val rawPlainBytes = newContent.toByteArray(StandardCharsets.UTF_8)
+            val recipientContact = contactDao?.getContact(existing.recipientNxId)
+            val recipientPubKey = recipientContact?.publicKeyHex?.let { fromHexOrNull(it) }
+
+            val envelope = doubleRatchetEngine.ratchetEncrypt(existing.recipientNxId, rawPlainBytes, recipientPubKey)
+            val editPacket = NexaWirePacket(
+                packetId = UUID.randomUUID().toString(),
+                type = PacketType.PACKET_MESSAGE_EDIT,
+                senderNxId = getMyNxId(),
+                recipientNxId = existing.recipientNxId,
+                timestamp = now,
+                messageEdit = MessageEditPayload(
+                    targetPacketId = packetId,
+                    newCiphertext = envelope.ciphertext,
+                    authTag = envelope.authTag,
+                    nonce = envelope.ephemeralPublicKey,
+                    aeadNonce = envelope.aeadNonce,
+                    editedAt = now
+                )
+            )
+            webSocketManager.sendPacket(editPacket)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to edit message $packetId", e)
+            Result.failure(e)
+        }
+    }
+
+    override suspend fun deleteMessageForEveryone(packetId: String): Result<Unit> = withContext(Dispatchers.IO) {
+        try {
+            val existing = messageDao.getMessageByPacketId(packetId)
+                ?: return@withContext Result.failure(IllegalArgumentException("Message $packetId not found"))
+
+            if (!existing.isOutgoing) {
+                return@withContext Result.failure(IllegalStateException("Cannot delete incoming message for everyone"))
+            }
+
+            val now = System.currentTimeMillis()
+            messageDao.tombstoneMessage(packetId, "This message was deleted")
+            chatDao.updateLastMessage(existing.conversationId, "This message was deleted", existing.timestamp, packetId, existing.senderNxId)
+
+            val deletePacket = NexaWirePacket(
+                packetId = UUID.randomUUID().toString(),
+                type = PacketType.PACKET_MESSAGE_DELETE,
+                senderNxId = getMyNxId(),
+                recipientNxId = existing.recipientNxId,
+                timestamp = now,
+                messageDelete = MessageDeletePayload(
+                    targetPacketId = packetId,
+                    deleteType = "FOR_EVERYONE",
+                    deletedAt = now
+                )
+            )
+            webSocketManager.sendPacket(deletePacket)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to delete message for everyone $packetId", e)
+            Result.failure(e)
+        }
     }
 
     private fun observeConnectionState() {
@@ -1063,6 +1312,21 @@ class ChatRepositoryImpl(
             .map { list -> list.map { it.toDomain() } }
             .catch { e ->
                 Log.e(TAG, "Error collecting archived conversations", e)
+                emit(emptyList())
+            }
+            .flowOn(Dispatchers.IO)
+    }
+
+    override suspend fun setConversationPriorityBackup(conversationId: String, isPriority: Boolean): Unit = withContext(Dispatchers.IO) {
+        chatDao.setPriorityBackup(conversationId, isPriority)
+        Unit
+    }
+
+    override fun getPriorityConversations(): Flow<List<ChatConversation>> {
+        return chatDao.getPriorityChatsFlow()
+            .map { list -> list.map { it.toDomain() } }
+            .catch { e ->
+                Log.e(TAG, "Error collecting priority conversations", e)
                 emit(emptyList())
             }
             .flowOn(Dispatchers.IO)
@@ -1252,6 +1516,10 @@ class ChatRepositoryImpl(
             Log.e(TAG, "Failed to send media message", e)
             Result.failure(e)
         }
+    }
+
+    override suspend fun isUserBlocked(targetNxId: String): Boolean = withContext(Dispatchers.IO) {
+        contactDao?.isUserBlocked(targetNxId) ?: false
     }
 
     private fun getMyNxId(): String {

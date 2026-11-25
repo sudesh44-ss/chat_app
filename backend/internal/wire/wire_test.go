@@ -327,3 +327,157 @@ func TestNexaWirePacket_CustodyAck_EncodeDecode(t *testing.T) {
 		t.Errorf("Signature mismatch")
 	}
 }
+
+func TestNexaWirePacket_Presence_EncodeDecode(t *testing.T) {
+	orig := &NexaWirePacket{
+		PacketId:      "pres_001",
+		Type:          PacketType_PACKET_PRESENCE,
+		SenderNxId:    "NX-ALICE",
+		RecipientNxId: "SERVER",
+		Timestamp:     1729484000000,
+		Presence: &PresencePayload{
+			NxId:      "NX-ALICE",
+			Status:    PresenceStatus_PRESENCE_ONLINE,
+			Timestamp: 1729484000000,
+		},
+	}
+
+	encoded, err := orig.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Type != PacketType_PACKET_PRESENCE {
+		t.Errorf("Type mismatch: got %v, want %v", decoded.Type, PacketType_PACKET_PRESENCE)
+	}
+	if decoded.Presence == nil {
+		t.Fatal("Presence payload is nil")
+	}
+	if decoded.Presence.NxId != "NX-ALICE" {
+		t.Errorf("NxId mismatch: got %s", decoded.Presence.NxId)
+	}
+	if decoded.Presence.Status != PresenceStatus_PRESENCE_ONLINE {
+		t.Errorf("Status mismatch: got %v", decoded.Presence.Status)
+	}
+}
+
+func TestNexaWirePacket_MessageEdit_EncodeDecode(t *testing.T) {
+	orig := &NexaWirePacket{
+		PacketId:      "edit_001",
+		Type:          PacketType_PACKET_MESSAGE_EDIT,
+		SenderNxId:    "NX-ALICE",
+		RecipientNxId: "NX-BOB",
+		Timestamp:     1729484100000,
+		MessageEdit: &MessageEditPayload{
+			TargetPacketId: "msg_original_123",
+			NewCiphertext:  []byte("UpdatedEncryptedCiphertext"),
+			AuthTag:        bytes.Repeat([]byte{0xBB}, 16),
+			Nonce:          bytes.Repeat([]byte{0x02}, 32),
+			AeadNonce:      bytes.Repeat([]byte{0x03}, 12),
+			EditedAt:       1729484100000,
+		},
+	}
+
+	encoded, err := orig.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Type != PacketType_PACKET_MESSAGE_EDIT {
+		t.Errorf("Type mismatch: got %v", decoded.Type)
+	}
+	if decoded.MessageEdit == nil {
+		t.Fatal("MessageEdit payload is nil")
+	}
+	if decoded.MessageEdit.TargetPacketId != "msg_original_123" {
+		t.Errorf("TargetPacketId mismatch: got %s", decoded.MessageEdit.TargetPacketId)
+	}
+	if !bytes.Equal(decoded.MessageEdit.NewCiphertext, orig.MessageEdit.NewCiphertext) {
+		t.Errorf("NewCiphertext mismatch")
+	}
+	if decoded.MessageEdit.EditedAt != 1729484100000 {
+		t.Errorf("EditedAt mismatch: got %d", decoded.MessageEdit.EditedAt)
+	}
+}
+
+func TestNexaWirePacket_MessageDelete_EncodeDecode(t *testing.T) {
+	orig := &NexaWirePacket{
+		PacketId:      "del_001",
+		Type:          PacketType_PACKET_MESSAGE_DELETE,
+		SenderNxId:    "NX-ALICE",
+		RecipientNxId: "NX-BOB",
+		Timestamp:     1729484200000,
+		MessageDelete: &MessageDeletePayload{
+			TargetPacketId: "msg_target_to_delete",
+			DeleteType:     "FOR_EVERYONE",
+			DeletedAt:      1729484200000,
+		},
+	}
+
+	encoded, err := orig.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.Type != PacketType_PACKET_MESSAGE_DELETE {
+		t.Errorf("Type mismatch: got %v", decoded.Type)
+	}
+	if decoded.MessageDelete == nil {
+		t.Fatal("MessageDelete payload is nil")
+	}
+	if decoded.MessageDelete.TargetPacketId != "msg_target_to_delete" {
+		t.Errorf("TargetPacketId mismatch: got %s", decoded.MessageDelete.TargetPacketId)
+	}
+	if decoded.MessageDelete.DeleteType != "FOR_EVERYONE" {
+		t.Errorf("DeleteType mismatch: got %s", decoded.MessageDelete.DeleteType)
+	}
+}
+
+func TestNexaWirePacket_GroupMessage_EncodeDecode(t *testing.T) {
+	orig := &NexaWirePacket{
+		PacketId:      "grp_msg_001",
+		Type:          PacketType_PACKET_MESSAGE,
+		SenderNxId:    "NX-ALICE",
+		RecipientNxId: "GRP-TEST-9921",
+		GroupId:       "GRP-TEST-9921",
+		Timestamp:     1729484300000,
+		Message: &EncryptedMessagePayload{
+			ConversationSeq: 1,
+			Ciphertext:      []byte("GroupSenderKeyCiphertext"),
+			AuthTag:         bytes.Repeat([]byte{0xCC}, 16),
+			AeadNonce:       bytes.Repeat([]byte{0x04}, 12),
+		},
+	}
+
+	encoded, err := orig.Encode()
+	if err != nil {
+		t.Fatalf("Encode failed: %v", err)
+	}
+
+	decoded, err := Decode(encoded)
+	if err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if decoded.GroupId != "GRP-TEST-9921" {
+		t.Errorf("GroupId mismatch: got %s, want GRP-TEST-9921", decoded.GroupId)
+	}
+	if decoded.RecipientNxId != "GRP-TEST-9921" {
+		t.Errorf("RecipientNxId mismatch: got %s", decoded.RecipientNxId)
+	}
+}

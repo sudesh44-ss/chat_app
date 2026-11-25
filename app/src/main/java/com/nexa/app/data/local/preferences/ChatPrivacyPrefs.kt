@@ -3,15 +3,15 @@ package com.nexa.app.data.local.preferences
 import android.content.Context
 import android.content.SharedPreferences
 
-enum class TypingPrivacyMode {
-    EVERYONE,
-    NOBODY
+enum class TypingPrivacyMode(val label: String) {
+    EVERYONE("Everyone"),
+    NOBODY("Nobody")
 }
 
-enum class OnlinePrivacyMode {
-    EVERYONE,
-    MY_CONTACTS,
-    NOBODY
+enum class OnlinePrivacyMode(val label: String) {
+    EVERYONE("Everyone"),
+    MY_CONTACTS("My Contacts"),
+    NOBODY("Nobody")
 }
 
 enum class OfflinePresenceMode(val label: String) {

@@ -5,6 +5,8 @@ import com.nexa.app.data.local.entity.TransferEntity
 import com.nexa.app.data.local.preferences.OfflinePresenceMode
 import com.nexa.app.data.local.preferences.OnlinePrivacyMode
 import com.nexa.app.data.local.preferences.TypingPrivacyMode
+import com.nexa.app.domain.model.ConversationBackupPolicy
+import com.nexa.app.domain.model.ConversationCustomCategories
 import com.nexa.app.domain.model.StatusItem
 
 data class ContactProfileUiState(
@@ -42,7 +44,11 @@ data class ContactProfileUiState(
     val showCustomNotificationsDialog: Boolean = false,
     val showClearChatDialog: Boolean = false,
     val showBlockDialog: Boolean = false,
+    val showUnblockDialog: Boolean = false,
     val showPhotoViewer: Boolean = false,
+    val backupPolicy: ConversationBackupPolicy = ConversationBackupPolicy.DEFAULT,
+    val customBackupCategories: ConversationCustomCategories? = null,
+    val showBackupPolicyDialog: Boolean = false,
     val isLoading: Boolean = false,
     val snackbarMessage: String? = null
 )

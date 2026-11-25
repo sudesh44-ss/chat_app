@@ -80,6 +80,9 @@ class NexaUniversalTransportIngest(
 
     var peerSyncHandler: (suspend (NexaWirePacket, TransportMedium) -> Unit)? = null
 
+    /** Module 3: receives the peer's SMS provisioning public key (public value only). */
+    var smsProvisioningHandler: (suspend (peerNxId: String, peerProvisioningPublicKeyHex: String) -> Unit)? = null
+
     /**
      * Ingest a decoded NexaWirePacket from any transport medium.
      */
@@ -95,6 +98,12 @@ class NexaUniversalTransportIngest(
         val myNxId = getMyNxId()
         if (!validateRoutingContext(packet, myNxId)) {
             Log.w(TAG, "[$medium] Dropped packet ${packet.packetId}: route validation failed for local recipient $myNxId")
+            return@withContext false
+        }
+
+        // Blocking Enforcement: Drop incoming packet if sender is blocked by user
+        if (contactDao?.isUserBlocked(packet.senderNxId) == true) {
+            Log.d(TAG, "[$medium] Ingestion dropped packet ${packet.packetId}: sender ${packet.senderNxId} is blocked by user")
             return@withContext false
         }
 
@@ -405,6 +414,13 @@ class NexaUniversalTransportIngest(
                 messageDedupDao?.updateStatus(packet.packetId, MessageDedupEntity.STATUS_PROCESSED)
                 return true
             }
+            if (decryptedText.startsWith("{") &&
+                decryptedText.contains("\"type\":\"${com.nexa.app.core.sms.SmsProvisioningProtocol.CONTROL_TYPE}\"")
+            ) {
+                handleSmsProvisioningPacket(senderNxId, decryptedText)
+                messageDedupDao?.updateStatus(packet.packetId, MessageDedupEntity.STATUS_PROCESSED)
+                return true
+            }
         }
 
         val messageStatus = if (decryptedBytes != null) MessageStatus.DELIVERED else MessageStatus.FAILED
@@ -469,13 +485,31 @@ class NexaUniversalTransportIngest(
         if (decryptedBytes != null && !isMuted) {
             val contact = contactDao?.getContact(senderNxId)
             val resolvedName = contact?.effectiveDisplayName ?: existingChat?.participantName ?: senderNxId
-            notificationDispatcher?.postDirectMessageNotification(
-                conversationId = conversationId,
-                senderNxId = senderNxId,
-                senderDisplayName = resolvedName,
-                decryptedText = parsedMessage.plainText,
-                messageId = packet.packetId
-            )
+            val isGroup = existingChat?.chatType == "GROUP" ||
+                conversationId.contains("group", ignoreCase = true) ||
+                senderNxId.contains("GROUP", ignoreCase = true)
+
+            if (isGroup) {
+                val groupTitle = existingChat?.title?.ifBlank { null } ?: existingChat?.participantName ?: "Group Chat"
+                val myProfile = userDao.getLocalProfile()
+                notificationDispatcher?.postGroupMessageNotification(
+                    groupId = conversationId,
+                    groupName = groupTitle,
+                    senderName = resolvedName,
+                    decryptedText = parsedMessage.plainText,
+                    messageId = packet.packetId,
+                    myNxId = myProfile?.nxId,
+                    myDisplayName = myProfile?.fullName
+                )
+            } else {
+                notificationDispatcher?.postDirectMessageNotification(
+                    conversationId = conversationId,
+                    senderNxId = senderNxId,
+                    senderDisplayName = resolvedName,
+                    decryptedText = parsedMessage.plainText,
+                    messageId = packet.packetId
+                )
+            }
 
             // --- 8. Dispatch Authenticated Delivery ACK (ACK_DEVICE_DELIVERED) ---
             val deliveryAck = createSignedDeliveryAck(packet.packetId, senderNxId)
@@ -742,6 +776,34 @@ class NexaUniversalTransportIngest(
             }
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse PIN control packet: ${e.message}")
+        }
+    }
+
+    /**
+     * Independent SMS session provisioning: stores only the peer's public provisioning key.
+     * The sender is the authenticated E2EE peer, never a client-supplied identifier.
+     */
+    private suspend fun handleSmsProvisioningPacket(senderNxId: String, jsonString: String) {
+        try {
+            val json = JSONObject(jsonString)
+            if (json.optInt("v", 0) != com.nexa.app.core.sms.SmsProvisioningProtocol.VERSION) {
+                Log.w(TAG, "Ignored unsupported SMS provisioning version")
+                return
+            }
+            val addressedTo = json.optString("peer")
+            if (addressedTo.isNotBlank() && addressedTo != getMyNxId()) {
+                Log.w(TAG, "Ignored SMS provisioning packet addressed to another account")
+                return
+            }
+            val publicKeyHex = json.optString("pub")
+            if (publicKeyHex.length != 64) {
+                Log.w(TAG, "Ignored malformed SMS provisioning public key")
+                return
+            }
+            smsProvisioningHandler?.invoke(senderNxId, publicKeyHex)
+            Log.d(TAG, "Stored SMS provisioning key for authenticated peer $senderNxId")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to parse SMS provisioning packet: ${e.javaClass.simpleName}")
         }
     }
 

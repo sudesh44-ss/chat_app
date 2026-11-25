@@ -34,6 +34,10 @@ import androidx.compose.ui.unit.sp
 import com.nexa.app.R
 import com.nexa.app.presentation.common.glass.NexaGlassSurface
 
+import com.nexa.app.core.theme.NexaDarkCharcoalBackground
+import com.nexa.app.core.theme.NexaDarkCharcoalSurface
+import com.nexa.app.core.theme.isNexaAmoled
+
 /**
  * Shared detail-page scaffolding for every Settings sub-screen. Reuses [SettingsHeader]
  * and [NexaGlassSurface] so new sections match the existing Settings visual language.
@@ -46,7 +50,12 @@ fun SettingsDetailPage(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
-    val backgroundColor = if (isDark) Color.Black else Color.White
+    val isAmoled = isNexaAmoled()
+    val backgroundColor = when {
+        !isDark -> Color.White
+        isAmoled -> Color.Black
+        else -> NexaDarkCharcoalBackground
+    }
 
     Scaffold(
         containerColor = backgroundColor,
@@ -84,10 +93,16 @@ fun SettingsCard(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val isDark = isSystemInDarkTheme()
+    val isAmoled = isNexaAmoled()
+    val surfaceColor = when {
+        !isDark -> Color(0xEEF8F9FA)
+        isAmoled -> Color(0xCC181818)
+        else -> NexaDarkCharcoalSurface
+    }
     NexaGlassSurface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(22.dp),
-        surfaceColor = if (isDark) Color(0xCC181818) else Color(0xEEF8F9FA),
+        surfaceColor = surfaceColor,
         elevation = 2.dp
     ) {
         Column(modifier = Modifier.fillMaxWidth(), content = content)

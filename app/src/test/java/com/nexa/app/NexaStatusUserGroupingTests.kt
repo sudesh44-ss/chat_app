@@ -474,12 +474,16 @@ class NexaStatusUserGroupingTests {
 
     class FakeUserDao(private val localUser: UserEntity?) : UserDao {
         override suspend fun saveUserProfile(user: UserEntity): Long = 1L
+        override fun getProfileByNxIdFlow(nxId: String): Flow<UserEntity?> = MutableStateFlow(if (localUser?.nxId == nxId) localUser else null)
+        override suspend fun getProfileByNxId(nxId: String): UserEntity? = if (localUser?.nxId == nxId) localUser else null
         override suspend fun getLocalProfile(): UserEntity? = localUser
         override fun getActiveUserFlow(): Flow<UserEntity?> = MutableStateFlow(localUser)
         override suspend fun getActiveNxId(): String? = localUser?.nxId
         override suspend fun countVerifiedUsers(): Int = if (localUser?.isVerified == true) 1 else 0
         override suspend fun updateFullName(nxId: String, fullName: String): Int = 1
         override suspend fun updatePhoneNumber(nxId: String, phoneNumber: String): Int = 1
+        override suspend fun deleteDemoProfile(): Int = 0
+        override suspend fun deleteProfileByNxId(nxId: String): Int = 0
         override suspend fun clearProfile(): Int = 1
     }
 
@@ -509,5 +513,8 @@ class NexaStatusUserGroupingTests {
         override suspend fun updatePeerPhoneSharing(nxId: String, isShared: Boolean, phone: String?): Int = 1
         override suspend fun updateAvatarUrl(nxId: String, avatarUrl: String?): Int = 1
         override suspend fun updateDeviceContactPhotoUri(nxId: String, photoUri: String?): Int = 1
+        override suspend fun isUserBlocked(nxId: String): Boolean = false
+        override fun isUserBlockedSync(nxId: String): Boolean = false
+        override suspend fun getBlockedContactsList(): List<ContactEntity> = emptyList()
     }
 }

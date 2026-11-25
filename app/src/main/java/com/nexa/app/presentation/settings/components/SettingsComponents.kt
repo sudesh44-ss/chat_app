@@ -100,10 +100,15 @@ fun NexaSettingsItem(
     modifier: Modifier = Modifier
 ) {
     val isDark = isSystemInDarkTheme()
+    val isAmoled = com.nexa.app.core.theme.isNexaAmoled()
     val primaryText = if (isDark) Color.White else Color(0xFF111111)
     val secondaryText = if (isDark) Color(0xFFA0A7B5) else Color(0xFF555B66)
     val defaultIconTint = iconTint ?: (if (isDark) Color.White else Color(0xFF222222))
-    val surfaceColor = if (isDark) Color(0xCC181818) else Color(0xEEF8F9FA)
+    val surfaceColor = when {
+        !isDark -> Color(0xEEF8F9FA)
+        isAmoled -> Color(0xCC181818)
+        else -> com.nexa.app.core.theme.NexaDarkCharcoalSurface
+    }
 
     NexaGlassSurface(
         modifier = modifier

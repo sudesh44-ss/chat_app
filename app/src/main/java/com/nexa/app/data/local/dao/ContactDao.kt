@@ -60,6 +60,15 @@ interface ContactDao {
 
     @Query("UPDATE contacts SET deviceContactPhotoUri = :photoUri WHERE nxId = :nxId")
     suspend fun updateDeviceContactPhotoUri(nxId: String, photoUri: String?): Int
+
+    @Query("SELECT COUNT(*) > 0 FROM contacts WHERE nxId = :nxId AND status = 'BLOCKED'")
+    suspend fun isUserBlocked(nxId: String): Boolean
+
+    @Query("SELECT COUNT(*) > 0 FROM contacts WHERE nxId = :nxId AND status = 'BLOCKED'")
+    fun isUserBlockedSync(nxId: String): Boolean
+
+    @Query("SELECT * FROM contacts WHERE status = 'BLOCKED' ORDER BY createdAtTimestamp DESC")
+    suspend fun getBlockedContactsList(): List<ContactEntity>
 }
 
 suspend fun ContactDao.getAllContactsList(): List<ContactEntity> {

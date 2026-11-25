@@ -13,6 +13,8 @@ import com.nexa.app.data.local.preferences.ConversationPreferences
 import com.nexa.app.data.local.preferences.OfflinePresenceMode
 import com.nexa.app.data.local.preferences.OnlinePrivacyMode
 import com.nexa.app.data.local.preferences.TypingPrivacyMode
+import com.nexa.app.domain.model.ConversationBackupPolicy
+import com.nexa.app.domain.model.ConversationCustomCategories
 import com.nexa.app.domain.repository.ChatRepository
 import com.nexa.app.domain.repository.ContactRepository
 import com.nexa.app.domain.repository.StatusRepository
@@ -94,6 +96,11 @@ class ContactProfileViewModel(
                 val isVibration = conversationPreferences.isVibrationEnabled(initialConversationId)
                 val isBlocked = contact?.status == ContactStatus.BLOCKED
 
+                val parsedPolicy = chat?.backupPolicy?.let { raw ->
+                    runCatching { ConversationBackupPolicy.valueOf(raw.trim().uppercase()) }.getOrNull()
+                } ?: (if (chat?.isPriorityBackup == true) ConversationBackupPolicy.PRIORITY else ConversationBackupPolicy.DEFAULT)
+                val parsedCategories = chat?.customBackupCategories?.let { ConversationCustomCategories.fromJson(it) }
+
                 _uiState.update { current ->
                     current.copy(
                         displayName = effectiveName,
@@ -115,6 +122,8 @@ class ContactProfileViewModel(
                         customTone = customTone,
                         isVibrationEnabled = isVibration,
                         isBlocked = isBlocked,
+                        backupPolicy = parsedPolicy,
+                        customBackupCategories = parsedCategories,
                         showOnlineStatus = chatPrivacyPrefs.showOnlineStatus,
                         onlinePrivacyMode = chatPrivacyPrefs.onlinePresenceMode,
                         offlinePresenceMode = chatPrivacyPrefs.offlinePresenceMode,
@@ -248,25 +257,78 @@ class ContactProfileViewModel(
         }
     }
 
-    fun toggleBlockContact() {
+    fun blockContact(alsoReport: Boolean, deleteChat: Boolean) {
         viewModelScope.launch {
-            val currentlyBlocked = _uiState.value.isBlocked
-            val targetStatus = if (currentlyBlocked) ContactStatus.MUTUAL_FRIEND else ContactStatus.BLOCKED
+            val convId = _uiState.value.conversationId
             withContext(Dispatchers.IO) {
-                contactDao.updateStatus(participantNxId, targetStatus)
-                contactRepository.rejectOrBlockContact(participantNxId, block = !currentlyBlocked)
+                contactRepository.blockUser(participantNxId)
+                if (deleteChat && convId.isNotBlank()) {
+                    chatRepository.deleteChat(convId)
+                }
             }
             _uiState.update {
                 it.copy(
-                    isBlocked = !currentlyBlocked,
-                    snackbarMessage = if (!currentlyBlocked) "Contact blocked" else "Contact unblocked"
+                    isBlocked = true,
+                    showBlockDialog = false,
+                    snackbarMessage = if (alsoReport) {
+                        "Contact blocked. Report feature is not supported in this build."
+                    } else {
+                        "Contact blocked"
+                    }
                 )
             }
         }
     }
 
+    fun unblockContact() {
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                contactRepository.unblockUser(participantNxId)
+            }
+            _uiState.update {
+                it.copy(
+                    isBlocked = false,
+                    showUnblockDialog = false,
+                    snackbarMessage = "Contact unblocked"
+                )
+            }
+        }
+    }
+
+    fun toggleBlockContact() {
+        if (_uiState.value.isBlocked) {
+            setUnblockDialogVisible(true)
+        } else {
+            setBlockDialogVisible(true)
+        }
+    }
+
     fun setEditNicknameDialogVisible(visible: Boolean) {
         _uiState.update { it.copy(showEditNicknameDialog = visible) }
+    }
+
+    fun setBackupPolicyDialogVisible(visible: Boolean) {
+        _uiState.update { it.copy(showBackupPolicyDialog = visible) }
+    }
+
+    fun setBackupPolicy(policy: ConversationBackupPolicy, customCategories: ConversationCustomCategories?) {
+        val convId = _uiState.value.conversationId
+        if (convId.isBlank()) return
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) {
+                val json = customCategories?.toJson()
+                val isPriority = policy == ConversationBackupPolicy.PRIORITY
+                chatDao.setConversationBackupPolicy(convId, policy.name, json, isPriority)
+            }
+            _uiState.update {
+                it.copy(
+                    backupPolicy = policy,
+                    customBackupCategories = customCategories,
+                    showBackupPolicyDialog = false,
+                    snackbarMessage = "Backup policy updated"
+                )
+            }
+        }
     }
 
     fun setMuteDialogVisible(visible: Boolean) {
@@ -283,6 +345,10 @@ class ContactProfileViewModel(
 
     fun setBlockDialogVisible(visible: Boolean) {
         _uiState.update { it.copy(showBlockDialog = visible) }
+    }
+
+    fun setUnblockDialogVisible(visible: Boolean) {
+        _uiState.update { it.copy(showUnblockDialog = visible) }
     }
 
     fun setPhotoViewerVisible(visible: Boolean) {

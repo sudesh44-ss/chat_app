@@ -32,17 +32,18 @@ class StartupAndSplashStabilizationUnitTests {
     @Before
     fun setUp() {
         Dispatchers.setMain(testDispatcher)
-        AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN = true
+        AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN = false
     }
 
     @After
     fun tearDown() {
         Dispatchers.resetMain()
-        AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN = true
+        AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN = false
     }
 
     private fun createFakeAuthRepository(
         isLoggedInResult: Boolean = false,
+        validateSessionResult: Boolean = isLoggedInResult,
         shouldThrow: Boolean = false
     ): AuthRepository = object : AuthRepository {
         override suspend fun isLoggedIn(): Boolean {
@@ -50,6 +51,13 @@ class StartupAndSplashStabilizationUnitTests {
                 throw IllegalStateException("Simulated database/keystore failure during startup")
             }
             return isLoggedInResult
+        }
+
+        override suspend fun validateSession(): Boolean {
+            if (shouldThrow) {
+                throw IllegalStateException("Simulated session validation failure")
+            }
+            return validateSessionResult
         }
 
         override suspend fun getActiveNxId(): String? = "NX-TEST-NXID"
@@ -67,7 +75,8 @@ class StartupAndSplashStabilizationUnitTests {
             bio: String?,
             googleUid: String,
             googleAuthToken: String?,
-            isReverify: Boolean
+            isReverify: Boolean,
+            email: String?
         ): Result<com.nexa.app.data.remote.dto.InitiateReverseVerifyResponseDto> =
             Result.failure(NotImplementedError())
         override suspend fun pollVerificationStatus(nonce: String): Result<com.nexa.app.data.remote.dto.VerificationStatusDto> =
@@ -182,9 +191,40 @@ class StartupAndSplashStabilizationUnitTests {
     }
 
     @Test
+    fun splashViewModel_expiredOrRevokedSession_navigatesToWelcome() = runTest(testDispatcher) {
+        // When session token was expired or revoked on server, validateSession returns false
+        val repo = createFakeAuthRepository(isLoggedInResult = false, validateSessionResult = false)
+        val viewModel = SplashViewModel(repo)
+
+        advanceTimeBy(1300)
+        advanceUntilIdle()
+
+        assertEquals(
+            "Expired or revoked session must route to Welcome / Login screen",
+            SplashNavigationState.NavigateToWelcome,
+            viewModel.navigationState.value
+        )
+    }
+
+    @Test
+    fun splashViewModel_freshInstallation_navigatesToWelcome() = runTest(testDispatcher) {
+        // Fresh install: no credentials, no account
+        val repo = createFakeAuthRepository(isLoggedInResult = false, validateSessionResult = false)
+        val viewModel = SplashViewModel(repo)
+
+        advanceTimeBy(1300)
+        advanceUntilIdle()
+
+        assertEquals(
+            "Fresh installation must route from Splash to Welcome (Account Creation / Login)",
+            SplashNavigationState.NavigateToWelcome,
+            viewModel.navigationState.value
+        )
+    }
+
+    @Test
     fun appLaunchConfig_invariants() {
-        assertTrue("Bypass flag defaults to true for dev", AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN)
-        // In debug test environment, BuildConfig.DEBUG is true
-        assertEquals(BuildConfig.DEBUG, AppLaunchConfig.isBypassAuthToHomeScreenEnabled)
+        assertFalse("Bypass flag must default to false for authentic startup", AppLaunchConfig.DEV_BYPASS_AUTH_TO_HOME_SCREEN)
+        assertFalse("Bypass must be disabled by default", AppLaunchConfig.isBypassAuthToHomeScreenEnabled)
     }
 }

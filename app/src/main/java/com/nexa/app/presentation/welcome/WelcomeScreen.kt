@@ -55,6 +55,7 @@ fun WelcomeScreen(
     viewModel: WelcomeViewModel,
     onNavigateToDashboard: () -> Unit = {},
     onNavigateToProfileSetup: (googleToken: String?, googleUid: String?, prefillName: String?, prefillAvatar: String?, email: String?) -> Unit,
+    onNavigateToWelcomeBack: (response: com.nexa.app.data.remote.dto.GoogleAuthResponse, userEmail: String?) -> Unit = { _, _ -> },
     onNavigateToSimVerify: (phone: String, googleUid: String, inboundNumber: String?) -> Unit = { _, _, _ -> }
 ) {
     val uiState by viewModel.uiState.collectAsState()
@@ -67,8 +68,14 @@ fun WelcomeScreen(
         }
     }
 
+    LaunchedEffect(uiState.isExistingUser) {
+        if (uiState.isExistingUser && uiState.googleResponse != null) {
+            onNavigateToWelcomeBack(uiState.googleResponse!!, uiState.userEmail)
+        }
+    }
+
     LaunchedEffect(uiState.requireSimVerification) {
-        if (uiState.requireSimVerification) {
+        if (uiState.requireSimVerification && !uiState.isExistingUser) {
             val phone = uiState.googleResponse?.phoneNumber ?: uiState.googleResponse?.registeredPhoneMasked ?: ""
             val googleUid = uiState.googleResponse?.googleUid ?: ""
             val inbound = uiState.googleResponse?.inboundReceiverNumber

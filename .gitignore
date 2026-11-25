@@ -1,7 +1,7 @@
 # ==========================================
 # NEXA Project — Production .gitignore
 # ==========================================
-config/
+/config/
 # 1. Android & Gradle Build Artifacts
 .gradle/
 build/

@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Package Visibility Queries (Android 11+, API 30+) -->
+    <queries>
+        <package android:name="com.truecaller" />
+    </queries>
+
     <!-- Network -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -74,6 +79,11 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:theme="@style/Theme.Nexa_chat">
 
+        <!-- Truecaller 1-Tap SDK OAuth Client ID Binding -->
+        <meta-data
+            android:name="com.truecaller.android.sdk.ClientId"
+            android:value="@string/truecaller_client_id" />
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -95,6 +105,27 @@
             </intent-filter>
         </receiver>
 
+        <!-- Notification Action Broadcast Receiver -->
+        <receiver
+            android:name=".core.notification.NotificationActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.nexa.app.ACTION_NOTIFICATION_MARK_AS_READ" />
+                <action android:name="com.nexa.app.ACTION_NOTIFICATION_DECLINE_CALL" />
+                <action android:name="com.nexa.app.ACTION_NOTIFICATION_REPLY" />
+            </intent-filter>
+        </receiver>
+
+        <!-- System Timezone & Clock Change Receiver for Accurate Backup Rescheduling -->
+        <receiver
+            android:name=".core.receiver.TimezoneChangeReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+                <action android:name="android.intent.action.TIME_SET" />
+            </intent-filter>
+        </receiver>
+
         <!-- Direct P2P File Transfer Foreground Service -->
         <service
             android:name=".data.remote.service.P2PTransferService"
@@ -105,6 +136,12 @@
             android:name=".data.service.P2PTransferForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- WorkManager Foreground Service (DataSync) for Resilient Background Backups -->
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync"
+            tools:node="merge" />
 
         <!-- Secure FileProvider for Verified & Released Files (Fail-Closed) -->
         <provider

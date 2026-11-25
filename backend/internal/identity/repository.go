@@ -15,6 +15,7 @@ type IdentityRepository interface {
 	GetAccountByNxID(nxID string) (*UserAccount, bool)
 	GetAccountByPhone(phone string) (*UserAccount, bool)
 	GetAccountByGoogleID(googleID string) (*UserAccount, bool)
+	GetAccountByGoogleIDOrEmail(googleID, email string) (*UserAccount, bool)
 	GetAccountBySupabaseUID(supabaseUID string) (*UserAccount, bool)
 	GetAccountByPublicKey(pubKeyHex string) (*UserAccount, bool)
 

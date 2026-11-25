@@ -46,8 +46,17 @@ interface ChatRepository {
     fun stopConnection()
     fun getConnectionState(): StateFlow<ConnectionState>
     suspend fun handleIncomingDataSmsPacket(packet: NexaWirePacket)
+
+    /**
+     * Module 3: sends this device's SMS provisioning public key over the existing authenticated
+     * E2EE control channel. No secret is transmitted; only the public half.
+     */
+    suspend fun sendSmsKeyProvisioning(recipientNxId: String): Result<Unit> =
+        Result.failure(UnsupportedOperationException("SMS provisioning unavailable"))
     fun sendTypingIndicator(recipientNxId: String, conversationId: String, isTyping: Boolean)
     fun getTypingEvents(): Flow<Pair<String, Boolean>>
+    fun sendPresenceStatus(status: com.nexa.app.core.proto.PresenceStatus) {}
+    fun getPresenceEvents(): Flow<Pair<String, Boolean>> = kotlinx.coroutines.flow.emptyFlow()
     fun getPinnedMessages(conversationId: String): Flow<List<Message>> = kotlinx.coroutines.flow.emptyFlow()
     suspend fun pinMessage(packetId: String, conversationId: String, recipientNxId: String, durationMillis: Long?): Result<Unit> = Result.success(Unit)
     suspend fun unpinMessage(packetId: String, conversationId: String, recipientNxId: String): Result<Unit> = Result.success(Unit)
@@ -63,7 +72,9 @@ interface ChatRepository {
     suspend fun pinConversation(conversationId: String, isPinned: Boolean, pinPosition: Int = 0) {}
     suspend fun archiveConversation(conversationId: String, isArchived: Boolean) {}
     suspend fun muteConversation(conversationId: String, isMuted: Boolean, mutedUntil: Long = 0L) {}
+    suspend fun setConversationPriorityBackup(conversationId: String, isPriority: Boolean) {}
     fun getArchivedConversations(): Flow<List<ChatConversation>> = kotlinx.coroutines.flow.emptyFlow()
+    fun getPriorityConversations(): Flow<List<ChatConversation>> = kotlinx.coroutines.flow.emptyFlow()
 
     // --- Message Drafts ---
     fun getDraftFlow(conversationId: String): Flow<com.nexa.app.data.local.entity.ChatDraftEntity?> = kotlinx.coroutines.flow.emptyFlow()
@@ -77,6 +88,10 @@ interface ChatRepository {
     suspend fun addReaction(messageId: String, reaction: String): Result<Unit> = Result.success(Unit)
     suspend fun removeReaction(messageId: String): Result<Unit> = Result.success(Unit)
 
+    // --- Message Editing & Deletion ---
+    suspend fun editMessage(packetId: String, newContent: String): Result<Unit> = Result.success(Unit)
+    suspend fun deleteMessageForEveryone(packetId: String): Result<Unit> = Result.success(Unit)
+
     // --- Soft Delete & Starring ---
     suspend fun softDeleteMessage(packetId: String): Result<Unit> = Result.success(Unit)
     suspend fun starMessage(packetId: String, isStarred: Boolean): Result<Unit> = Result.success(Unit)
@@ -89,4 +104,6 @@ interface ChatRepository {
         caption: String = "",
         replyToMessageId: String? = null
     ): Result<Message> = Result.failure(UnsupportedOperationException())
+
+    suspend fun isUserBlocked(targetNxId: String): Boolean = false
 }

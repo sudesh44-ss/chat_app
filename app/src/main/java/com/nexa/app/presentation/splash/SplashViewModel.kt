@@ -38,20 +38,21 @@ class SplashViewModel(
                 // Smooth branded splash delay
                 delay(1200)
 
-                // Temporary development-only bypass: directly navigate to Home/Dashboard Screen
+                // Optional development-only bypass: directly navigate to Home/Dashboard Screen if explicitly enabled
                 if (AppLaunchConfig.isBypassAuthToHomeScreenEnabled) {
                     Log.i(TAG, "DEV_BYPASS_AUTH_TO_HOME_SCREEN is active: navigating directly to Home Screen")
                     _navigationState.value = SplashNavigationState.NavigateToDashboard
                     return@launch
                 }
 
-                val loggedIn = try {
-                    authRepository.isLoggedIn()
+                // Authentic startup flow: validate session, credentials, and onboarding state
+                val sessionValid = try {
+                    authRepository.validateSession()
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error checking session status in authRepository", e)
+                    Log.e(TAG, "Error validating session in authRepository", e)
                     false
                 }
-                if (loggedIn) {
+                if (sessionValid) {
                     _navigationState.value = SplashNavigationState.NavigateToDashboard
                 } else {
                     _navigationState.value = SplashNavigationState.NavigateToWelcome
