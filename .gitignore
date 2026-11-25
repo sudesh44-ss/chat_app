@@ -58,3 +58,5 @@ uidump.xml
 
 *google-services.json
 *release.keystore
+
+*sha-1.secret

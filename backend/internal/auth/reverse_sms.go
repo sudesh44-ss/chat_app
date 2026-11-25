@@ -648,7 +648,7 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 
 	if s.redisClient != nil {
 		if recordJSON, err := json.Marshal(record); err == nil {
-			radarRecord, _ := json.Marshal(map[string]interface{
+			radarRecord, _ := json.Marshal(map[string]interface{}{
 				"userId":        req.GoogleUID,
 				"expectedPhone": canonicalPhone,
 				"nonce":         nonce,
@@ -682,11 +682,6 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 		SmsPayloadSnake:       fmt.Sprintf("NEXA-VERIFY:%s:%s", nonce, sessionID),
 		ExpiresInSeconds:      120,
 		ExpiresInSecondsSnake: 120,
-	}, nil
-		InboundReceiverNumber: s.inboundReceiverNum,
-		InboundNumber:         s.inboundReceiverNum,
-		SmsPayload:            fmt.Sprintf("NEXA-VERIFY:%s:%s", nonce, sessionID),
-		ExpiresInSeconds:      90,
 	}, nil
 }
 
