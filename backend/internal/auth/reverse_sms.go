@@ -648,7 +648,7 @@ func (s *ReverseSmsService) InitiateVerification(req *InitiateReverseVerifyReque
 
 	if s.redisClient != nil {
 		if recordJSON, err := json.Marshal(record); err == nil {
-			radarRecord, _ := json.Marshal(map[string]interface{}{
+			radarRecord, _ := json.Marshal(map[string]interface{
 				"userId":        req.GoogleUID,
 				"expectedPhone": canonicalPhone,
 				"nonce":         nonce,
