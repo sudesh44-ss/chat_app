@@ -42,8 +42,11 @@ data class PhoneVerificationUiState(
     val otpCode: String = "",
     val isOtpSent: Boolean = false,
     val verificationId: String? = null,
+    val resendToken: com.google.firebase.auth.PhoneAuthProvider.ForceResendingToken? = null,
     val resendTimerSeconds: Int = 0,
-    val isFirebaseLoading: Boolean = false,
+    val isSendingOtp: Boolean = false,
+    val isResendingOtp: Boolean = false,
+    val isVerifyingOtp: Boolean = false,
     // SIM Radar
     val isRadarLoading: Boolean = false,
     // General
@@ -51,7 +54,8 @@ data class PhoneVerificationUiState(
     val errorMessage: String? = null,
     val successMessage: String? = null
 ) {
-    val canResendOtp: Boolean get() = resendTimerSeconds <= 0
+    val isFirebaseLoading: Boolean get() = isSendingOtp || isResendingOtp || isVerifyingOtp
+    val canResendOtp: Boolean get() = resendTimerSeconds <= 0 && !isResendingOtp
     val isOtpValid: Boolean get() = otpCode.length == 6 && otpCode.all { it.isDigit() }
     val isPhoneValid: Boolean
         get() {
@@ -70,6 +74,19 @@ class PhoneVerificationViewModel(
     val uiState: StateFlow<PhoneVerificationUiState> = _uiState.asStateFlow()
 
     private var timerJob: Job? = null
+
+    init {
+        viewModelScope.launch {
+            firebaseManager.state.collect { authState ->
+                if (authState is FirebaseAuthState.Verified) {
+                    if (_uiState.value.verifiedProfile == null && !_uiState.value.isVerifyingOtp) {
+                        _uiState.update { it.copy(isVerifyingOtp = true, errorMessage = null) }
+                        submitFirebaseTokenToBackend(authState.idToken)
+                    }
+                }
+            }
+        }
+    }
 
     fun initParams(
         phone: String,
@@ -114,7 +131,19 @@ class PhoneVerificationViewModel(
     }
 
     fun onPhoneNumberChanged(newPhone: String) {
-        _uiState.update { it.copy(phoneNumber = newPhone, errorMessage = null) }
+        if (newPhone != _uiState.value.phoneNumber) {
+            firebaseManager.reset()
+        }
+        _uiState.update {
+            it.copy(
+                phoneNumber = newPhone,
+                verificationId = null,
+                otpCode = "",
+                isOtpSent = false,
+                resendToken = null,
+                errorMessage = null
+            )
+        }
     }
 
     fun onOtpChanged(newOtp: String) {
@@ -159,6 +188,19 @@ class PhoneVerificationViewModel(
 
                             override fun onFailure(tcOAuthError: com.truecaller.android.sdk.oAuth.TcOAuthError) {
                                 val errorMsg = mapTruecallerError(tcOAuthError.errorCode, tcOAuthError.errorMessage)
+                                _uiState.update {
+                                    it.copy(
+                                        isTruecallerLoading = false,
+                                        errorMessage = errorMsg
+                                    )
+                                }
+                            }
+
+                            override fun onVerificationRequired(tcOAuthError: com.truecaller.android.sdk.oAuth.TcOAuthError?) {
+                                val errorMsg = mapTruecallerError(
+                                    tcOAuthError?.errorCode ?: 0,
+                                    tcOAuthError?.errorMessage ?: "Additional verification required. Please use SMS OTP."
+                                )
                                 _uiState.update {
                                     it.copy(
                                         isTruecallerLoading = false,
@@ -253,39 +295,98 @@ class PhoneVerificationViewModel(
         }
     }
 
-    fun sendFirebaseOtp(activity: android.app.Activity? = null) {
+    fun sendFirebaseOtp(activity: android.app.Activity? = null, isResend: Boolean = false) {
         val phone = _uiState.value.phoneNumber.trim()
         if (phone.length < 10) {
-            _uiState.update { it.copy(errorMessage = "Please enter a valid phone number") }
+            _uiState.update {
+                it.copy(
+                    isSendingOtp = false,
+                    isResendingOtp = false,
+                    errorMessage = "Please enter a valid phone number"
+                )
+            }
             return
         }
         viewModelScope.launch {
-            _uiState.update { it.copy(isFirebaseLoading = true, errorMessage = null) }
-            val result = firebaseManager.sendOtp(phone, activity)
-            result.fold(
-                onSuccess = { verId ->
-                    _uiState.update {
-                        it.copy(
-                            isFirebaseLoading = false,
-                            isOtpSent = true,
-                            verificationId = verId,
-                            errorMessage = null
-                        )
-                    }
-                    startResendTimer(60)
-                },
-                onFailure = { err ->
-                    val errorMsg = (firebaseManager.state.value as? FirebaseAuthState.Error)?.message
-                        ?: err.message
-                        ?: "Failed to send OTP"
-                    _uiState.update {
-                        it.copy(
-                            isFirebaseLoading = false,
-                            errorMessage = errorMsg
-                        )
-                    }
+            if (isResend) {
+                _uiState.update { it.copy(isResendingOtp = true, errorMessage = null) }
+            } else {
+                _uiState.update {
+                    it.copy(
+                        isSendingOtp = true,
+                        errorMessage = null,
+                        verificationId = null,
+                        otpCode = "",
+                        resendToken = null
+                    )
                 }
-            )
+            }
+            try {
+                val forceToken = if (isResend) _uiState.value.resendToken else null
+                val result = firebaseManager.sendOtp(
+                    phoneNumber = phone,
+                    activity = activity,
+                    forceResendingToken = forceToken,
+                    isResend = isResend
+                )
+                result.fold(
+                    onSuccess = { verId ->
+                        if (verId.startsWith("INSTANT_VERIFIED:")) {
+                            val idToken = verId.removePrefix("INSTANT_VERIFIED:")
+                            _uiState.update {
+                                it.copy(
+                                    isSendingOtp = false,
+                                    isResendingOtp = false,
+                                    isOtpSent = true,
+                                    isVerifyingOtp = true,
+                                    errorMessage = null
+                                )
+                            }
+                            submitFirebaseTokenToBackend(idToken)
+                        } else {
+                            _uiState.update {
+                                it.copy(
+                                    isSendingOtp = false,
+                                    isResendingOtp = false,
+                                    isOtpSent = true,
+                                    verificationId = verId,
+                                    resendToken = firebaseManager.getActiveResendToken(),
+                                    errorMessage = null
+                                )
+                            }
+                            startResendTimer(60)
+                        }
+                    },
+                    onFailure = { err ->
+                        val errorMsg = (firebaseManager.state.value as? FirebaseAuthState.Error)?.message
+                            ?: err.message
+                            ?: "Failed to send OTP"
+                        _uiState.update {
+                            it.copy(
+                                isSendingOtp = false,
+                                isResendingOtp = false,
+                                errorMessage = errorMsg
+                            )
+                        }
+                    }
+                )
+            } catch (e: Exception) {
+                val errorMsg = e.message ?: "Failed to send OTP"
+                _uiState.update {
+                    it.copy(
+                        isSendingOtp = false,
+                        isResendingOtp = false,
+                        errorMessage = errorMsg
+                    )
+                }
+            } finally {
+                _uiState.update {
+                    it.copy(
+                        isSendingOtp = false,
+                        isResendingOtp = false
+                    )
+                }
+            }
         }
     }
 
@@ -294,63 +395,91 @@ class PhoneVerificationViewModel(
         val verId = state.verificationId
         val code = state.otpCode
         if (verId == null || code.length != 6) {
-            _uiState.update { it.copy(errorMessage = "Please enter the full 6-digit code") }
+            _uiState.update {
+                it.copy(
+                    isVerifyingOtp = false,
+                    errorMessage = "Please enter the full 6-digit code"
+                )
+            }
             return
         }
         viewModelScope.launch {
-            _uiState.update { it.copy(isFirebaseLoading = true, errorMessage = null) }
-            val result = firebaseManager.verifyOtp(verId, code)
-            result.fold(
-                onSuccess = { idToken ->
-                    submitFirebaseTokenToBackend(idToken)
-                },
-                onFailure = { err ->
-                    val errorMsg = (firebaseManager.state.value as? FirebaseAuthState.Error)?.message
-                        ?: err.message
-                        ?: "Invalid OTP code"
-                    _uiState.update {
-                        it.copy(
-                            isFirebaseLoading = false,
-                            errorMessage = errorMsg
-                        )
+            _uiState.update { it.copy(isVerifyingOtp = true, errorMessage = null) }
+            try {
+                val result = firebaseManager.verifyOtp(verId, code)
+                result.fold(
+                    onSuccess = { idToken ->
+                        submitFirebaseTokenToBackend(idToken)
+                    },
+                    onFailure = { err ->
+                        val errorMsg = (firebaseManager.state.value as? FirebaseAuthState.Error)?.message
+                            ?: err.message
+                            ?: "Invalid OTP code"
+                        _uiState.update {
+                            it.copy(
+                                isVerifyingOtp = false,
+                                errorMessage = errorMsg
+                            )
+                        }
                     }
+                )
+            } catch (e: Exception) {
+                val errorMsg = e.message ?: "OTP verification failed"
+                _uiState.update {
+                    it.copy(
+                        isVerifyingOtp = false,
+                        errorMessage = errorMsg
+                    )
                 }
-            )
+            } finally {
+                _uiState.update { it.copy(isVerifyingOtp = false) }
+            }
         }
     }
 
     private suspend fun submitFirebaseTokenToBackend(idToken: String) {
         val s = _uiState.value
-        val result = firebaseManager.submitTokenToBackend(
-            idToken = idToken,
-            googleAuthToken = s.googleToken,
-            email = s.email,
-            name = s.name,
-            avatarUrl = s.avatarUrl,
-            gender = s.gender,
-            age = s.age,
-            bio = s.bio,
-            isReverify = s.isReverify
-        )
-        result.fold(
-            onSuccess = { profile ->
-                _uiState.update {
-                    it.copy(
-                        isFirebaseLoading = false,
-                        verifiedProfile = profile,
-                        successMessage = "Phone number verified via SMS OTP!"
-                    )
+        try {
+            val result = firebaseManager.submitTokenToBackend(
+                idToken = idToken,
+                googleAuthToken = s.googleToken,
+                email = s.email,
+                name = s.name,
+                avatarUrl = s.avatarUrl,
+                gender = s.gender,
+                age = s.age,
+                bio = s.bio,
+                isReverify = s.isReverify
+            )
+            result.fold(
+                onSuccess = { profile ->
+                    _uiState.update {
+                        it.copy(
+                            isVerifyingOtp = false,
+                            verifiedProfile = profile,
+                            successMessage = "Phone number verified via SMS OTP!"
+                        )
+                    }
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(
+                            isVerifyingOtp = false,
+                            errorMessage = err.message ?: "Backend verification failed"
+                        )
+                    }
                 }
-            },
-            onFailure = { err ->
-                _uiState.update {
-                    it.copy(
-                        isFirebaseLoading = false,
-                        errorMessage = err.message ?: "Backend verification failed"
-                    )
-                }
+            )
+        } catch (e: Exception) {
+            _uiState.update {
+                it.copy(
+                    isVerifyingOtp = false,
+                    errorMessage = e.message ?: "Backend verification failed"
+                )
             }
-        )
+        } finally {
+            _uiState.update { it.copy(isVerifyingOtp = false) }
+        }
     }
 
     private fun startResendTimer(seconds: Int) {

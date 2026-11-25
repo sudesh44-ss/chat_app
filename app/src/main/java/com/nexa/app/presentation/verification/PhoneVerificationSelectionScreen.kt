@@ -236,8 +236,11 @@ fun PhoneVerificationSelectionScreen(
                         onOtpChange = { viewModel.onOtpChanged(it) },
                         resendTimer = uiState.resendTimerSeconds,
                         canResend = uiState.canResendOtp,
-                        isLoading = uiState.isFirebaseLoading,
-                        onSendOtp = { viewModel.sendFirebaseOtp(activity) },
+                        isSendingOtp = uiState.isSendingOtp,
+                        isResendingOtp = uiState.isResendingOtp,
+                        isVerifyingOtp = uiState.isVerifyingOtp,
+                        onSendOtp = { viewModel.sendFirebaseOtp(activity, isResend = false) },
+                        onResendOtp = { viewModel.sendFirebaseOtp(activity, isResend = true) },
                         onVerifyOtp = { viewModel.verifyFirebaseOtp() }
                     )
                 }
@@ -433,8 +436,11 @@ private fun FirebaseOtpCard(
     onOtpChange: (String) -> Unit,
     resendTimer: Int,
     canResend: Boolean,
-    isLoading: Boolean,
+    isSendingOtp: Boolean,
+    isResendingOtp: Boolean,
+    isVerifyingOtp: Boolean,
     onSendOtp: () -> Unit,
+    onResendOtp: () -> Unit,
     onVerifyOtp: () -> Unit
 ) {
     Card(
@@ -498,13 +504,13 @@ private fun FirebaseOtpCard(
             if (!isOtpSent) {
                 Button(
                     onClick = onSendOtp,
-                    enabled = phoneNumber.trim().length >= 10 && !isLoading,
+                    enabled = phoneNumber.trim().length >= 10 && !isSendingOtp,
                     shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(50.dp)
                 ) {
-                    if (isLoading) {
+                    if (isSendingOtp) {
                         CircularProgressIndicator(
                             color = MaterialTheme.colorScheme.onPrimary,
                             strokeWidth = 2.dp,
@@ -550,21 +556,37 @@ private fun FirebaseOtpCard(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         } else {
-                            TextButton(onClick = onSendOtp) {
-                                Text("Resend Code", fontWeight = FontWeight.SemiBold)
+                            TextButton(
+                                onClick = onResendOtp,
+                                enabled = !isResendingOtp && !isVerifyingOtp
+                            ) {
+                                if (isResendingOtp) {
+                                    Row(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        CircularProgressIndicator(
+                                            strokeWidth = 2.dp,
+                                            modifier = Modifier.size(14.dp)
+                                        )
+                                        Text("Resending...", fontWeight = FontWeight.SemiBold)
+                                    }
+                                } else {
+                                    Text("Resend Code", fontWeight = FontWeight.SemiBold)
+                                }
                             }
                         }
                     }
 
                     Button(
                         onClick = onVerifyOtp,
-                        enabled = otpCode.length == 6 && !isLoading,
+                        enabled = otpCode.length == 6 && !isVerifyingOtp,
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(50.dp)
                     ) {
-                        if (isLoading) {
+                        if (isVerifyingOtp) {
                             CircularProgressIndicator(
                                 color = MaterialTheme.colorScheme.onPrimary,
                                 strokeWidth = 2.dp,

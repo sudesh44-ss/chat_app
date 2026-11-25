@@ -96,6 +96,15 @@
             </intent-filter>
         </activity>
 
+        <!-- Firebase Cloud Messaging Wake-Up Service (Zero-Knowledge Silent Push) -->
+        <service
+            android:name=".data.remote.push.NexaFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- Push Wake-Up Broadcast Receiver (Secured: Internal only) -->
         <receiver
             android:name=".data.remote.push.NexaPushWakeUpReceiver"

@@ -659,14 +659,16 @@ class ChatRepositoryImpl(
     }
 
     override fun sendTypingIndicator(recipientNxId: String, conversationId: String, isTyping: Boolean) {
-        if (contactDao?.isUserBlockedSync(recipientNxId) == true) {
-            return
+        scope.launch {
+            if (contactDao?.isUserBlocked(recipientNxId) == true) {
+                return@launch
+            }
+            if (chatPrivacyPrefs?.typingIndicatorMode == TypingPrivacyMode.NOBODY) {
+                Log.d(TAG, "Typing indicator suppressed by user privacy gatekeeper (Zero Server Knowledge)")
+                return@launch
+            }
+            webSocketManager.sendTyping(recipientNxId, conversationId, isTyping)
         }
-        if (chatPrivacyPrefs?.typingIndicatorMode == TypingPrivacyMode.NOBODY) {
-            Log.d(TAG, "Typing indicator suppressed by user privacy gatekeeper (Zero Server Knowledge)")
-            return
-        }
-        webSocketManager.sendTyping(recipientNxId, conversationId, isTyping)
     }
 
     override fun getTypingEvents(): Flow<Pair<String, Boolean>> = _typingFlow.asSharedFlow()

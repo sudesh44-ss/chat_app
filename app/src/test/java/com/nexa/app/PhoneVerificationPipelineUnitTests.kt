@@ -396,6 +396,8 @@ class PhoneVerificationPipelineUnitTests {
             signature: String?,
             requestNonce: String?,
             accessToken: String?,
+            authorizationCode: String?,
+            codeVerifier: String?,
             googleAuthToken: String?,
             email: String?,
             name: String?,

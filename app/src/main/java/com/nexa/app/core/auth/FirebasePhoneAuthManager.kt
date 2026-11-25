@@ -5,7 +5,6 @@ import android.util.Log
 import com.google.firebase.FirebaseException
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.FirebaseAuthInvalidCredentialsException
-import com.google.firebase.auth.FirebaseTooManyRequestsException
 import com.google.firebase.auth.PhoneAuthCredential
 import com.google.firebase.auth.PhoneAuthOptions
 import com.google.firebase.auth.PhoneAuthProvider
@@ -65,40 +64,87 @@ class FirebasePhoneAuthManager(
         const val MOCK_ID_TOKEN = "mock_firebase_id_token_test_mode"
 
         /**
+         * Normalizes phone numbers to standard E.164 (+91XXXXXXXXXX) format.
+         * Strips whitespace, hyphens, and domestic prefixes.
+         */
+        fun formatPhoneE164(input: String, defaultCountryCode: String = "+91"): String {
+            val trimmed = input.trim()
+            val stripped = trimmed.replace(Regex("[\\s\\-\\(\\)]"), "")
+            return when {
+                stripped.startsWith("+") -> {
+                    "+" + stripped.substring(1).replace(Regex("[^0-9]"), "")
+                }
+                stripped.startsWith("00") -> {
+                    "+" + stripped.substring(2).replace(Regex("[^0-9]"), "")
+                }
+                stripped.startsWith("0") -> {
+                    defaultCountryCode + stripped.substring(1).replace(Regex("[^0-9]"), "")
+                }
+                stripped.length == 10 && stripped.all { it.isDigit() } -> {
+                    defaultCountryCode + stripped
+                }
+                stripped.startsWith("91") && stripped.length == 12 && stripped.all { it.isDigit() } -> {
+                    "+" + stripped
+                }
+                else -> {
+                    "+" + stripped.replace(Regex("[^0-9]"), "")
+                }
+            }
+        }
+
+        /**
          * Parses and maps Firebase exceptions to actionable, user-friendly diagnostic messages.
          */
         fun mapFirebaseException(e: Throwable): Pair<String, String> {
             val msg = e.message ?: ""
             val className = e.javaClass.simpleName
+            val fbErrorCode = (e as? com.google.firebase.auth.FirebaseAuthException)?.errorCode
+            val codeSuffix = if (!fbErrorCode.isNullOrBlank()) " [$fbErrorCode]" else ""
+            val rawDetail = if (msg.isNotBlank()) ": $msg" else ""
             return when {
                 e is FirebaseAuthInvalidCredentialsException ||
                 className.contains("FirebaseAuthInvalidCredentialsException") ||
+                fbErrorCode == "ERROR_INVALID_VERIFICATION_CODE" ||
+                fbErrorCode == "ERROR_INVALID_PHONE_NUMBER" ||
                 msg.contains("invalid-verification-code", ignoreCase = true) ||
                 msg.contains("invalid phone", ignoreCase = true) -> {
-                    "Invalid phone number or OTP verification code. Please check and try again." to "INVALID_CREDENTIALS"
+                    "Invalid phone number or OTP code$codeSuffix$rawDetail" to (fbErrorCode ?: "INVALID_CREDENTIALS")
                 }
-                e is FirebaseTooManyRequestsException ||
                 className.contains("FirebaseTooManyRequestsException") ||
+                className.contains("TooManyRequests") ||
+                fbErrorCode == "ERROR_TOO_MANY_REQUESTS" ||
+                fbErrorCode == "ERROR_QUOTA_EXCEEDED" ||
                 msg.contains("too-many-requests", ignoreCase = true) ||
                 msg.contains("quota exceeded", ignoreCase = true) -> {
-                    "SMS quota exceeded. Please try again later or use Truecaller or SIM Radar." to "QUOTA_EXCEEDED"
+                    "SMS quota exceeded (10 SMS/day on Firebase free tier). Use Truecaller or add test numbers in Firebase Console$codeSuffix$rawDetail" to (fbErrorCode ?: "QUOTA_EXCEEDED")
                 }
+                fbErrorCode == "ERROR_APP_NOT_AUTHORIZED" ||
+                fbErrorCode == "ERROR_MISSING_CLIENT_IDENTIFIER" ||
                 msg.contains("Play Integrity", ignoreCase = true) ||
                 msg.contains("app verification failed", ignoreCase = true) ||
                 msg.contains("sha-1", ignoreCase = true) ||
                 msg.contains("sha-256", ignoreCase = true) ||
                 msg.contains("recaptcha", ignoreCase = true) ||
                 msg.contains("safetyNet", ignoreCase = true) -> {
-                    "App verification failed. Ensure SHA-1 & SHA-256 fingerprints are registered in Firebase Console and Play Integrity is enabled." to "INTEGRITY_CHECK_FAILED"
+                    "App verification failed. Ensure SHA-1 is in Firebase Console & Play Integrity is enabled$codeSuffix$rawDetail" to (fbErrorCode ?: "INTEGRITY_CHECK_FAILED")
                 }
+                fbErrorCode == "ERROR_OPERATION_NOT_ALLOWED" ||
+                msg.contains("operation-not-allowed", ignoreCase = true) -> {
+                    "Phone Provider disabled in Firebase Console. Enable Phone Auth in Firebase Console > Authentication > Sign-in method$codeSuffix$rawDetail" to (fbErrorCode ?: "OPERATION_NOT_ALLOWED")
+                }
+                msg.contains("DEVELOPMENT_MODE_MISMATCH", ignoreCase = true) ||
+                fbErrorCode == "ERROR_DEVELOPMENT_MODE_MISMATCH" -> {
+                    "Development mode session mismatch. Cached session has been cleared, please try requesting OTP again$codeSuffix$rawDetail" to (fbErrorCode ?: "DEVELOPMENT_MODE_MISMATCH")
+                }
+                fbErrorCode == "ERROR_BILLING_NOT_ENABLED" ||
                 msg.contains("blocked", ignoreCase = true) ||
-                msg.contains("+91") ||
                 msg.contains("SMS region", ignoreCase = true) ||
                 msg.contains("billing", ignoreCase = true) -> {
-                    "SMS delivery to +91 is blocked. Please ensure India is enabled in Firebase SMS Region Policy or use Truecaller." to "REGION_BLOCKED"
+                    "SMS delivery restricted by Firebase policy or region$codeSuffix$rawDetail" to (fbErrorCode ?: "REGION_BLOCKED")
                 }
                 else -> {
-                    (if (msg.isNotBlank()) msg else "Phone verification failed") to "VERIFICATION_ERROR"
+                    val fallback = if (msg.isNotBlank()) msg else "Phone verification failed ($className)"
+                    "$fallback$codeSuffix" to (fbErrorCode ?: "VERIFICATION_ERROR")
                 }
             }
         }
@@ -109,20 +155,34 @@ class FirebasePhoneAuthManager(
 
     private var activeVerificationId: String? = null
     private var activePhone: String? = null
+    private var activeResendToken: PhoneAuthProvider.ForceResendingToken? = null
+    private var activeResendTokenPhone: String? = null
+
+    fun getActiveResendToken(): PhoneAuthProvider.ForceResendingToken? = activeResendToken
 
     /**
      * Sends a 6-digit SMS verification code to the target phone number.
      * Enforces that [activity] is provided (never passes Application context).
+     * Attaches [forceResendingToken] if this is a resend request.
      */
     suspend fun sendOtp(
         phoneNumber: String,
-        activity: Activity? = null
+        activity: Activity? = null,
+        forceResendingToken: PhoneAuthProvider.ForceResendingToken? = null,
+        isResend: Boolean = false
     ): Result<String> = withContext(ioDispatcher) {
-        val cleanPhone = phoneNumber.trim()
-        if (cleanPhone.length < 8) {
-            val err = "Invalid phone number format"
+        val cleanPhone = formatPhoneE164(phoneNumber)
+        if (cleanPhone.length < 10) {
+            val err = "Invalid phone number format: $phoneNumber"
             _state.value = FirebaseAuthState.Error(err, "INVALID_PHONE")
             return@withContext Result.failure(IllegalArgumentException(err))
+        }
+
+        // 1. Flush stale session state on fresh OTP requests or if phone number changed
+        if (!isResend || cleanPhone != activeResendTokenPhone) {
+            activeVerificationId = null
+            activeResendToken = null
+            activeResendTokenPhone = null
         }
 
         _state.value = FirebaseAuthState.SendingOtp(cleanPhone)
@@ -149,13 +209,30 @@ class FirebasePhoneAuthManager(
 
         try {
             val firebaseAuth = FirebaseAuth.getInstance()
-            Log.i(TAG, "Triggering Firebase Phone Auth for $cleanPhone with Activity: ${activity.localClassName}")
+
+            // Clear any cached development / test mode user session prior to fresh OTP dispatch
+            if (!isResend) {
+                runCatching {
+                    firebaseAuth.signOut()
+                    Log.i(TAG, "Cleared cached FirebaseAuth user session prior to fresh OTP dispatch")
+                }
+            }
+
+            Log.i(TAG, "Triggering Firebase Phone Auth for $cleanPhone (isResend: $isResend) with Activity: ${activity.localClassName}")
 
             return@withContext suspendCancellableCoroutine<Result<String>> { continuation ->
                 val callbacks = object : PhoneAuthProvider.OnVerificationStateChangedCallbacks() {
                     override fun onVerificationCompleted(credential: PhoneAuthCredential) {
                         Log.i(TAG, "Instant verification completed by carrier / SMS Retriever")
-                        handleInstantVerification(firebaseAuth, credential)
+                        val code = credential.smsCode
+                        if (!code.isNullOrBlank()) {
+                            Log.i(TAG, "SMS Retriever auto-extracted code: $code")
+                        }
+                        handleInstantVerification(firebaseAuth, credential) { verifiedResult ->
+                            if (continuation.isActive) {
+                                continuation.resume(verifiedResult)
+                            }
+                        }
                     }
 
                     override fun onVerificationFailed(exception: FirebaseException) {
@@ -173,6 +250,8 @@ class FirebasePhoneAuthManager(
                     ) {
                         Log.i(TAG, "Firebase OTP Code sent, verificationId: $verificationId")
                         activeVerificationId = verificationId
+                        activeResendToken = token
+                        activeResendTokenPhone = cleanPhone
                         _state.value = FirebaseAuthState.CodeSent(
                             verificationId = verificationId,
                             phone = cleanPhone,
@@ -184,13 +263,30 @@ class FirebasePhoneAuthManager(
                     }
                 }
 
-                val options = PhoneAuthOptions.newBuilder(firebaseAuth)
+                // Ensure activeResendToken is ONLY attached to PhoneAuthOptions.Builder when isResend == true
+                // AND the target cleanPhone matches the exact phone number for which that token was issued
+                val tokenToUse = if (isResend) {
+                    when {
+                        forceResendingToken != null -> forceResendingToken
+                        activeResendToken != null && activeResendTokenPhone == cleanPhone -> activeResendToken
+                        else -> null
+                    }
+                } else {
+                    null
+                }
+
+                val builder = PhoneAuthOptions.newBuilder(firebaseAuth)
                     .setPhoneNumber(cleanPhone)
                     .setTimeout(60L, TimeUnit.SECONDS)
                     .setActivity(activity)
                     .setCallbacks(callbacks)
-                    .build()
 
+                if (tokenToUse != null) {
+                    builder.setForceResendingToken(tokenToUse)
+                    Log.i(TAG, "Attached ForceResendingToken for Firebase Phone Auth resend to $cleanPhone")
+                }
+
+                val options = builder.build()
                 PhoneAuthProvider.verifyPhoneNumber(options)
             }
 
@@ -202,25 +298,45 @@ class FirebasePhoneAuthManager(
         }
     }
 
-    private fun handleInstantVerification(firebaseAuth: FirebaseAuth, credential: PhoneAuthCredential) {
+    private fun handleInstantVerification(
+        firebaseAuth: FirebaseAuth,
+        credential: PhoneAuthCredential,
+        onComplete: ((Result<String>) -> Unit)? = null
+    ) {
         try {
             firebaseAuth.signInWithCredential(credential)
                 .addOnSuccessListener { authResult ->
-                    authResult.user?.getIdToken(false)?.addOnSuccessListener { tokenResult ->
+                    authResult.user?.getIdToken(true)?.addOnSuccessListener { tokenResult ->
                         val token = tokenResult.token
                         if (!token.isNullOrBlank()) {
+                            val phone = activePhone ?: ""
                             _state.value = FirebaseAuthState.Verified(
                                 idToken = token,
-                                phone = activePhone ?: ""
+                                phone = phone
                             )
+                            onComplete?.invoke(Result.success("INSTANT_VERIFIED:$token"))
+                        } else {
+                            val err = Exception("Firebase returned empty ID token during instant verification")
+                            _state.value = FirebaseAuthState.Error(err.message ?: "", "EMPTY_TOKEN")
+                            onComplete?.invoke(Result.failure(err))
                         }
+                    }?.addOnFailureListener { e ->
+                        val (mappedMsg, code) = mapFirebaseException(e)
+                        _state.value = FirebaseAuthState.Error(mappedMsg, code)
+                        onComplete?.invoke(Result.failure(e))
                     }
                 }
                 .addOnFailureListener { e ->
-                    Log.e(TAG, "Failed handling instant verification credential", e)
+                    val (mappedMsg, code) = mapFirebaseException(e)
+                    Log.e(TAG, "Failed handling instant verification credential: $mappedMsg", e)
+                    _state.value = FirebaseAuthState.Error(mappedMsg, code)
+                    onComplete?.invoke(Result.failure(e))
                 }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed handling instant verification credential", e)
+            val (mappedMsg, code) = mapFirebaseException(e)
+            Log.e(TAG, "Exception handling instant verification credential", e)
+            _state.value = FirebaseAuthState.Error(mappedMsg, code)
+            onComplete?.invoke(Result.failure(e))
         }
     }
 
@@ -240,8 +356,8 @@ class FirebasePhoneAuthManager(
 
         _state.value = FirebaseAuthState.VerifyingOtp
 
-        // Check test/development mode OTP
-        if (isTestMode || cleanCode == TEST_VALID_OTP || cleanCode == "654321") {
+        // Check test/development mode OTP (strictly isolated to testMode)
+        if (isTestMode) {
             val mockToken = "mock_jwt_firebase_" + UUID.randomUUID().toString()
             val phone = activePhone ?: "+919876543210"
             _state.value = FirebaseAuthState.Verified(idToken = mockToken, phone = phone)
@@ -258,7 +374,7 @@ class FirebasePhoneAuthManager(
                     .addOnSuccessListener { authResult ->
                         val user = authResult.user
                         if (user != null) {
-                            user.getIdToken(false)
+                            user.getIdToken(true)
                                 .addOnSuccessListener { tokenResult ->
                                     val idToken = tokenResult.token
                                     if (!idToken.isNullOrBlank()) {
@@ -346,6 +462,9 @@ class FirebasePhoneAuthManager(
     fun reset() {
         activeVerificationId = null
         activePhone = null
+        activeResendToken = null
+        activeResendTokenPhone = null
+        runCatching { FirebaseAuth.getInstance().signOut() }
         _state.value = FirebaseAuthState.Idle
     }
 }

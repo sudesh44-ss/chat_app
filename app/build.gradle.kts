@@ -102,12 +102,13 @@ dependencies {
     implementation(libs.play.services.auth.api.phone)
     implementation(libs.play.services.nearby)
 
-    // Firebase Auth BoM
+    // Firebase Auth BoM & Cloud Messaging
     implementation(platform("com.google.firebase:firebase-bom:33.5.1"))
     implementation("com.google.firebase:firebase-auth-ktx")
+    implementation("com.google.firebase:firebase-messaging-ktx")
 
-    // Truecaller 1-Tap OAuth SDK v3
-    implementation("com.truecaller.android.sdk:truesdk-v3:3.1.2")
+    // Truecaller 1-Tap OAuth SDK
+    implementation("com.truecaller.android.sdk:truecaller-sdk:3.0.0")
 
     // WorkManager (Background opportunistic sync)
     implementation(libs.androidx.work.runtime.ktx)
